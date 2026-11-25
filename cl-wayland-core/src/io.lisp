@@ -18,6 +18,41 @@
 (in-package #:wayland.io)
 
 ;;; ---------------------------------------------------------------------------
+;;; Where the socket lives
+;;; ---------------------------------------------------------------------------
+;;
+;; Both ends need this rule and neither owns it: WAYLAND_DISPLAY names the
+;; socket, an absolute name is used as-is (the nested and CI case), otherwise it
+;; lives in $XDG_RUNTIME_DIR.  The client connects to it, the server creates it.
+
+(define-condition socket-path-error (error)
+  ((detail :initarg :detail :reader socket-path-error-detail))
+  (:report (lambda (condition stream)
+             (format stream "cannot determine the socket path: ~A"
+                     (socket-path-error-detail condition)))))
+
+(defun socket-path (&key display-name
+                         (wayland-display (uiop:getenv "WAYLAND_DISPLAY"))
+                         (runtime-dir (uiop:getenv "XDG_RUNTIME_DIR")))
+  "The socket path named by the environment, or by the arguments.
+
+DISPLAY-NAME wins over WAYLAND-DISPLAY, which wins over \"wayland-0\"; passing
+NIL for both is how a caller asks for the bare default regardless of the
+environment.  A name may be absolute, which is how a nested compositor names its
+socket; otherwise it lives in RUNTIME-DIR."
+  (let ((name (or display-name wayland-display "wayland-0")))
+    (cond
+      ((zerop (length name))
+       (error 'socket-path-error :detail "WAYLAND_DISPLAY is empty"))
+      ((char= (char name 0) #\/)
+       name)
+      ((null runtime-dir)
+       (error 'socket-path-error
+              :detail "XDG_RUNTIME_DIR is not set, and WAYLAND_DISPLAY is not an absolute path"))
+      (t
+       (format nil "~A/~A" (string-right-trim "/" runtime-dir) name)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Outbound
 ;;; ---------------------------------------------------------------------------
 

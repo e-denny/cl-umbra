@@ -50,6 +50,31 @@
 (defconstant +emsgsize+ 90)
 (defconstant +econnreset+ 104)
 (defconstant +enametoolong+ 36)
+(defconstant +enoent+ 2)
+(defconstant +eperm+ 1)
+(defconstant +eacces+ 13)
+(defconstant +eexist+ 17)
+(defconstant +enotdir+ 20)
+(defconstant +eisdir+ 21)
+(defconstant +enotsock+ 88)
+(defconstant +eopnotsupp+ 95)
+(defconstant +eaddrinuse+ 98)
+(defconstant +econnaborted+ 103)
+(defconstant +enotsup+ 95)
+
+;; open(2) and fcntl(2) values a server needs: a lock file it keeps open for the
+;; lifetime of the socket, and the listening socket itself.
+(defconstant +o-rdwr+ 2)
+(defconstant +o-creat+ #x40)
+(defconstant +o-cloexec+ #x80000)
+;; flock(2): LOCK_EX | LOCK_NB.  Advisory, per open file description, which is
+;; what makes two servers in one image (a nested compositor, a test harness)
+;; conflict correctly -- POSIX record locks are per process and would not.
+(defconstant +lock-ex+ 2)
+(defconstant +lock-nb+ 4)
+
+;; getsockopt(SO_PEERCRED): who owns the other end of the connection.
+(defconstant +so-peercred+ 17)
 
 ;;; ---------------------------------------------------------------------------
 ;;; C structures
@@ -81,6 +106,13 @@
   (family :unsigned-short)
   (path (:array :char 108)))
 
+;; struct ucred, linux/socket.h: the pid, uid and gid SO_PEERCRED reports.
+(cffi:defcstruct (ucred :conc-name ucred-)
+  (pid :int)
+  (uid :unsigned-int)
+  (gid :unsigned-int))
+
+
 (defconstant +cmsghdr-size+ 16
   "sizeof(struct cmsghdr) on 64-bit Linux: 8 + 4 + 4, no tail padding.")
 
@@ -101,13 +133,17 @@ which is the proof we want; other implementations simply run the check."
                (= 8 (cffi:foreign-type-size :size))
                (= 16 (cffi:foreign-type-size '(:struct cmsghdr)))
                (= 16 (cffi:foreign-type-size '(:struct iovec)))
-               (= 56 (cffi:foreign-type-size '(:struct msghdr))))
-    (error "wayland.ffi: unexpected ABI (pointer ~D, size_t ~D, cmsghdr ~D, iovec ~D, msghdr ~D); check the struct layouts against linux/socket.h"
+               (= 56 (cffi:foreign-type-size '(:struct msghdr)))
+               (= 110 (cffi:foreign-type-size '(:struct sockaddr-un)))
+               (= 12 (cffi:foreign-type-size '(:struct ucred))))
+    (error "wayland.ffi: unexpected ABI (pointer ~D, size_t ~D, cmsghdr ~D, iovec ~D, msghdr ~D, sockaddr_un ~D, ucred ~D); check the struct layouts against linux/socket.h"
            (cffi:foreign-type-size :pointer)
            (cffi:foreign-type-size :size)
            (cffi:foreign-type-size '(:struct cmsghdr))
            (cffi:foreign-type-size '(:struct iovec))
-           (cffi:foreign-type-size '(:struct msghdr)))))
+           (cffi:foreign-type-size '(:struct msghdr))
+           (cffi:foreign-type-size '(:struct sockaddr-un))
+           (cffi:foreign-type-size '(:struct ucred)))))
 
 (eval-when (:load-toplevel :execute)
   (check-abi))
@@ -137,8 +173,39 @@ which is the proof we want; other implementations simply run the check."
 (cffi:defcfun ("fcntl" %fcntl) :int
   (fd :int) (command :int) (argument :int))
 
+(cffi:defcfun ("flock" %flock) :int
+  (fd :int) (operation :int))
+
 (cffi:defcfun ("memfd_create" %memfd-create) :int
   (name :string) (flags :unsigned-int))
+
+(cffi:defcfun ("bind" %bind) :int
+  (fd :int) (address :pointer) (length :unsigned-int))
+
+(cffi:defcfun ("listen" %listen) :int
+  (fd :int) (backlog :int))
+
+(cffi:defcfun ("accept4" %accept4) :int
+  (fd :int) (address :pointer) (length :pointer) (flags :int))
+
+(cffi:defcfun ("getsockopt" %getsockopt) :int
+  (fd :int) (level :int) (name :int) (value :pointer) (length :pointer))
+
+(cffi:defcfun ("open" %open) :int
+  (path :string) (flags :int) (mode :unsigned-int))
+
+(cffi:defcfun ("chmod" %chmod) :int
+  (path :string) (mode :unsigned-int))
+
+(cffi:defcfun ("ftruncate" %ftruncate) :int
+  (fd :int) (length :long))
+
+(cffi:defcfun ("lseek" %lseek) :long
+  (fd :int) (offset :long) (whence :int))
+
+(cffi:defcfun ("getpid" %getpid) :int)
+
+(cffi:defcfun ("geteuid" %geteuid) :unsigned-int)
 
 (cffi:defcfun ("__errno_location" %errno-location) :pointer)
 
@@ -243,6 +310,21 @@ default so a pool can never leak into xwayland or a spawned client."
 ;;; Connecting
 ;;; ---------------------------------------------------------------------------
 
+(defun fill-sockaddr-un (address path operation)
+  "Write PATH into ADDRESS as an AF_UNIX address; return its length."
+  (let ((path-field (cffi:foreign-slot-pointer address '(:struct sockaddr-un) 'path)))
+    (setf (cffi:foreign-slot-value address '(:struct sockaddr-un) 'family) +af-unix+)
+    (cffi:with-foreign-string (octets path)
+      (let ((octets-length (%strlen octets)))
+        (when (>= octets-length +unix-path-max+)
+          (error 'io-error :operation operation :errno +enametoolong+))
+        ;; A byte loop rather than memcpy: at most 108 octets, and the NUL
+        ;; must be copied too, because WITH-FOREIGN-OBJECT does not zero.
+        (loop for index from 0 to octets-length
+              do (setf (cffi:mem-aref path-field :char index)
+                       (cffi:mem-aref octets :char index))))))
+  (cffi:foreign-type-size '(:struct sockaddr-un)))
+
 (defun connect-unix-socket (path &key (nonblocking t))
   "Connect to the AF_UNIX stream socket at PATH; return a close-on-exec descriptor.
 
@@ -257,32 +339,132 @@ EINPROGRESS from a broken socket."
     (when (minusp fd)
       (syscall-failed 'socket (errno)))
     (cffi:with-foreign-object (address '(:struct sockaddr-un))
-      (setf (cffi:foreign-slot-value address '(:struct sockaddr-un) 'family)
-            +af-unix+)
-      (cffi:with-foreign-string (octets path)
-        (let ((octets-length (%strlen octets)))
-          (when (>= octets-length +unix-path-max+)
+      (let ((length (fill-sockaddr-un address path 'connect)))
+        (when (minusp (%retry-on-eintr (lambda () (%connect fd address length))))
+          (let ((error-number (errno)))
             (close-fd fd)
-            (error 'io-error :operation 'connect :errno +enametoolong+))
-          ;; Copy the path and its NUL into sun_path.  A byte loop beats
-          ;; pulling in memcpy for at most 108 octets, and the struct was
-          ;; zeroed for us by WITH-FOREIGN-OBJECT?  It was not, which is why
-          ;; the NUL is copied explicitly.
-          (let ((path-field (cffi:foreign-slot-pointer address '(:struct sockaddr-un)
-                                                       'path)))
-            (loop for index from 0 to octets-length
-                  do (setf (cffi:mem-aref path-field :char index)
-                           (cffi:mem-aref octets :char index))))))
-      (when (minusp (%retry-on-eintr
-                     (lambda ()
-                       (%connect fd address
-                                 (cffi:foreign-type-size '(:struct sockaddr-un))))))
-        (let ((error-number (errno)))
-          (close-fd fd)
-          (syscall-failed 'connect error-number)))
+            (syscall-failed 'connect error-number))))
       (when nonblocking
         (set-fd-nonblocking fd))
       fd)))
+
+;;; ---------------------------------------------------------------------------
+;;; Listening, accepting, locking
+;;; ---------------------------------------------------------------------------
+
+(defun chmod-path (path mode)
+  "chmod(2) PATH; signal IO-ERROR on failure.
+
+UIOP has no chmod, and the socket-file permission is part of the protocol's
+security story (docs/protocol-layer.md §5), so it stays at the syscall edge.
+Deleting files is a different matter: call sites use UIOP:DELETE-FILE-IF-EXISTS,
+which already treats a missing file as success."
+  (when (minusp (%chmod path mode))
+    (syscall-failed 'chmod (errno)))
+  path)
+
+(defun listen-unix-socket (path &key (backlog 32) (mode #o700))
+  "Create a listening AF_UNIX stream socket at PATH and return its descriptor.
+
+The descriptor is non-blocking and close-on-exec from the moment it exists, so
+neither accept nor exec can leak it.  MODE is applied to the socket *file* with
+chmod(2), as libwayland does: fchmod does not work on sockets, and the runtime
+directory is a per-user 0700 directory, which is what makes the by-path call
+safe."
+  (let ((fd (%retry-on-eintr
+             (lambda () (%socket +af-unix+
+                                 (logior +sock-stream+ +sock-cloexec+ +sock-nonblock+)
+                                 0)))))
+    (when (minusp fd)
+      (syscall-failed 'socket (errno)))
+    (handler-case
+        (progn
+          (cffi:with-foreign-object (address '(:struct sockaddr-un))
+            (let ((length (fill-sockaddr-un address path 'bind)))
+              (when (minusp (%retry-on-eintr (lambda () (%bind fd address length))))
+                (syscall-failed 'bind (errno)))))
+          (when (minusp (%listen fd backlog))
+            (syscall-failed 'listen (errno)))
+          (chmod-path path mode)
+          fd)
+      (error (condition)
+        (close-fd fd)
+        (error condition)))))
+
+(defun accept-unix-socket (listening-fd)
+  "Accept one connection; return (values fd pid uid gid), or NIL when there is
+none waiting (EAGAIN).
+
+The accepted descriptor is non-blocking and close-on-exec by construction
+(accept4), and the peer's credentials are read immediately: they are needed for
+the log line and for the policy check, and after this call nothing else can ask
+for them."
+  (let ((fd (%retry-on-eintr
+             (lambda () (%accept4 listening-fd (cffi:null-pointer) (cffi:null-pointer)
+                                 (logior +sock-cloexec+ +sock-nonblock+))))))
+    (cond
+      ((>= fd 0)
+       (multiple-value-bind (pid uid gid) (unix-socket-peer-credentials fd)
+         (values fd pid uid gid)))
+      ;; A connection that died before we got to it is not our problem, and
+      ;; neither is an interrupted accept.
+      ((member (errno) (list +eagain+ +econnaborted+)) nil)
+      (t (syscall-failed 'accept (errno))))))
+
+(defun unix-socket-peer-credentials (fd)
+  "The pid, uid and gid of the process at the other end of FD (SO_PEERCRED)."
+  (cffi:with-foreign-object (credential '(:struct ucred))
+    (cffi:with-foreign-object (length :unsigned-int)
+      (setf (cffi:mem-ref length :unsigned-int)
+            (cffi:foreign-type-size '(:struct ucred)))
+      (when (minusp (%getsockopt fd +sol-socket+ +so-peercred+ credential length))
+        (syscall-failed 'getsockopt (errno)))
+      (values (ucred-pid credential)
+              (ucred-uid credential)
+              (ucred-gid credential)))))
+
+(defun effective-uid ()
+  "The real uid of this process, for the SO_PEERCRED policy check."
+  (%geteuid))
+
+(defun process-id ()
+  "This process's pid.  Servers write it into the socket lock file."
+  (%getpid))
+
+(defun open-lock-file (path &key (mode #o600))
+  "Create and exclusively lock PATH, truncate it, and write our pid into it.
+
+Returns the descriptor that *holds* the lock: closing it releases the lock, so
+the caller keeps it for as long as the socket exists.  A lock already held is an
+IO-ERROR with errno EAGAIN.
+
+flock(2) rather than POSIX record locks: a record lock belongs to the process,
+so two servers in the same image would both think they owned the name.  flock
+belongs to the open file description, so a nested compositor or a test harness
+gets the same answer a second process would."
+  (let ((fd (%retry-on-eintr
+             (lambda () (%open path (logior +o-rdwr+ +o-creat+ +o-cloexec+) mode)))))
+    (when (minusp fd)
+      (syscall-failed 'open (errno)))
+    (handler-case
+        (progn
+          (when (minusp (%retry-on-eintr
+                         (lambda () (%flock fd (logior +lock-ex+ +lock-nb+)))))
+            (let ((error-number (errno)))
+              (close-fd fd)
+              (syscall-failed 'lock error-number)))
+          (when (minusp (%ftruncate fd 0))
+            (syscall-failed 'ftruncate (errno)))
+          (let ((text (format nil "~10D~%" (%getpid))))
+            (cffi:with-foreign-string (buffer text)
+              (let ((written (write-from-pointer fd buffer (length text))))
+                (unless (= written (length text))
+                  (syscall-failed 'write +eagain+)))))
+          (chmod-path path mode)
+          fd)
+      (error (condition)
+        (close-fd fd)
+        (error condition)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; sendmsg / recvmsg

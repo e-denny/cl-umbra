@@ -19,11 +19,6 @@
 ;;; The client id range
 ;;; ---------------------------------------------------------------------------
 
-(defconstant +first-client-id+ 2
-  "Id 1 is always wl_display.")
-
-(defconstant +client-id-max+ #xFEFFFFFF
-  "The last id a client may choose; the server's range starts at #xFF000000.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Conditions
@@ -110,7 +105,7 @@ schema still owns the wire, so a subclass only adds state."))
 
 (defun object-for-id (display id)
   "The proxy for ID, or NIL."
-  (gethash id (display-objects display)))
+  (object-table-ref (display-objects display) id))
 
 (defun clamp-version (interface version)
   "The version to speak: between 1 and the interface's own maximum.
@@ -142,18 +137,15 @@ which the server cannot exceed either."
                                 :id id
                                 :interface interface
                                 :version version)))
-    (setf (gethash id (display-objects display)) object)
+    (object-table-set (display-objects display) id object)
     object))
 
 (defun allocate-id (display)
-  "The next free client id: a returned one first, then the counter."
-  (if (display-free-ids display)
-      (pop (display-free-ids display))
-      (let ((id (display-next-id display)))
-        (when (> id +client-id-max+)
-          (error 'id-exhausted))
-        (setf (display-next-id display) (1+ id))
-        id)))
+  "The lowest free client id: a returned one first, then the counter."
+  (handler-case
+      (allocate-client-id (display-objects display))
+    (wayland.object:id-space-exhausted ()
+      (error 'id-exhausted))))
 
 (defun check-live (object)
   "Signal DESTROYED-PROXY unless OBJECT is still usable.
@@ -177,12 +169,12 @@ reused."
 
 Called on wl_display.delete_id, which the server sends after it has destroyed
 an object the client created; after that event nothing may arrive for it again."
-  (let ((object (gethash id (display-objects display))))
+  (let ((object (object-table-remove (display-objects display) id)))
     (when object
-      (remhash id (display-objects display))
       (setf (proxy-destroyed-p object) t)
-      (when (>= id +first-client-id+)
-        (push id (display-free-ids display)))
+      ;; Only the client's half is recyclable; RELEASE-CLIENT-ID checks the
+      ;; range itself, so a server-chosen id can never collide with ours.
+      (release-client-id (display-objects display) id)
       object)))
 
 ;;; ---------------------------------------------------------------------------

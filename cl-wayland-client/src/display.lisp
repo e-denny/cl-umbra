@@ -27,10 +27,9 @@
    (reactor :initarg :reactor :reader display-reactor)
    (input :initform (make-input-buffer) :reader display-input)
    (output :initform (make-message-buffer :capacity 4096) :reader display-output)
-   (objects :initform (make-hash-table :test #'eql) :reader display-objects)
-   (next-id :initform +first-client-id+ :accessor display-next-id)
-   ;; Ids the server released with wl_display.delete_id, newest first.
-   (free-ids :initform nil :accessor display-free-ids)
+   ;; Ids and objects in one table (wayland.object): the client half of the
+   ;; shared namespace, 2 .. +CLIENT-ID-MAX+, allocated lowest-free-first.
+   (objects :initform (make-object-table) :reader display-objects)
    (source :initform nil :accessor display-source)
    (closed-p :initform nil :accessor display-closed-p))
   (:documentation
@@ -46,22 +45,15 @@ DISCONNECT releases all three."))
                          (runtime-dir (uiop:getenv "XDG_RUNTIME_DIR")))
   "The socket path to connect to (docs/protocol-layer.md §5).
 
-The name comes from DISPLAY-NAME, else WAYLAND-DISPLAY (defaulting to the
-environment), else \"wayland-0\"; passing NIL for both is how a caller -- or a
-test -- asks for the bare default regardless of the environment.  A name may be
-absolute, which is how a nested compositor names its socket; otherwise it lives
-in RUNTIME-DIR."
-  (let ((name (or display-name wayland-display "wayland-0")))
-    (cond
-      ((zerop (length name))
-       (error 'client-error :detail "WAYLAND_DISPLAY is empty"))
-      ((char= (char name 0) #\/)
-       name)
-      ((null runtime-dir)
-       (error 'client-error
-              :detail "XDG_RUNTIME_DIR is not set, and WAYLAND_DISPLAY is not an absolute path"))
-      (t
-       (format nil "~A/~A" (string-right-trim "/" runtime-dir) name)))))
+The rule itself lives in WAYLAND.IO:SOCKET-PATH, because the server creates the
+socket the client connects to and the two must agree.  Here it is re-signalled
+as a CLIENT-ERROR, the condition this package reports everything in."
+  (handler-case
+      (wayland.io:socket-path :display-name display-name
+                              :wayland-display wayland-display
+                              :runtime-dir runtime-dir)
+    (wayland.io:socket-path-error (condition)
+      (error 'client-error :detail (wayland.io:socket-path-error-detail condition)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Connecting
@@ -86,7 +78,7 @@ The display takes ownership of FD and REACTOR: DISCONNECT closes both."
                                 :socket fd
                                 :reactor reactor)))
     (setf (proxy-display display) display)
-    (setf (gethash 1 (display-objects display)) display)
+    (object-table-set (display-objects display) 1 display)
     (setf (display-source display)
           (add-source reactor fd
                       :name "wayland display"
@@ -116,7 +108,8 @@ The display takes ownership of FD and REACTOR: DISCONNECT closes both."
       (setf (display-source display) nil))
     (close-fd (display-socket display))
     (close-reactor (display-reactor display))
-    (clrhash (display-objects display))
+    ;; The object table dies with the display; its entries are proxies the GC
+    ;; will collect, and a closed connection has no ids left to reclaim.
     (setf (proxy-destroyed-p display) t))
   t)
 

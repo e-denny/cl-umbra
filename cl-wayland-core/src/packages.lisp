@@ -94,9 +94,21 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:+eagain+
    #:+epipe+
    #:+emsgsize+
+   #:+enoent+
+   #:+eacces+
+   #:+eexist+
+   #:+enotsup+
+   #:+eaddrinuse+
    ;; descriptors
    #:make-socket-pair
    #:connect-unix-socket
+   #:listen-unix-socket
+   #:accept-unix-socket
+   #:unix-socket-peer-credentials
+   #:open-lock-file
+   #:chmod-path
+   #:effective-uid
+   #:process-id
    #:close-fd
    #:fd-open-p
    #:fd-cloexec-p
@@ -140,6 +152,9 @@ into whole messages.  WAYLAND.WIRE stays pure format; this package is the
 only place that touches a socket.")
   (:export
    #:flush-buffer
+   #:socket-path
+   #:socket-path-error
+   #:socket-path-error-detail
    #:input-buffer
    #:make-input-buffer
    #:input-buffer-pending-octets
@@ -149,6 +164,38 @@ only place that touches a socket.")
    #:pump
    #:truncated-descriptors
    #:truncated-descriptors-count))
+
+(defpackage #:wayland.object
+  (:use #:cl)
+  (:documentation
+   "Object tables and the two id namespaces, shared by both directions of the
+protocol (docs/protocol-layer.md §3).
+
+A table maps ids to objects and allocates the lowest free id; the client half is
+2..0xFEFFFFFF, the server half 0xFF000000.. Nothing here knows whether the
+objects are proxies or resources, and nothing here sends messages: destruction
+and wl_display.delete_id belong to the dispatch layer, which differs between the
+two ends.")
+  (:export
+   #:+first-client-id+
+   #:+client-id-max+
+   #:+first-server-id+
+   #:+max-id+
+   #:client-id-p
+   #:server-id-p
+   #:object-table
+   #:make-object-table
+   #:object-table-ref
+   #:object-table-set
+   #:object-table-remove
+   #:object-table-count
+   #:object-table-ids
+   #:allocate-client-id
+   #:release-client-id
+   #:allocate-server-id
+   #:release-server-id
+   #:id-space-exhausted
+   #:id-space-exhausted-limit))
 
 (defpackage #:wayland.reactor
   (:use #:cl)
@@ -198,6 +245,7 @@ Wayland client is.")
    #:post
    ;; signals
    #:add-signal-source
+   #:add-signal-handler
    #:ignore-sigpipe
    #:read-signal
    #:timer-interval

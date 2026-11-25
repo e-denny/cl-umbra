@@ -382,3 +382,49 @@ of them arrive as readable events, never as a handler that preempts dispatch."
                                      while signal
                                      do (funcall on-signal source signal))))))
     source))
+
+;;; ---------------------------------------------------------------------------
+;;; Signals, when signalfd is not enough
+;;; ---------------------------------------------------------------------------
+;;;
+;;; signalfd only sees a process-directed signal if *every* thread blocks it, and
+;;; implemented Lisp runtimes have threads of their own: SBCL creates a finalizer
+;;; thread on demand, so a SIGTERM sent to the process can be delivered there and
+;;; never reach our descriptor.  That is not hypothetical -- it is what happened
+;;; the first time the demo server was asked to shut down, and the process stayed
+;;; in epoll_wait with the signal unreadable.
+;;;
+;;; The fix is the shape D9 already demands: an implementation-level handler that
+;;; does nothing but enqueue a command.  It may run on any thread, it never
+;;; touches protocol state, and the command itself runs between messages at the
+;;; top of a cycle.  signalfd stays for signals whose blocking we control from
+;;; the start of the image (and for implementations with no extra threads).
+
+#+sbcl
+(defun add-signal-handler (reactor signals &key on-signal (name "signals"))
+  "Deliver SIGNALS to ON-SIGNAL as (NIL signal-number), via posted commands.
+
+Unlike ADD-SIGNAL-SOURCE this does not block anything, so it works no matter how
+many threads the runtime has.  The handler only posts; ON-SIGNAL runs inside a
+reactor cycle, between messages, exactly like any other command (see the comment
+above).  NAME is accepted and ignored, so call sites read the same either way.
+
+The handler stays installed for the life of the process, and a signal that
+arrives after the reactor closed is ignored rather than posted."
+  (declare (ignore name))
+  (dolist (signal signals)
+    ;; SB-SYS:ENABLE-INTERRUPT takes the number, not a keyword (SBCL 2.6 passes
+    ;; its argument straight to the alien call).
+    (sb-sys:enable-interrupt
+     signal
+     (lambda (signal-number code context)
+       (declare (ignore code context))
+       (unless (reactor-closed-p reactor)
+         (post reactor (lambda () (funcall on-signal nil signal-number)))))))
+  t)
+
+#-sbcl
+(defun add-signal-handler (reactor signals &key on-signal (name "signals"))
+  "On implementations without extra runtime threads, a signalfd source is the
+same thing and costs less."
+  (add-signal-source reactor signals :on-signal on-signal :name name))

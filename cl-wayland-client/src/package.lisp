@@ -38,6 +38,15 @@ generated event generic functions, whichever the caller prefers.")
                 #:arg-type
                 #:arg-interface
                 #:arg-allow-null)
+  (:import-from #:wayland.object
+                #:+first-client-id+
+                #:+client-id-max+
+                #:make-object-table
+                #:object-table-ref
+                #:object-table-set
+                #:object-table-remove
+                #:allocate-client-id
+                #:release-client-id)
   (:import-from #:wayland.wire
                 #:message-buffer
                 #:make-message-buffer
@@ -121,8 +130,6 @@ generated event generic functions, whichever the caller prefers.")
    #:display-input
    #:display-output
    #:display-objects
-   #:display-next-id
-   #:display-free-ids
    #:display-source
    #:display-closed-p
    #:make-display-from-fd
