@@ -28,6 +28,10 @@
 #      0, sees both demo globals, and the server shuts down cleanly on SIGTERM
 #   7. soak: 10k connect/disconnect cycles with flat descriptor count and a flat
 #      resident set
+#   8. a fuzz *client*: 10^6 adversarial connections; the server must never
+#      crash, hang, leak, or answer with a malformed message
+#   9. an independent C client binds, destroys and re-binds across versions, and
+#      gets the released id back
 #
 # Logs land in a temporary directory that is printed when something fails.
 
@@ -128,6 +132,20 @@ if gb "$log_dir/soak.log" "$repo_root/scripts/soak.sh"; then
   pass 'soak' "$(grep -a '^soak: descriptors' "$log_dir/soak.log" | sed 's/^soak: //')"
 else
   fail 'soak' 'the server leaked descriptors or memory over 10k connections' "$log_dir/soak.log"
+fi
+
+# 8. The peer fuzzer -------------------------------------------------------
+if gb "$log_dir/fuzz-client.log" "$repo_root/scripts/fuzz-client.sh" 1000000; then
+  pass 'fuzz client' "$(grep -a '^[0-9]* connection' "$log_dir/fuzz-client.log" | sed 's/ fuzzed:.*//') fuzzed, server healthy"
+else
+  fail 'fuzz client' 'a client made the server crash, hang, leak or answer badly' "$log_dir/fuzz-client.log"
+fi
+
+# 9. An independent C client ------------------------------------------------
+if gb "$log_dir/c-probe.log" "$repo_root/scripts/c-probe.sh"; then
+  pass 'C client' "$(grep -a '^c-probe:' "$log_dir/c-probe.log" | sed 's/^c-probe: //')"
+else
+  fail 'C client' 'the libwayland client probe failed' "$log_dir/c-probe.log"
 fi
 
 # Purity (D1) ---------------------------------------------------------------

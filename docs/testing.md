@@ -98,7 +98,8 @@ Phase 0 (protocol core and a hello-world client), five clauses: the unit suite, 
 vendored protocol compiles", `demo-globals` against the live session, the fuzz harness, and
 purity (D1).
 
-Phase 1 (server core), two clauses:
+Phase 1 (server core), four clauses — the first two from the slice that built the server,
+the last two added once there was something to attack:
 
 1. **`wayland-info` against our server** (`scripts/wayland-info-server.sh`). The demo server is
    started on its own socket in a private runtime directory, `wayland-info` — the system's own
@@ -112,10 +113,23 @@ Phase 1 (server core), two clauses:
    no client or object may survive its connection. `SOAK_CYCLES` overrides the count; 1000
    runs in well under a second, 10k in about half a second, so the gate runs the full 10k.
 
+3. **The peer fuzzer** (`scripts/fuzz-client.sh`): 10⁶ adversarial connections, with the
+   invariants in §4.2. This is the "fuzz client cannot crash or wedge the server" clause that
+   `PLAN.md` asked for; it did not exist when the server first landed, and the gate said so
+   instead of ticking it.
+4. **An independent C client** (`scripts/c-probe.sh`, `tests/c-client/wayland-probe.c`): a
+   libwayland client that binds `wl_output` at version 3, checks the initial events and their
+   order, calls `wl_output_release`, and then proves `wl_display.delete_id` arrived the only
+   way a client can: the released id comes back on a later bind. It also binds at version 1
+   and checks that no newer event reaches it, and binds and destroys `wl_compositor`. The
+   probe is compiled into a temporary directory and linked against the system's
+   libwayland-client on purpose: it is the peer, not the product, and D1 applies to what we
+   ship.
+
 Purity runs last, after both phases' clauses, because it is a standing constraint rather than
 a phase deliverable.
 
-All seven clauses pass as of the phase-1 slice. Two details worth knowing: the protocol clause
+All nine clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs
@@ -134,14 +148,16 @@ headless apart from that one clause.
 
 ## 4. Fuzzing
 
-Not yet a *peer* fuzzer: the three cases below exercise the decoder and the transport, and a
-client that sends nonsense to a server (pool validation, stride/format checks, protocol
-errors) needs the server to exist first. The server exists as of phase 1; the peer fuzzer is
-the next piece of this section, and `scripts/soak.sh` is its crude stand-in for now (random
-truncation points, 10k of them).
+Two fuzzers, asking different questions. Both share one seeded random source
+(`tests/fuzz/rng.lisp`, xorshift64*, not `cl:random`) so a seed means the same thing in
+either, and both print the seed first because the seed is the whole bug report.
 
-`tests/fuzz/fuzz.lisp` (system `cl-wayland-tests/fuzz`, driver `scripts/fuzz.sh
-[ITERATIONS] [SEED]`) runs three kinds of case, chosen at random:
+### 4.1 The decoder fuzzer
+
+`scripts/fuzz.sh [ITERATIONS] [SEED]` (`tests/fuzz/fuzz.lisp`, system
+`cl-wayland-tests/fuzz`): does garbage either decode or get rejected, without overrunning,
+looping, allocating unboundedly or leaking a descriptor? It runs in-process over a socket
+pair. Three kinds of case, chosen at random:
 
 | Case | What it feeds | What must hold |
 |---|---|---|
@@ -149,30 +165,61 @@ truncation points, 10k of them).
 | schema | random octets decoded as the arguments of a random message from the loaded protocols | values or a `wayland.wire` condition; never overrun the buffer or loop |
 | transport | random writes to one end of a real `socketpair`, `pump` on the other: garbage, truncated messages, whole messages, some with descriptors attached | only whole messages dispatch; the partial tail stays under 2× the maximum message size; the input buffer never exceeds 4× its 64 KiB start; every descriptor the stream delivered is closed |
 
-Hard rules: a case that signals anything other than a `wayland.wire` condition is a
-failure; a run that misses its deadline (60 s, or 1 s per 10 000 iterations) is a hang; the
-open descriptor count (`/proc/self/fd`) must return to what it was once the harness closes
-its own socket pair, pool and buffers. The random source is a seeded xorshift64* in the
-harness, not `cl:random`, so a failure prints a seed that reproduces it on any SBCL:
+Hard rules: a case that signals anything other than a `wayland.wire` condition is a failure;
+a run that misses its deadline (60 s, or 1 s per 10 000 iterations) is a hang; the open
+descriptor count (`/proc/self/fd`) must return to what it was once the harness closes its own
+socket pair, pool and buffers.
 
 ```
 ./scripts/fuzz.sh 1000000 12345
 ```
 
-Budget: 10⁶ cases in the phase-0 gate (`scripts/gate.sh`), 10⁴ in `make check`, both well
-under three seconds today. Finding so far, on its first run: `wayland.io` queued descriptors
-that a rejected stream would discard without closing, so `reset-input-buffer` now closes them
-by default.
+Budget: 10⁶ cases in the gate, 10⁴ in `make check`, both well under three seconds today.
+Finding so far, on its first run: `wayland.io` queued descriptors that a rejected stream
+would discard without closing, so `reset-input-buffer` now closes them by default.
 
-Not yet: mutating structured messages of a *client* against a *server* (`wl_shm` pool
-validation, `(offset, stride, format)` against pool sizes). That arrives with the server in
-phase 1, where there is a peer to reject them.
+### 4.2 The peer fuzzer
+
+`scripts/fuzz-client.sh [ITERATIONS] [SEED]` (`tests/fuzz/client-fuzz.lisp`, system
+`cl-wayland-tests/fuzz-client`): can a *client* make the server crash, wedge, leak, or answer
+with a malformed message? Every case is one real connection to a live demo display, and the
+cases are the protocol-level counterpart of the table above:
+
+| Case | What it sends |
+|---|---|
+| garbage | 1–400 random octets |
+| plausible | 1–4 well-framed messages from real schemas, with random objects, opcodes and arguments; half the time truncated mid-message |
+| abusive | one specific illegality: `sync`/`get_registry` with a `new_id` of 1, 0 or a server id; an opcode no interface has; a real registry followed by a `bind` with a wrong interface, a wrong name or an impossible version; junk inside a message's declared size |
+| bad size | a valid message whose size field says zero, a non-multiple of four, more than it carries, or less than a header |
+| tiny | 0–32 octets, often not even a header |
+
+The invariants are the interesting part, and they are asserted rather than inspected:
+
+1. **well-formed replies** — every message the server writes parses, the sizes cover the
+   stream exactly, and there is at most one `wl_display.error`, on `wl_display`;
+2. **no wedge** — after the client closes, the server must have dropped it, checked after
+   every case;
+3. **no internal error** — the server's log is captured at `:error` for the whole run. A
+   client fault is a protocol error; a Lisp error from our own code is a bug, and a client
+   must not be able to cause one;
+4. **across the run** — identical descriptor count, resident-set growth under 32 MiB, and a
+   well-behaved client still gets its globals and a `sync` callback at the end and every 1000
+   cases.
+
+10⁶ connections take about 42 s here, so the gate runs the full million. The hang detector is
+the same `sb-ext:with-timeout` watchdog as the decoder fuzzer.
+
+Not yet covered by either: descriptors arriving on a request that declares none (surplus-fd
+detection, still a phase-0 leftover), and the protocol content phase 2 adds (pools, strides,
+formats). The peer fuzzer grows those cases when the globals exist.
 
 ## 5. Interop matrix
 
 | Our role | Peer | What must hold |
 |---|---|---|
-| server | `wayland-info` | every advertised global, version and event is valid |
+| server | `wayland-info` | every advertised global, version and event is valid — **passes** (`scripts/wayland-info-server.sh`) |
+| server | our own C probe (`tests/c-client`) | bind, destroy, re-bind across versions; `delete_id` at the right time — **passes** (`scripts/c-probe.sh`) |
+| server | the peer fuzzer | no crash, wedge, leak or malformed reply under 10⁶ adversarial connections — **passes** (`scripts/fuzz-client.sh`) |
 | server | `weston-simple-shm` | buffer attach/commit/release, damage, frame callbacks |
 | server | `kitty` | keyboard, clipboard-adjacent paths, resize, popups |
 | server | GTK4 app | subsurfaces, buffer scale, fractional scale, decoration negotiation |
@@ -189,8 +236,13 @@ What runs today without a session: `tests/unit/client.lisp` puts a socket pair i
 compositor and asserts the bytes the client writes (`get_registry`, `bind`'s four wire
 arguments) and what it makes of the bytes a compositor would write (globals, `delete_id`,
 `wl_display.error`, a message split across two writes, an event carrying a server-allocated
-`new_id`). `demo-globals` against the live session is the one check that needs a real peer;
-it is compared with `wayland-info` by diff, not by eye.
+`new_id`). `tests/unit/server.lisp` puts our client — or a hand-written peer — on the other
+side of a real display. `demo-globals` against the live session is the one check that needs a
+foreign compositor; it is compared with `wayland-info` by diff, not by eye.
+
+Rows that still have nothing behind them are the protocol content of phases 2 and later: the
+shm client, the toolkits, dmabuf, and our client against `sway`/`weston`. The peer fuzzer and
+the C probe cover the *transport* half of the server's obligations, not the compositor's.
 
 ## 6. Golden images
 

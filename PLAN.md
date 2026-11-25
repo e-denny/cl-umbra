@@ -190,14 +190,15 @@ script exits 0.
 
 **Demo:** `wayland-info` against `(wayland.server:make-demo-display)`.
 
-**Status (phase 1 slice):** built as specified, in `cl-wayland-server`, with two honest gaps.
-The gate's `wayland-info` and soak clauses pass (`scripts/gate.sh` clauses 6 and 7), the
-socket/lock/`SO_PEERCRED`/ids/globals/`bind`/`sync`/error/teardown behaviour is covered by
-`wayland.test.server`, and three decisions were recorded on the way (D19 one object table for
-both ends, D20 `flock` for the socket lock, D21 termination signals as posted commands rather
-than `signalfd`).  Not done: an independent C client that destroys and re-binds (only
-`wayland-info` is a C peer), and a fuzz *client* against the server — so the gate's third
-clause is deferred rather than claimed.  Fixed 64 KiB rings remain the phase-0 leftover;
+**Status (phase 1):** built as specified, in `cl-wayland-server`, and the gate is met in full:
+`scripts/gate.sh` clauses 6-9 pass — `wayland-info` exits 0 against our server, the 10k soak
+is flat, the peer fuzzer throws 10⁶ adversarial connections at it without a crash, wedge, leak
+or malformed reply, and an independent libwayland C client binds, destroys and re-binds across
+versions with the released id coming back. The socket/lock/`SO_PEERCRED`/ids/globals/`bind`/
+`sync`/error/teardown behaviour is covered by `wayland.test.server`.
+Four decisions were recorded on the way (D19 one object table for both ends, D20 `flock` for
+the socket lock, D21 termination signals as posted commands rather than `signalfd`, D22 the
+two gate peers and what they assert).  Fixed 64 KiB rings remain the phase-0 leftover;
 backpressure is enforced by a watermark instead.
 
 ### Phase 2 — Core globals, shm, headless output, pixman (6-8 weeks)

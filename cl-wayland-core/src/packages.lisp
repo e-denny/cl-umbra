@@ -109,6 +109,8 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:chmod-path
    #:effective-uid
    #:process-id
+   #:signal-disposition
+   #:signal-handler-installed-p
    #:close-fd
    #:fd-open-p
    #:fd-cloexec-p

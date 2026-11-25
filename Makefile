@@ -1,15 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz loads purity server soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe soak gate clean
 
-check: test fuzz loads purity server
+check: test fuzz fuzz-client loads purity server c-probe
 
 test:
 	./scripts/run-tests.sh
 
 fuzz:
 	./scripts/fuzz.sh 10000
+
+# Adversarial clients against a live server; 10^4 here, 10^6 in the gate.
+fuzz-client:
+	./scripts/fuzz-client.sh 10000
 
 loads:
 	./scripts/check-loads.sh
@@ -20,6 +24,10 @@ purity:
 # The cheap half of the phase-1 gate: a real wayland-info against our server.
 server:
 	./scripts/wayland-info-server.sh
+
+# An independent libwayland client: bind, destroy, re-bind across versions.
+c-probe:
+	./scripts/c-probe.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:

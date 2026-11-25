@@ -108,16 +108,16 @@ empty `.asd` per system; `protocols/` populated with pinned XML.
 - [x] tests: dummy globals + `wayland-info`; bind/destroy/rebind across versions; kill-mid-request;
       10k connect/disconnect with flat RSS and fd count
       (`wayland.test.server`, 27 tests; `scripts/soak.sh`)
-- [ ] an independent C client that binds, destroys and re-binds
-      (`wayland-info` is the only C peer so far, and it does not destroy and rebind)
-- [ ] a fuzz *client* against the server: random and adversarial messages over 10^6
-      connections, asserting the server never crashes, wedges or leaks.  `scripts/soak.sh`
-      truncates at random points but does not vary the content.
+- [x] an independent C client that binds, destroys and re-binds
+      (`tests/c-client/wayland-probe.c`, `scripts/c-probe.sh`: libwayland-client, version
+      gating, and `delete_id` proven by the released id coming back)
+- [x] a fuzz *client* against the server: random and adversarial messages over 10^6
+      connections, asserting the server never crashes, wedges, leaks or answers malformed
+      (`tests/fuzz/client-fuzz.lisp`, `scripts/fuzz-client.sh`, 42 s for 10^6)
 
 **Gate:** `wayland-info` exits 0 against our server; soak test flat; fuzz client cannot
-crash or wedge the server.  The first two are `gate.sh` clauses 6 and 7 and pass.  The third
-has nothing behind it yet, so it is not a clause: the gate checks what exists and does not
-pretend the rest.
+crash or wedge the server.  All three are `gate.sh` clauses (6, 7, 8) and pass, plus an
+independent C client as clause 9.
 
 **Demo:** `wayland-info` talking to a Lisp server.  Done: `./scripts/wayland-info-server.sh`,
 or `(wayland.server:make-demo-display)` from the REPL plus

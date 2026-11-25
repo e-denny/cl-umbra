@@ -6,17 +6,18 @@ The repository is named for where the stack is going: `cl-umbra`, a daily-driver
 Everything that makes it possible is here too — the protocol implementation, the server, the
 compositor framework, and a tinywl port — as the six systems below.
 
-**Status: phase 0 and phase 1 gates passing.** `./scripts/gate.sh` checks seven clauses.
+**Status: phase 0 and phase 1 gates passing.** `./scripts/gate.sh` checks nine clauses.
 Phase 0: the unit suite, every vendored protocol compiling, `demo-globals` against a live
-compositor, 10⁶ fuzz cases. Phase 1: `wayland-info` — the system's own libwayland client —
-exits 0 against *our* server, and 10k connect/disconnect cycles leave the descriptor count
-and resident set flat. Purity (no libwayland, no wlroots) runs over both. The gate exits 0.
+compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` — the system's own libwayland
+client — exits 0 against *our* server; 10k connect/disconnect cycles leave the descriptor
+count and resident set flat; 10⁶ adversarial client connections neither crash, wedge, leak
+nor get a malformed reply; and an independent libwayland C client binds, destroys and
+re-binds across versions. Purity (no libwayland, no wlroots) runs over all of it. The gate
+exits 0.
 
 Three roadmap quality items are still open and are not gate clauses: fixed-size in/out
 rings, `WAYLAND_DEBUG`-compatible tracing, and surplus-descriptor detection (which needs a
-protocol layer that knows a message's descriptor count). Two phase-1 items are honestly
-unticked for the same reason: an independent C client beyond `wayland-info`, and a fuzz
-*client* against the server.
+protocol layer that knows a message's descriptor count).
 
 What exists:
 
@@ -131,7 +132,8 @@ TEST_VERBOSE=1 ./scripts/run-tests.sh   # list every assertion instead of dots
 
 Each probe also runs alone: `scripts/run-tests.sh`, `scripts/check-loads.sh`,
 `scripts/purity-check.sh`, `scripts/wayland-info-server.sh` (a real client against our
-server) and `scripts/soak.sh` (10k connections; `SOAK_CYCLES` overrides). The runtime dependency list is SBCL plus CFFI — CFFI is for libc
+server), `scripts/c-probe.sh` (an independent libwayland C client), `scripts/fuzz-client.sh`
+(adversarial clients) and `scripts/soak.sh` (10k connections; `SOAK_CYCLES` overrides). The runtime dependency list is SBCL plus CFFI — CFFI is for libc
 (sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, `memfd_create`), never for libwayland. The
 test suite additionally uses [Rove](https://github.com/fukamachi/rove); no shipped system
 loads it. The scripts find Quicklisp at the usual places or through `QUICKLISP_SETUP`, or

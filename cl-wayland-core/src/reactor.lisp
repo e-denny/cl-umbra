@@ -420,7 +420,14 @@ arrives after the reactor closed is ignored rather than posted."
      (lambda (signal-number code context)
        (declare (ignore code context))
        (unless (reactor-closed-p reactor)
-         (post reactor (lambda () (funcall on-signal nil signal-number)))))))
+         (post reactor (lambda () (funcall on-signal nil signal-number))))))
+    ;; Check that it took, and fail loudly at startup if it did not.  A handler
+    ;; that silently fails to install turns "SIGTERM stops the compositor cleanly"
+    ;; into "SIGTERM kills it and leaves a socket file behind", and the only
+    ;; symptom is a shutdown that looks like a crash.
+    (unless (wayland.ffi:signal-handler-installed-p signal)
+      (error 'reactor-error
+             :detail (format nil "no handler was installed for signal ~D" signal))))
   t)
 
 #-sbcl

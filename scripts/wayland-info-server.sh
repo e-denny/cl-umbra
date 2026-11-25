@@ -6,22 +6,20 @@
 # to our server and exits 0.
 #
 # Nothing here is a mock.  The server is started the way a compositor would be
-# started, on its own socket in a private runtime directory; wayland-info is the
-# system's own build, with its own libwayland; the server is stopped the way a
-# session manager stops one, with SIGTERM, and has to exit cleanly and take its
-# socket and lock file with it.
+# started, on its own socket in a private runtime directory (scripts/lib.sh);
+# wayland-info is the system's own build, with its own libwayland; the server is
+# stopped the way a session manager stops one, with SIGTERM, and has to exit
+# cleanly and take its socket and lock file with it.
 
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 runtime_dir="$(mktemp -d "${TMPDIR:-/tmp}/cl-wayland-server.XXXXXX")"
 chmod 700 "$runtime_dir"
-socket="$runtime_dir/wayland-0"
-server_pid=""
 
 cleanup() {
-  if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
-    kill -KILL "$server_pid" 2>/dev/null
+  if [ -n "$demo_server_pid" ] && kill -0 "$demo_server_pid" 2>/dev/null; then
+    kill -KILL "$demo_server_pid" 2>/dev/null
   fi
   rm -rf "$runtime_dir"
 }
@@ -32,40 +30,21 @@ fail() {
   exit 1
 }
 
-XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY=wayland-0 \
-  sbcl --noinform --non-interactive --no-userinit --no-sysinit \
-  "${sbcl_evals[@]}" \
-  --eval '(asdf:load-system "cl-wayland-server/demo")' \
-  --eval '(wayland.server.demo:toplevel)' \
-  > "$runtime_dir/server.log" 2>&1 &
-server_pid=$!
+command -v wayland-info >/dev/null 2>&1 || fail "wayland-info is not installed"
 
-# The socket appearing is the server's own announcement that it is ready; the
-# timeout is generous because a cold image has to compile the protocol system.
-for _ in $(seq 1 600); do
-  [ -S "$socket" ] && break
-  kill -0 "$server_pid" 2>/dev/null || break
-  sleep 0.1
-done
-[ -S "$socket" ] || { cat "$runtime_dir/server.log" >&2; fail "the server never created $socket"; }
-[ -f "$socket.lock" ] || fail "the server did not create $socket.lock"
+demo_server_start "$runtime_dir" "$runtime_dir/server.log" || fail "the demo server did not start"
 
 XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY=wayland-0 \
   wayland-info > "$runtime_dir/wayland-info.txt" 2> "$runtime_dir/wayland-info.err"
 info_status=$?
 
-kill -TERM "$server_pid" 2>/dev/null
-wait "$server_pid" 2>/dev/null
-server_status=$?
+demo_server_stop "$runtime_dir/server.log" || { cat "$runtime_dir/server.log" >&2; exit 1; }
 
 [ "$info_status" -eq 0 ] || {
   cat "$runtime_dir/wayland-info.err" >&2
   fail "wayland-info exited $info_status"
 }
-[ "$server_status" -eq 0 ] || {
-  cat "$runtime_dir/server.log" >&2
-  fail "the server exited $server_status on SIGTERM"
-}
+socket="$(demo_socket_path "$runtime_dir")"
 [ ! -e "$socket" ] || fail "the socket survived shutdown"
 [ ! -e "$socket.lock" ] || fail "the lock file survived shutdown"
 

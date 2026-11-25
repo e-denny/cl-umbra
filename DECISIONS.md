@@ -491,8 +491,12 @@ thin wrapper that re-signals the failure as its own `client-error`.
 
 - The client's `display-next-id` and `display-free-ids` slots are gone (replaced by the
   table); the suite stayed green, which is the check that nothing depended on them.
-- Client id reuse is now *lowest free id* rather than most-recently-released, which is what
-  `docs/protocol-layer.md` §8 already claimed. Traces read like libwayland's.
+- Client and server id reuse is *lowest free id*, on purpose. This is not what libwayland
+  does — its client reuses the most recently freed id first, which the C probe showed
+  directly — and the docs were corrected rather than the code: which free id a client picks
+  is invisible to the peer, ascending ids are easier to read in a trace, and the property
+  that matters (the id comes back at all, because `wl_display.delete_id` arrived) is
+  unchanged and now tested from outside by `tests/c-client`.
 - A bad socket name is reported as `wayland.io:socket-path-error`; each end wraps it in the
   condition its callers already catch. One message, two vocabularies, no duplicated rule.
 - `wayland.object` deliberately knows nothing about destruction or `delete_id`: who may
@@ -553,3 +557,50 @@ no extra threads.
   eventfd — the handler checks `reactor-closed-p` first.
 - The demo server now exits 0 on `SIGTERM` and removes its socket and lock file; the gate
   clause asserts all three.
+- `add-signal-handler` verifies the installation by reading the disposition back
+  (`wayland.ffi:signal-handler-installed-p`), so a handler that silently failed to take is a
+  startup error instead of a compositor that dies like a crash and leaves a socket file
+  behind. During this work, three ad-hoc shutdowns did exactly that and eight controlled
+  reruns did not; the check turns that class of uncertainty into a message.
+
+
+---
+
+## D22 — The phase-1 gate has two independent peers, and they check different things
+
+**Status:** accepted
+
+**Context.** The phase-1 gate says `wayland-info` must talk to our server, and that a fuzz
+client must not crash or wedge it. `wayland-info` binds globals and prints them, but it does
+not destroy, re-bind, or misbehave; and "cannot crash or wedge" is only meaningful against a
+client that tries. Our own client is not a credible adversary or a credible oracle for its
+own server's mistakes.
+
+**Decision.** Two fixtures, both kept outside every shipped system:
+
+1. `tests/fuzz/client-fuzz.lisp` (`scripts/fuzz-client.sh`), the *peer fuzzer*: one real
+   connection per case, five case kinds (garbage, plausible-but-random, specifically illegal,
+   corrupted size, tiny), and four invariants — well-formed replies with at most one
+   `wl_display.error`; the client is dropped after EOF; no `:error`-level line from our own
+   code for the whole run; and no descriptor or memory growth across it, with a well-behaved
+   client still served at the end and every 1000 cases. It shares the decoder fuzzer's seeded
+   generator, so a seed reproduces a failure in either.
+2. `tests/c-client/wayland-probe.c` (`scripts/c-probe.sh`), an *independent C client* built
+   against the system's libwayland-client: it binds `wl_output` at versions 3 and 1, checks
+   the initial events and their order and the absence of newer events below their `since`,
+   releases, and proves `wl_display.delete_id` by getting the released id back on a later
+   bind.
+
+**Consequences.**
+
+- The probe links libwayland on purpose. D1 (purity) is about what we *ship*; a fixture whose
+  entire job is to be the other side is the one place the rule inverts, and it is stated in
+  the file and in `scripts/c-probe.sh` so nobody reads it as a violation.
+- The C probe immediately earned its keep: it proved the id-reuse order the docs claimed was
+  wrong (see D19), and it exercises libwayland's own id allocator, event queue and proxy
+  lifetime against our server, which no Lisp-side test can.
+- Both are gate clauses (8 and 9), so a client-visible server mistake fails the gate rather
+  than being noticed by a user.
+- Neither covers protocol content that does not exist yet: pools, strides, formats, seats.
+  They grow with phase 2's globals, and the peer fuzzer gains its "descriptor on a request
+  that declares none" case when there is a request that declares one.

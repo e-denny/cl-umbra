@@ -53,4 +53,19 @@ argument decoders and a real socket pair (docs/testing.md §4)."
   ;; bodies against; it also proves the client's schema path under garbage.
   :depends-on ("cl-wayland-core" "cl-wayland-protocols")
   :serial t
-  :components ((:file "fuzz/fuzz")))
+  :components ((:file "fuzz/rng")
+               (:file "fuzz/fuzz")))
+
+(defsystem "cl-wayland-tests/fuzz-client"
+  :description "Peer fuzzer: random and adversarial clients against a live
+display, asserting the server cannot crash, wedge, leak or answer malformed
+(docs/testing.md §4)."
+  :license "GPL-3.0-or-later"
+  :version "0.0.1"
+  ;; The server and its schemas, because this fuzzer is the server's first real
+  ;; adversary; the shared seeded generator so a seed means the same thing here
+  ;; as in the decoder fuzzer.
+  :depends-on ("cl-wayland-core" "cl-wayland-protocols" "cl-wayland-server")
+  :serial t
+  :components ((:file "fuzz/rng")
+               (:file "fuzz/client-fuzz")))

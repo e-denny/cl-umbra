@@ -97,9 +97,14 @@ a hostile client today.
   `wl_display.delete_id(id)`; the id becomes reusable. Server-owned objects are destroyed by
   the server emitting their destructor event (or handling their destructor request) and no
   `delete_id` follows, because the id was never the client's to reuse.
-- Allocation strategy mimics libwayland: lowest free id, so traces look familiar. Both ends
-  do it through `wayland.object` (D19), so a client and a server here recycle ids the same
-  way libwayland's two ends do.
+- Allocation strategy: **lowest free id**, on both ends, through `wayland.object` (D19). This
+  is deliberately *not* what libwayland does — its client keeps a free list and hands out the
+  most recently freed id first, which the C probe in `tests/c-client` shows plainly: a
+  released id came back two allocations later, not on the next one. Which free id a client
+  picks is invisible to the peer and unconstrained by the protocol (any unused id in range is
+  legal), so this is a readability choice: ascending ids make a trace easier to follow. What
+  clients *do* depend on is that an id is released at all — that `wl_display.delete_id`
+  arrives when the object dies — and that part is required and tested.
 - `delete_id` must be emitted before any event that reuses the id, and after the destructor
   request has been fully processed.
 - Serials are a per-display monotonic u32, bumped for every serial-bearing action
@@ -391,7 +396,7 @@ libwayland for behaviour not defined in the spec" — is adopted here without re
 
 | Undefined behaviour | Our choice |
 |---|---|
-| id allocation | lowest free id |
+| id allocation | lowest free id here; libwayland reuses most-recently-freed first. Unobservable to the peer, so this is a trace-readability choice, not mimicry |
 | `delete_id` | emitted when the destructor request is processed, before reuse |
 | `wl_shm.format` | sent immediately on bind, all supported formats |
 | `wl_seat.capabilities` | on bind, and on every device add/remove |
@@ -428,7 +433,9 @@ Every item is a test, not an aspiration.
 - [x] Client disconnects mid-message → resources freed, no crash, no fd leak
 - [x] 10k connect/disconnect cycles → flat RSS and fd count (`scripts/soak.sh`)
 - [x] Fuzz: random buffers via `socketpair`, 10⁶ iterations, no crash/hang/leak (decoder and
-      transport; a *peer* fuzzer that talks nonsense to the server is still to come)
+      transport)
+- [x] Fuzz the peer: 10⁶ adversarial connections to a live server, no crash/wedge/leak and no
+      malformed reply (`scripts/fuzz-client.sh`)
 
 ## 10. Performance targets
 

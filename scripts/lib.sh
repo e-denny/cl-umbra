@@ -41,3 +41,69 @@ sbcl_evals=(
   --eval "(asdf:initialize-source-registry '(:source-registry (:tree \"$repo_root/\") :ignore-inherited-configuration))"
   --eval "(load \"$quicklisp_setup\")"
 )
+
+# ---------------------------------------------------------------------------
+# A demo server for the phase-1 gate clauses
+# ---------------------------------------------------------------------------
+#
+# Both phase-1 clauses need the same thing: our server listening on its own
+# socket in a private runtime directory, started the way a session manager starts
+# a compositor, and stopped the way one stops it.  Keeping the start/stop here
+# means the clauses cannot drift in how they launch it.
+
+demo_server_pid=""
+
+demo_socket_path() { printf '%s/wayland-0' "$1"; }
+
+# demo_server_start RUNTIME_DIR LOG
+#   Sets demo_server_pid.  Fails with the server's log on stderr if the socket
+#   never appears, and checks that the pid holding the socket lock is the pid we
+#   started: a clause that kills the wrong process proves nothing.
+demo_server_start() {
+  local runtime_dir="$1" log="$2" socket
+  socket="$(demo_socket_path "$runtime_dir")"
+  XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY=wayland-0 \
+    sbcl --noinform --non-interactive --no-userinit --no-sysinit \
+    "${sbcl_evals[@]}" \
+    --eval '(asdf:load-system "cl-wayland-server/demo")' \
+    --eval '(wayland.server.demo:toplevel)' \
+    > "$log" 2>&1 &
+  demo_server_pid=$!
+  # The socket appearing is the server's own announcement that it is ready; the
+  # timeout is generous because a cold image compiles the protocol system first.
+  for _ in $(seq 1 600); do
+    [ -S "$socket" ] && break
+    kill -0 "$demo_server_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [ ! -S "$socket" ]; then
+    cat "$log" >&2
+    return 1
+  fi
+  if [ -f "$socket.lock" ]; then
+    local lock_pid
+    lock_pid="$(tr -d ' \n' < "$socket.lock")"
+    if [ "$lock_pid" != "$demo_server_pid" ]; then
+      printf 'gate: the lock file names pid %s, but the server we started is %s\n' \
+             "$lock_pid" "$demo_server_pid" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# demo_server_stop LOG
+#   SIGTERM, then require a clean exit and the removal of socket and lock.
+demo_server_stop() {
+  local log="$1" status=0
+  [ -n "$demo_server_pid" ] || return 0
+  kill -TERM "$demo_server_pid" 2>/dev/null
+  wait "$demo_server_pid" 2>/dev/null || status=$?
+  demo_server_pid=""
+  if [ "$status" -ne 0 ]; then
+    printf 'gate: the server exited %s on SIGTERM; it must stop cleanly\n' "$status" >&2
+    tail -n 20 "$log" >&2
+    return 1
+  fi
+  return 0
+}

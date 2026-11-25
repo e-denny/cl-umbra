@@ -106,6 +106,14 @@
   (family :unsigned-short)
   (path (:array :char 108)))
 
+;; struct sigaction, as libc lays it out on 64-bit Linux: handler, mask, flags,
+;; restorer (152 octets, with the padding the compiler inserts).
+(cffi:defcstruct (sigaction :conc-name sigaction-)
+  (handler :pointer)
+  (mask (:array :unsigned-long 16))
+  (flags :int)
+  (restorer :pointer))
+
 ;; struct ucred, linux/socket.h: the pid, uid and gid SO_PEERCRED reports.
 (cffi:defcstruct (ucred :conc-name ucred-)
   (pid :int)
@@ -135,7 +143,8 @@ which is the proof we want; other implementations simply run the check."
                (= 16 (cffi:foreign-type-size '(:struct iovec)))
                (= 56 (cffi:foreign-type-size '(:struct msghdr)))
                (= 110 (cffi:foreign-type-size '(:struct sockaddr-un)))
-               (= 12 (cffi:foreign-type-size '(:struct ucred))))
+               (= 12 (cffi:foreign-type-size '(:struct ucred)))
+               (= 152 (cffi:foreign-type-size '(:struct sigaction))))
     (error "wayland.ffi: unexpected ABI (pointer ~D, size_t ~D, cmsghdr ~D, iovec ~D, msghdr ~D, sockaddr_un ~D, ucred ~D); check the struct layouts against linux/socket.h"
            (cffi:foreign-type-size :pointer)
            (cffi:foreign-type-size :size)
@@ -143,7 +152,8 @@ which is the proof we want; other implementations simply run the check."
            (cffi:foreign-type-size '(:struct iovec))
            (cffi:foreign-type-size '(:struct msghdr))
            (cffi:foreign-type-size '(:struct sockaddr-un))
-           (cffi:foreign-type-size '(:struct ucred)))))
+           (cffi:foreign-type-size '(:struct ucred))
+           (cffi:foreign-type-size '(:struct sigaction)))))
 
 (eval-when (:load-toplevel :execute)
   (check-abi))
@@ -206,6 +216,9 @@ which is the proof we want; other implementations simply run the check."
 (cffi:defcfun ("getpid" %getpid) :int)
 
 (cffi:defcfun ("geteuid" %geteuid) :unsigned-int)
+
+(cffi:defcfun ("sigaction" %sigaction) :int
+  (signal :int) (action :pointer) (old-action :pointer))
 
 (cffi:defcfun ("__errno_location" %errno-location) :pointer)
 
@@ -430,6 +443,24 @@ for them."
 (defun process-id ()
   "This process's pid.  Servers write it into the socket lock file."
   (%getpid))
+
+(defun signal-disposition (signal)
+  "The handler currently installed for SIGNAL, as a foreign pointer.
+
+SIG_DFL is a null pointer and SIG_IGN is 1, so anything else is a handler.  Used
+to check that a handler we asked for is really installed: a silently ignored
+SIGTERM is otherwise indistinguishable from a handler that never fires until
+someone tries to stop the process."
+  (cffi:with-foreign-object (old '(:struct sigaction))
+    (when (minusp (%sigaction signal (cffi:null-pointer) old))
+      (syscall-failed 'sigaction (errno)))
+    (cffi:foreign-slot-value old '(:struct sigaction) 'handler)))
+
+(defun signal-handler-installed-p (signal)
+  "True when SIGNAL has a real handler rather than SIG_DFL or SIG_IGN."
+  (let ((handler (signal-disposition signal)))
+    (not (or (cffi:null-pointer-p handler)
+             (= 1 (cffi:pointer-address handler))))))
 
 (defun open-lock-file (path &key (mode #o600))
   "Create and exclusively lock PATH, truncate it, and write our pid into it.

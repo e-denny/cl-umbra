@@ -15,6 +15,14 @@
                 #:interface-events
                 #:message-args
                 #:arg-type)
+  ;; The random source is shared with the client fuzzer (wayland.fuzz.rng): one
+  ;; seeded generator, so a seed means the same thing in both harnesses.
+  (:import-from #:wayland.fuzz.rng
+                #:make-seeded-rng
+                #:rng-below
+                #:rng-octets
+                #:random-choice
+                #:store-u32)
   (:documentation
    "The decoder fuzzer (docs/testing.md §4): random octets through the header
 decoder, random bodies through real message schemas, and random byte streams
@@ -25,46 +33,6 @@ condition; anything else is a bug worth stopping for.")
 (in-package #:wayland.fuzz)
 
 (defconstant +default-iterations+ 1000000)
-
-;;; ---------------------------------------------------------------------------
-;;; A deterministic random source
-;;; ---------------------------------------------------------------------------
-;;
-;; Not CL:RANDOM: a failure has to be reproducible from the seed alone, on any
-;; SBCL, and the printed seed is the whole bug report.  xorshift64* is four
-;; lines and good enough for octets.
-
-(defstruct (rng (:constructor make-rng (state)))
-  (state 12345 :type (unsigned-byte 64)))
-
-(defun make-seeded-rng (seed)
-  ;; Any nonzero 64-bit state works; zero is a fixed point.
-  (make-rng (logand #xFFFFFFFFFFFFFFFF (if (zerop seed) 88172645463325252 seed))))
-
-(defun rng-next (rng)
-  (let ((x (rng-state rng)))
-    (setf x (logand #xFFFFFFFFFFFFFFFF (logxor x (ash x -12))))
-    (setf x (logand #xFFFFFFFFFFFFFFFF (logxor x (ash x 25))))
-    (setf x (logand #xFFFFFFFFFFFFFFFF (logxor x (ash x 27))))
-    (setf (rng-state rng) x)
-    (logand #xFFFFFFFFFFFFFFFF (* x #x2545F4914F6CDD1D))))
-
-(defun rng-below (rng limit)
-  (if (<= limit 1) 0 (mod (rng-next rng) limit)))
-
-(defun rng-octets (rng count)
-  (let ((octets (make-array count :element-type '(unsigned-byte 8))))
-    (dotimes (index count octets)
-      (setf (aref octets index) (rng-below rng 256)))))
-
-(defun store-u32 (octets offset value)
-  (dotimes (index 4)
-    (setf (aref octets (+ offset index)) (logand #xFF (ash value (* -8 index))))))
-
-(defun random-choice (rng sequence)
-  (let ((sequence (coerce sequence 'vector)))
-    (and (plusp (length sequence))
-         (aref sequence (rng-below rng (length sequence))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The failure report
