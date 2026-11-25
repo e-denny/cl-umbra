@@ -1,6 +1,10 @@
-# cl-wayland-project
+# cl-umbra
 
 A Wayland stack written in Common Lisp, from the socket up.
+
+The repository is named for where the stack is going: `cl-umbra`, a daily-driver compositor.
+Everything that makes it possible is here too — the protocol implementation, the server, the
+compositor framework, and a tinywl port — as the six systems below.
 
 **Status: phase 0 in progress.** Planning is complete — [`PLAN.md`](PLAN.md), the design
 documents in [`docs/`](docs/), and the decision log [`DECISIONS.md`](DECISIONS.md) — and
