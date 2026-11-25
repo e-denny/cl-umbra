@@ -1,0 +1,176 @@
+# Testing
+
+A compositor fails in ways that are hard to see: a wrong serial opens no window, an
+unreleased buffer freezes one client, a bad damage region shows a smeared frame for one
+refresh. The test strategy is therefore layered, and each layer exists because it catches a
+class of bug the others cannot.
+
+---
+
+## 1. Layers
+
+| Layer | Catches | Runs in | Cost |
+|---|---|---|---|
+| Unit (codec, schema, regions, ids) | arithmetic and encoding mistakes | anywhere | ms |
+| Property/fuzz (decoder, pool validation) | crashes, overreads, leaks | anywhere | seconds |
+| Trace replay (recorded `WAYLAND_DEBUG`) | divergence from libwayland behaviour | anywhere | seconds |
+| Interop (real clients against our server; our client against real servers) | protocol conformance | needs a session | minutes |
+| Golden image (headless render → PNG hash) | rendering, damage, transforms, scale | anywhere, no GPU | seconds |
+| Scripted end-to-end (headless compositor + client + assertions) | policy: focus, move, resize, workspace switching | anywhere | minutes |
+| Config and control (reader safety, schema, reload atomicity, eval-channel limits) | the entire user-facing control surface | anywhere | seconds |
+| Soak/chaos (kill clients, exhaust fds, long runs) | lifetime bugs | dedicated machine | hours |
+| Manual hardware (TTY, VT switch, hotplug, suspend) | driver/session integration | real machine | per phase |
+
+## 2. Fixtures and tools
+
+Installed for testing only (never linked by our binaries):
+
+- `weston` + `weston-simple-shm` — the canonical shm client.
+- `wayland-utils` (`wayland-info`) — global dump and protocol inventory.
+- `kitty`, `foot` — real terminal clients.
+- A GTK4 app and a Qt app — toolkit conformance.
+- `sway` or `weston` as reference servers for our client.
+- `xwayland-satellite` + an X client (phase 6 tail).
+
+Recorded traces are committed under `tests/fixtures/traces/` with the exact client version in
+a sidecar file, because traces are only comparable against known-good versions.
+
+## 3. Wire codec
+
+- **Byte-exact vectors**: hand-written expected bytes for every argument type, including
+  padding and the size/opcode split.
+- **Roundtrip property**: encode → decode → equal, over generated values with boundary sizes
+  (0, 1, 3, 4, 4095, 65536), null vs non-null objects, fds.
+- **Oracle**: for each vendored protocol, generate C with `wayland-scanner` in a test script
+  and compare opcode numbers, signatures and interface versions against our tables. Cheap,
+  and catches schema-parser regressions immediately.
+- **Trace replay**: decode a real client's messages and assert the resulting call sequence.
+
+## 4. Fuzzing
+
+A harness connects two `socketpair` ends: the fuzzer writes, our decoder reads.
+
+- Random-length, random-content messages, with the object table seeded by a real handshake.
+- Structured fuzzing: valid message with one field mutated (id, opcode, length, string
+  length, array length, fd count).
+- Assertions: no crash, no hang (deadline), no unbounded allocation, no fd left open
+  (`/proc/self/fd` count returns to baseline), no debugger entry.
+- Pool/buffer fuzzing: random `(offset, stride, width, height, format)` against random pool
+  sizes; every accepted buffer must be in-bounds, every rejected one must produce the right
+  protocol error.
+- 10⁶ iterations in CI (nightly), 10⁴ per commit.
+
+## 5. Interop matrix
+
+| Our role | Peer | What must hold |
+|---|---|---|
+| server | `wayland-info` | every advertised global, version and event is valid |
+| server | `weston-simple-shm` | buffer attach/commit/release, damage, frame callbacks |
+| server | `kitty` | keyboard, clipboard-adjacent paths, resize, popups |
+| server | GTK4 app | subsurfaces, buffer scale, fractional scale, decoration negotiation |
+| server | Qt app | buffer formats, `xdg_popup`, activation |
+| server | a dmabuf client | import, modifier negotiation, fallback to shm |
+| client | `sway`, `weston` | registry, bind, roundtrip, fd passing, seat events |
+| both | ourselves (nested) | each side exercises the other; the nested compositor is a test |
+
+The matrix is a script, not a checklist: `scripts/interop.sh <server> <client>` starts the
+pair on a private socket, runs a scenario, and diffs the observed client log against
+expectations.
+
+## 6. Golden images
+
+The headless backend plus the pixman renderer gives deterministic pixels:
+
+```
+scene fixture → render → read-pixels → PNG → hash
+```
+
+- Compare with a tolerance (per-pixel delta and a percentage of differing pixels), never
+  exact equality across pixman versions.
+- One fixture per behaviour, not per protocol: opaque stacking, alpha blending, buffer
+  scale 2, fractional scale 1.5, output transform 90/180/270, damage-only repaint,
+  subsurface offsets, popup positioning, cursor composite, letterboxing.
+- Every fixture also runs through the GL renderer in phase 5 and must match within tolerance;
+  that is the acceptance test for "the GPU path is correct".
+
+## 7. Scripted end-to-end
+
+A test compositor (headless backend, synthetic input) plus a scripted helper client that can
+be told to attach buffers of known colours and to record the events it receives:
+
+1. Map two windows, assert stacking and focus.
+2. Click the lower one, assert focus change and `set_activated` on both.
+3. Drag: assert motion is consumed by the compositor (grab) and the window moved.
+4. Resize from each edge and corner: assert configure size and geometry.
+5. Alt+F1: assert focus cycle and restacking.
+6. Popup: assert grab, outside click dismisses, `popup_done` delivered.
+7. Workspace switch: assert only the active workspace's surfaces get frame callbacks.
+8. Client destroyed mid-grab: assert grab ends, no dangling surface.
+9. Config: reload a broken config, assert nothing changed; reload a good one, assert exactly
+   the intended change.
+10. Control: forms over the eval channel match on-screen state; the same call from a
+    binding, a script and the REPL is one code path; a runaway form hits the deadline.
+
+These are the tests that would have caught tinywl's own shortcuts.
+
+## 8. Purity check
+
+The project's central claim is "no libwayland, no wlroots". Verify mechanically:
+
+```sh
+# 1. link-time: nothing in ldd output
+ldd ./cl-tinywl | grep -E 'libwayland|libwlroots' && exit 1
+# 2. load-time: nothing dlopen'd
+grep -E 'libwayland|libwlroots' /proc/self/maps && exit 1
+# 3. symbol-time
+nm -D ./cl-tinywl | grep -E 'wl_display_create|wlr_backend_autocreate' && exit 1
+```
+
+Runs in CI for every phase-0+ commit. It is the one test that cannot be waived.
+
+## 9. Performance
+
+Benchmarks with explicit thresholds; a regression fails the build.
+
+| Benchmark | Metric | Threshold |
+|---|---|---|
+| encode/decode small message | ns/message | encode < 150, decode < 1000 |
+| dispatch a pointer motion | µs, bytes consed | < 2 µs, 0 consed |
+| frame with 1 / 5 / 20 surfaces at 1080p | CPU ms/frame | 1.5 / 4 / 12 |
+| 4K frame, 1 opaque client | CPU ms/frame | < 5 |
+| idle compositor | CPU % | < 1 |
+| roundtrip latency | µs | < 200 |
+| 100 idle clients | RSS | flat over 10k cycles |
+
+Allocation is measured, not assumed: `sb-ext:get-bytes-consed` around a fixed interaction,
+asserted zero in steady state for the input, commit and render paths.
+
+## 10. CI
+
+- Linux x86-64, SBCL versions current and previous.
+- Jobs: `unit`, `fuzz (10⁴)`, `schema-oracle`, `golden`, `e2e-headless`, `purity`,
+  `perf` (tolerant), `nightly-soak`, `nightly-fuzz (10⁶)`.
+- No GPU and no session required for any of the above: headless + pixman is the default
+  renderer in CI, which is a direct payoff of the shm-first decision (D3).
+- A separate, optional, self-hosted job runs the DRM backend with a dummy/VKMS device
+  (`vkms` gives a virtual KMS device — useful for page-flip tests without a monitor).
+
+## 11. Manual hardware checklist (per phase 4+)
+
+- [ ] TTY start, clean exit, no leaked fds (`ls /proc/<pid>/fd | wc -l`)
+- [ ] VT switch away and back ×20
+- [ ] unplug/replug output ×10, with windows on it
+- [ ] suspend/resume ×5
+- [ ] lid close/open (if laptop)
+- [ ] 8-hour soak with an animating client
+- [ ] client kill -9 during drag, during resize, during a popup grab
+- [ ] fill the disk / exhaust fds / fork bomb a client, then disconnect it
+
+## 12. Debugging aids to build early
+
+- `WAYLAND_DEBUG`-compatible tracing (so existing tooling and habits work).
+- A message dump in both directions with object interface names and decoded args.
+- Per-client log prefixes with pid; per-resource ids in every protocol error.
+- A `(cf:dump-state)` that prints clients, resources, surfaces, outputs, seats, grabs and
+  scene tree — the thing you want in a bug report.
+- A frame-timing histogram per output (render time, vblank delta, missed frames).

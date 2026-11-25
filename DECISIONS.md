@@ -1,0 +1,331 @@
+# Decision log
+
+ADR-style. Newest decisions at the bottom. A decision is only "accepted" once its
+consequences show up in `PLAN.md` or `docs/`.
+
+---
+
+## D1 — Implement the Wayland protocol from scratch, not around libwayland
+
+**Status:** accepted
+
+**Context.** `wayflan` demonstrates that a from-scratch client is not only possible but
+nicer to use from Lisp: no per-proxy manual allocation, no toplevel-only C callbacks,
+enums as keywords, hot-redefinable behaviour. All of that applies double to a *server*,
+where libwayland forces an opaque `wl_resource`/vtable model.
+
+**Decision.** `cl-wayland-core`, `-server` and `-client` implement the wire format,
+object model and event loop in Lisp. No linkage to `libwayland-*`.
+
+**Consequences.** We own protocol conformance and all the edge cases libwayland papers
+over. Mitigation: mirror libwayland's undocumented behaviour deliberately (see
+`docs/protocol-layer.md` §9), and run an interop matrix against real clients from day one.
+We gain: real objects (not proxies to C structs), subclassing instead of vtables,
+condition-based errors, and live redefinition.
+
+---
+
+## D2 — `cl-compositor-framework` is a Lisp framework, not CFFI over wlroots
+
+**Status:** accepted (user requirement)
+
+**Context.** The convenience wlroots provides — backends, output lifecycle, renderer,
+scene graph, seat/focus, shell protocol implementations — is exactly what a compositor
+author needs. But binding to wlroots would import wlroots' C object model, its opaque
+structs, `wl_list`, and its signal/listener boilerplate into Lisp, and would make the
+"from scratch" work in D1 pointless.
+
+**Decision.** Reimplement that layer in Lisp. Borrow wlroots' *decomposition* (the
+module boundaries that are known to work), not its code or ABI. Naming: `cl-compositor-framework`.
+
+**Consequences.** This is the largest single piece of work in the project (est. 20-35k
+lines). It is also where Lisp pays off most: generic functions replace signal/listener
+plumbing, CLOS subclassing replaces vtables, `:before`/`:after` methods replace
+`wl_listener` stacks, and the whole layer is hot-reloadable.
+
+---
+
+## D3 — shm-first: `wl_shm` is the primary buffer path and the reference renderer is CPU/pixman
+
+**Status:** accepted (user requirement)
+
+**Context.** `wl_shm` is mandatory for every client, needs no GPU, and gives the
+compositor a plain mmap'd window of pixels. wlroots treats it as the fallback path
+behind dmabuf; that ordering drags in EGL, GBM, modifiers and explicit sync before
+anything works.
+
+**Decision.** Build `wl_shm` pools/buffers first and completely (memfd, mmap, format
+table, validation, release). Implement the renderer interface with a **pixman** backend
+as the reference implementation. Render targets are shm-backed (headless/nested) or
+dumb-buffer-backed (DRM). GLES2/GBM/dmabuf arrive later behind the same interface.
+
+**Consequences.** A fully functional real-hardware compositor with **zero** EGL/GL/GBM
+dependency (dumb buffers + page flips). Golden-image tests run on any machine, including
+CI without a GPU. Cost: CPU compositing caps throughput — acceptable at 1080p, tight at
+4K with many overlapping windows and blur; the mitigation ladder is documented in
+`docs/memory-and-rendering.md` §7.
+
+---
+
+## D4 — CFFI first; Rust shim only as a last resort, as a leaf
+
+**Status:** accepted (user requirement)
+
+**Context.** Some kernel/driver paths are painful through CFFI: atomic KMS property
+blobs, DRM syncobj/fences, EGL extension loading, va_list-shaped APIs, struct-by-value
+returns. The user prefers a Rust shim over C when one is needed.
+
+**Decision.** Everything is CFFI until a specific, documented path is proven hostile.
+Any shim is: Rust, `cdylib`, plain C ABI, POD structs + fds only, versioned, no state
+machine, no Wayland knowledge, and optional at build time. A Lisp fallback must exist
+for every shim function or the shim must be confined to a phase-gated feature.
+
+**Consequences.** No shim is required for phases 0-4 (protocol, shm, pixman, dumb-buffer
+DRM, libinput). Candidate shim territory: explicit sync (phase 7), HDR metadata blobs
+(phase 7), and possibly atomic-commit batching (phase 5).
+
+---
+
+## D5 — Project naming: `cl-*` family, framework named `cl-compositor-framework`
+
+**Status:** accepted (user requirement)
+
+**Context.** A `cl-wayland` name already belongs to Malcolm Still's libwayland binding,
+and calling the framework `cl-wlroots` implies a binding.
+
+**Decision.** Umbrella repo `cl-wayland-project`; systems `cl-wayland-core`,
+`cl-wayland-client`, `cl-wayland-server`, `cl-compositor-framework`, `cl-tinywl`,
+`cl-umbra`. Lisp packages: `wayland.wire`, `wayland.protocol`, `wayland.server`,
+`wayland.client`, `cf` (nickname for `cl-compositor-framework`), `umbra`.
+
+---
+
+## D6 — Protocol definitions come from XML at build time, via an ASDF component
+
+**Status:** accepted
+
+**Context.** wayflan's best idea: `:wayflan-client-impl` teaches ASDF to compile a
+protocol XML file into Lisp forms, so adding a protocol needs no build-system surgery.
+Hand-written protocol bindings rot; generated ones track `wayland-protocols` releases.
+
+**Decision.** Vendor `wayland.xml`, `wayland-protocols/*`, `wlr-protocols/*` and our own
+`umbra-*.xml` under `protocols/`. Provide an ASDF component type that turns any of them
+into interface classes, enum keywords, opcode constants, dispatch tables and
+documentation strings. Generated code is *metadata-driven with static fast paths*: a
+runtime generic marshaller exists for protocols loaded after boot, but hot paths
+(pointer, keyboard, frame callbacks, commits) compile to direct setters/readers.
+
+**Consequences.** Regenerating on a protocol bump is a recompile. Load-time cost is
+bounded by only generating protocols a system declares it implements.
+
+---
+
+## D7 — CLOS subclassing instead of C vtables; generic functions instead of signal/listener
+
+**Status:** accepted
+
+**Context.** libwayland server objects carry an implementation vtable of function
+pointers; wlroots adds `wl_listener` structs wired to `wl_signal`. Both are C's answer to
+"let the user override behaviour". CLOS does this natively.
+
+**Decision.** The generated `wl-surface`, `wl-output`, `wl-seat` classes are *subclassed*
+by the framework (`cf-surface`, `cf-output`, `cf-seat`), whose slots hold compositor
+state and whose `handle-request`/event methods hold behaviour. Framework events are
+generic functions with `:before`/`:after`/`:around` methods.
+
+**Consequences.** Per-object overriding, per-role mixins, and live method redefinition
+come free; the usual "listener bookkeeping" and "did I remove the listener" class of bugs
+disappears. Dispatch through generic functions must stay off the per-event hot path —
+see `docs/protocol-layer.md` §6 for the opcode-table design.
+
+---
+
+## D8 — One protocol description, two directions
+
+**Status:** accepted
+
+**Context.** A compositor needs both ends: the server end, and a client end for the
+nested backend, for tests, and for tooling (control-channel scripts, a session locker).
+
+**Decision.** `cl-wayland-core` generates metadata once; `cl-wayland-client` and
+`cl-wayland-server` consume it. `cl-wayland-client` is API-compatible in spirit with
+wayflan (so wayflan examples port easily) but shares our objects, reactor and schema.
+
+**Consequences.** Bugs found in one direction inform the other; the nested backend is
+also a permanent conformance test for the server.
+
+---
+
+## D9 — Single-threaded protocol loop, with a supervised command channel
+
+**Status:** accepted
+
+**Context.** Wayland state is per-client and order-sensitive. A lock-free multi-threaded
+compositor is a research project; also, an SBCL debugger prompt in the main loop freezes
+every client, which is a bad first impression.
+
+**Decision.** One thread owns the display, clients, scene and backends. Other threads
+(control channel, REPL helpers, child-process reaping) submit work through a command queue
+that wakes the loop via `eventfd`. Protocol errors from clients never enter the debugger: they post
+`wl_display.error` and disconnect. Internal bugs are logged, and the compositor attempts
+to keep running (configurable to abort).
+
+**Consequences.** Input latency and frame timing stay predictable. Hot-reload works
+because redefinition happens *between* dispatches, not inside them.
+
+---
+
+## D10 — `cl-umbra` targets daily-driver parity, not Umbriel's eye candy
+
+**Status:** accepted (user requirement)
+
+**Context.** Umbriel = wlroots + SceneFX fork: scrolling/dwindle/master/stacking layouts,
+per-output workspaces, rules, blur, shadows, animations, HDR, VRR, explicit sync,
+Xwayland, IPC, live-reloaded TOML.
+
+**Decision.** v1 ("daily driver, no eye candy") = xdg-shell + layer-shell, master and
+scrolling layouts, per-output workspaces, keybinds, config file, live control, screenshots, session
+lock, clipboard/DnD, fractional-scale, cursor-shape, xdg-activation. Effects/HDR/VRR/
+explicit sync/Xwayland are phase 7, not v1 gates.
+
+**Consequences.** v1 is reachable. The scene graph and renderer are designed with effects
+in mind (retained tree, damage, offscreen passes) so phase 7 does not require a rewrite.
+
+---
+
+## D11 — Config is s-expressions; no TOML
+
+**Status:** accepted (user requirement)
+
+**Context.** Umbriel uses live-reloaded TOML because its users expect it. In Lisp, an
+s-expression config is read by `read`, validated as data, macro-expandable, and can *be*
+code: keybinds can call named commands, layouts can be parameterised. TOML would mean a
+parser dependency and a second configuration language underneath the first.
+
+**Decision.** `~/.config/umbra/init.lisp` is the canonical config. It is a list of
+declarative sections (`output`, `layout`, `bind`, `device`, `rule`, `layer-rule`, `startup`,
+`env`), read with `*read-eval*` bound to `nil` in a dedicated package, validated against a
+per-section schema, and applied atomically with rollback. Keybindings reference *registered
+commands* (with data arguments), not arbitrary evaluation. Arbitrary Lisp in the config is
+available only behind an explicit `(enable-lisp-config)` opt-in.
+
+Design details in [`docs/config-and-control.md`](docs/config-and-control.md).
+
+**Consequences.** No TOML parser; config is inspectable (`(umbra:current-config)`),
+diffable, and reloadable with precise diagnostics (line numbers, unknown keys, range
+errors). The REPL and the config speak the same language. Umbriel users need a translation
+table; a TOML compatibility reader is explicitly **not** planned, because it would
+reintroduce the second language. Security posture: a config file is trusted input from the
+user's own home directory, but it is still read as data by default, so a stray paste cannot
+execute code.
+
+---
+
+## D12 — Xwayland via `xwayland-satellite`, not an embedded XWM
+
+**Status:** accepted (user requirement)
+
+**Context.** wlroots' `xwayland` module (XWM, selection bridge, window→surface mapping) is
+thousands of lines and the least pleasant code in the tree. `xwayland-satellite` is a
+separate rootless Xwayland integration that acts as both a Wayland client and an X server
+for the compositor.
+
+Its actual requirements were checked against the project's README, not assumed:
+
+- **Must have:** core interfaces (`wl_compositor`, `wl_surface`, `wl_output`), `xdg-shell`,
+  and `wp_viewporter` (used for scaling).
+- **Optional, improved with:** `linux-dmabuf`, `xdg-activation`, `xdg-decoration`,
+  `xdg-foreign`, `pointer-constraints`, `primary-selection`, `tablet`, fractional scale.
+- **Not required:** `wlr-layer-shell`, `wlr-foreign-toplevel`, `xwayland-shell`, or any
+  compositor-internal XWM.
+
+**Decision.** Defer X to phase 6/7 and support `xwayland-satellite` as a supervised child
+process. On-demand activation uses its `-listenfd` mode (spawn with a display number and a
+listening fd, as niri does); otherwise it starts after compositor init and X clients get
+`DISPLAY` pointing at it. No X protocol code, no XWM, no X selection bridge in `cl-umbra`.
+
+**Consequences.** The Xwayland cost collapses from "thousands of lines" to "spawn and
+supervise a process", because we implement `xdg-shell` and `viewporter` anyway. X clipboard
+and X window management are satellite's problem. The `xwayland-shell` protocol is not
+needed. Risk moves to process supervision and to satellite's optional-protocol wishes,
+which are phase 6-7 items regardless. Cost of reversal: low — replacing a child process
+with an in-process XWM later would not change the rest of the compositor.
+
+---
+
+## D13 — License: GPL-3.0-or-later for everything
+
+**Status:** accepted (user requirement)
+
+**Context.** The project was initially drafted as MIT. The user wants copyleft instead, so a
+compositor built on this framework cannot be closed. Version and scope were decided
+explicitly: GPL-3 (not 2) because it is compatible with Apache-2.0 code, carries an express
+patent grant and anti-tivoization terms, and is what river, niri and dwl use; "or later" so
+the project can move to a future GPL version without tracking down every contributor.
+
+**Decision.** GPL-3.0-or-later for **all** systems — `cl-wayland-core`, `cl-wayland-client`,
+`cl-wayland-server`, `cl-compositor-framework`, `cl-tinywl`, `cl-umbra` — plus the
+documentation in `docs/`. One `LICENSE` at the repository root (the canonical GPL-3.0 text,
+already committed), SPDX headers in source files
+(`;; SPDX-License-Identifier: GPL-3.0-or-later`), and a short notice in each `.asd`.
+
+Vendored protocol XML under `protocols/` keeps its own license: `wayland.xml` is MIT/HPND
+and `wayland-protocols`/`wlr-protocols` are MIT. Those notices stay in place next to the
+files. MIT → GPL is a compatible direction, so generating GPL code from those XML files is
+unproblematic.
+
+**Consequences.**
+
+- Any compositor built on `cl-compositor-framework` is GPL-3.0-or-later. That is the intent:
+  the framework is a commons, and improvements to it flow back.
+- **Wayland clients are unaffected.** Firefox, kitty, GTK and Qt apps talk to the compositor
+  over a socket using a protocol; that is not linking or a derivative work, so no client
+  becomes GPL by running on `cl-umbra`. The same holds for programs that send forms over the
+  eval channel.
+- Code that may be *copied* narrows: GPL-3 code (river, niri, dwl, sway where GPL) is
+  compatible with attribution; GPL-2.0-only code is not, and neither is code with no license.
+  The project's stance is still independent implementation — consult, do not transcribe — so
+  this mostly affects convenience copying.
+- wayflan's BSD-3-Clause is one-way compatible: adapting its code is fine, keeping the notice
+  in the file is required.
+- Dependencies are unaffected in practice (SBCL is public-domain/BSD, CFFI is MIT, `plump` is
+  zlib, `alexandria` is MIT, `closer-mop` is MIT): permissive licenses are GPL-compatible.
+- Distribution: any binary we ship (`save-lisp-and-die` image) is conveyed under GPL-3 and
+  must come with corresponding source, which this repository is.
+- A future decision could relicense a *client* library separately if non-GPL Lisp programs
+  ever need it; that would require every copyright holder's agreement, which is why it is
+  cheaper to keep one license now.
+
+---
+
+## D14 — The REPL is the control surface; no IPC message layer
+
+**Status:** accepted (user requirement)
+
+**Context.** Compositors grow message layers (`swaymsg`, `riverctl`, Umbriel's JSON socket)
+because a C or Rust process's state is not addressable from outside. The layer then
+accumulates: a command registry, a wire format, request/reply framing, an event stream,
+subscriptions, schema versioning, a client library, and conformance tests for all of it. In
+Common Lisp the running image is addressable, and a form is the message.
+
+**Decision.** No command registry and no IPC protocol.
+
+- The control surface is package `umbra`: exported command and query **functions** with
+  lambda lists and docstrings (`focus`, `workspaces`, `dispatch`, `reload-config`, …).
+- Humans attach SLY/SLIME and evaluate anything, between dispatches (D9).
+- Non-image processes (scripts, bars, test harnesses) use a local **eval channel**: a 0600
+  Unix socket that reads s-expressions and returns printed values, executes at safe points
+  under a deadline, and never enters the debugger.
+- Events are closures: `(umbra:subscribe (lambda (event) …))` in the image; a client that
+  wants a stream sends that one form with its own stream captured. No event bus, no schema.
+- Panels, notifiers and lockers stay separate Wayland clients using protocols
+  (`wlr-layer-shell`, `wlr-foreign-toplevel`, `ext-session-lock`), not IPC.
+
+**Consequences.** A subsystem disappears from v1 — estimated 2-3 focused weeks of build plus
+permanent schema maintenance, a client library and a conformance suite. The control surface
+is tested by ordinary function tests. Stability is promised by a package and docstrings,
+which is a weaker promise than a versioned protocol and much cheaper to keep. Scripts need
+no client library: `socat` plus a form. Costs: evaluating a form is shell-equivalent power,
+so the channel is opt-in, `0600`, peer-credential checked, deadline-bounded and logged; a
+third-party tool that insists on a specific protocol (`waybar`'s sway mode, say) gets a small
+out-of-tree adapter if and when someone needs it, not a protocol in the core.
