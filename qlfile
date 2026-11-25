@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Edgar Denny
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# qlot/qlfile for the cl-wayland-project systems.
+#
+# There are no external dependencies yet, on purpose: the wire codec and the
+# test harness are dependency-free.  Dependencies arrive with the phase they
+# serve (CFFI for the reactor in phase 0, pixman/CFFI in phase 2), and each is
+# added here with a pinned version so `qlot install` reproduces a build.

@@ -28,12 +28,14 @@ empty `.asd` per system; `protocols/` populated with pinned XML.
 
 `wayland.wire`
 - [ ] 64 KiB in/out rings with partial-message handling
-- [ ] header encode/decode; size/opcode split; alignment assertions
-- [ ] encoders/decoders: int, uint, fixed, string, object, new_id, array
+- [x] header encode/decode; size/opcode split; alignment assertions
+- [x] encoders/decoders: int, uint, fixed, string, object, new_id, array
+      (fd argument bookkeeping included; `sendmsg`/`recvmsg` still open)
 - [ ] `sendmsg`/`recvmsg` with `SCM_RIGHTS`; fd queue; 28-fd flush ceiling; `MSG_CMSG_CLOEXEC`
 - [ ] `MSG_CTRUNC`, missing-fd, surplus-fd handling (all ⇒ error + close)
 - [ ] `WAYLAND_DEBUG`-compatible trace logging
-- [ ] unit tests: byte-exact vectors, roundtrip property tests, boundary sizes
+- [x] unit tests: byte-exact vectors, roundtrip property tests, boundary sizes
+- [ ] fuzz harness feeding a `socketpair` (needs the I/O path below)
 
 `wayland.reactor`
 - [ ] epoll wrapper (`epoll_create1`, `epoll_ctl`, `epoll_wait`) via CFFI
@@ -266,16 +268,18 @@ Session
 
 ## First two weeks (do this next)
 
-1. `git init`, six system dirs, `.asd` skeletons, SPDX headers (the GPL-3.0 `LICENSE` is
-   already in place), `qlfile`, `justfile`/`Makefile`.
+1. [x] `git init`, six system dirs, `.asd` skeletons, SPDX headers (the GPL-3.0 `LICENSE`
+   is already in place), `qlfile`, `Makefile`.
 2. Vendor `wayland.xml`, `wayland-protocols`, `wlr-protocols`; pin versions in a README.
-3. `wayland.wire` + tests: header, ints, strings, arrays. No sockets yet.
+3. [x] `wayland.wire` + tests: header, ints, strings, arrays, fixed, objects, fds
+   (queued, not yet sent). No sockets yet.
 4. Record fixtures: `WAYLAND_DEBUG=1 kitty` capture, plus a `wayland-info` capture.
 5. `sendmsg`/`recvmsg` fd path with `socketpair` + `memfd_create`; test the 28-fd boundary.
 6. Reactor + epoll + timerfd; a test that sleeps exactly as long as asked.
 7. XML schema parser; assert opcodes match `wayland-scanner`.
 8. `demo-globals` against the live session.
-9. `scripts/purity-check.sh` (fails if `libwayland*` or `libwlroots*` appears in `ldd`).
+9. [x] `scripts/purity-check.sh` (fails if `libwayland*` or `libwlroots*` appears in
+   `ldd`); `scripts/check-loads.sh` probes the loaded image's `/proc/self/maps`.
 10. Write the phase-0 gate as a script, even though it fails at first.
 
 ## Re-planning rules

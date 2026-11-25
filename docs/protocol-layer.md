@@ -25,6 +25,9 @@ A connection is a Unix stream socket carrying a sequence of messages:
   the opcode means a request or an event and what its signature is.
 - A message larger than 4 KiB is legal (arrays can be large). We cap inbound messages at
   a configurable 64 KiB and treat larger as a protocol error.
+- That cap is a policy limit, not the format's: the size field is 16 bits and sizes are
+  multiples of 4, so **65532 octets is the largest message that can exist at all**. The
+  cap stays configurable so a server can tighten it per connection.
 
 ### Argument encoding
 

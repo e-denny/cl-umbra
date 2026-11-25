@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+*.fasl
+*.lib
+*.dfsl
+*.fsl
+*.lx64fsl
+*.x86f
+.qlot/
+.cache/
+*.orig
+*~

@@ -2,9 +2,10 @@
 
 A Wayland stack written in Common Lisp, from the socket up.
 
-**Status: planning. No code yet.** The deliverable of this repository today is the plan:
-[`PLAN.md`](PLAN.md), the design documents in [`docs/`](docs/), and the decision log
-[`DECISIONS.md`](DECISIONS.md).
+**Status: phase 0 in progress.** Planning is complete — [`PLAN.md`](PLAN.md), the design
+documents in [`docs/`](docs/), and the decision log [`DECISIONS.md`](DECISIONS.md) — and
+the first slice of `cl-wayland-core` exists: `wayland.wire`, the message framing and
+argument codec, with byte-exact and property tests. No sockets yet, by design.
 
 ## What this is
 
@@ -81,6 +82,16 @@ cl-wayland-core
 Developed on Arch, SBCL 2.6.10, AMD Renoir (Mesa 26.3), wlroots 0.20 and libwayland
 installed **only as test fixtures and to run reference compositors** — never linked by
 this project. Test clients: `kitty`, `weston-simple-shm`, `wayland-info`.
+
+## Building and testing
+
+```
+make check     # test suite, every system loads, purity scan
+```
+
+Each probe also runs alone: `scripts/run-tests.sh`, `scripts/check-loads.sh`,
+`scripts/purity-check.sh`. SBCL only; there are no external Lisp dependencies yet, so
+neither Quicklisp nor `qlot install` is needed to build phase 0.
 
 ## License
 

@@ -18,7 +18,7 @@ cl-wayland-project/
 │   └── umbra/                   our own protocols, if any (none planned: control is Lisp, D14)
 ├── cl-wayland-core/
 │   ├── cl-wayland-core.asd
-│   └── src/  wire.lisp  schema.lisp  codegen.lisp  interface.lisp
+│   └── src/  packages.lisp  wire.lisp  schema.lisp  codegen.lisp  interface.lisp
 │             object.lisp  reactor.lisp  epoll.lisp  log.lisp  ffi-util.lisp
 ├── cl-wayland-client/
 │   └── src/  display.lisp  proxy.lisp  registry.lisp
@@ -43,7 +43,8 @@ cl-wayland-project/
 ├── cl-tinywl/       tinywl.lisp  main.lisp
 ├── cl-umbra/        compositor.lisp  layouts/  workspaces.lisp  rules.lisp
 │                    config/  control/  session.lisp
-├── tests/           unit/  fuzz/  interop/  golden/  perf/  scripts/
+├── tests/           cl-wayland-tests.asd  harness.lisp  unit/  fuzz/  interop/
+│                    golden/  perf/  scripts/
 ├── scripts/         run-nested.sh  run-tty.sh  capture.sh  purity-check.sh
 └── qlfile           local Quicklisp/qlot project set
 ```
