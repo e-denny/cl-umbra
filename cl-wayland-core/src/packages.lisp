@@ -104,7 +104,30 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:send-with-ancillary
    #:receive-with-ancillary
    #:cmsg-align
-   #:cmsg-space))
+   #:cmsg-space
+   ;; clocks and byte streams
+   #:monotonic-seconds
+   #:read-into
+   #:read-into-pointer
+   #:write-from-pointer
+   ;; event sources
+   #:make-event-fd
+   #:read-event-fd
+   #:signal-event-fd
+   #:make-timer-fd
+   #:set-timer-absolute
+   #:read-timer-fd
+   #:make-signal-fd
+   #:unblock-signals
+   #:read-signal
+   #:raise-signal
+   #:ignore-sigpipe
+   ;; signal numbers
+   #:+sigint+
+   #:+sigusr1+
+   #:+sigpipe+
+   #:+sigterm+
+   #:+sigchld+))
 
 (defpackage #:wayland.io
   (:use #:cl #:wayland.wire)
@@ -122,3 +145,72 @@ only place that touches a socket.")
    #:pump
    #:truncated-descriptors
    #:truncated-descriptors-count))
+
+(defpackage #:wayland.reactor
+  (:use #:cl)
+  (:import-from #:wayland.ffi
+                #:+sigint+
+                #:+sigusr1+
+                #:+sigpipe+
+                #:+sigterm+
+                #:+sigchld+
+                #:read-signal
+                #:ignore-sigpipe)
+  (:documentation
+   "The event loop: epoll, level-triggered; timerfd for the nearest deadline;
+eventfd for wakeups from other threads; signalfd for termination and children;
+idle callbacks that run once per cycle.
+
+One cycle is: run queued commands, wait, dispatch ready sources, fire due
+timers, run idles.  See docs/protocol-layer.md §7.  Nothing here knows what a
+Wayland client is.")
+  (:export
+   ;; reactor
+   #:reactor
+   #:make-reactor
+   #:close-reactor
+   #:run-once
+   #:run
+   #:request-stop
+   #:stopped-p
+   #:dispatching-p
+   #:monotonic-now
+   ;; sources
+   #:fd-source
+   #:add-source
+   #:remove-source
+   #:set-source-interest
+   #:source-fd
+   #:source-name
+   #:source-interest
+   ;; timers
+   #:timer
+   #:add-timer
+   #:cancel-timer
+   #:timer-deadline
+   ;; idles and commands
+   #:add-idle
+   #:remove-idle
+   #:post
+   ;; signals
+   #:add-signal-source
+   #:ignore-sigpipe
+   #:read-signal
+   #:timer-interval
+   #:timer-function
+   #:+sigint+
+   #:+sigterm+
+   #:+sigusr1+
+   #:+sigchld+
+   #:+sigpipe+
+   ;; epoll masks, for callbacks that care what happened
+   #:+epoll-in+
+   #:+epoll-out+
+   #:+epoll-err+
+   #:+epoll-hup+
+   #:+epoll-rdhup+
+   ;; conditions
+   #:reactor-error
+   #:reactor-reentry
+   #:epoll-error
+   #:duplicate-source))

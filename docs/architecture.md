@@ -62,7 +62,7 @@ does not compile the world.
 | `wayland.io` | — | transport: flush an out buffer with its descriptors, pump a socket into whole messages |
 | `wayland.protocol` | — | schema objects, interface registry, `define-*` macros |
 | `wayland.object` | — | object tables, ids, destruction protocol |
-| `wayland.reactor` | — | epoll, timers, idles, wakeups, safe points |
+| `wayland.reactor` | — | epoll sources (level-triggered), timers, idles, posted commands, signalfd; `epoll.lisp` holds the packed-event syscall wrapper |
 | `wayland.client` | `wl.client` | display, proxies, registry |
 | `wayland.server` | `wl.server` | display, globals, resources, clients |
 | `cl-compositor-framework` | `cf` | framework, one sub-package per module (`cf.backend`, `cf.scene`, …) |

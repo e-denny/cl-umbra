@@ -15,4 +15,6 @@ for libwayland, written from the socket up."
                 :components ((:file "packages")
                              (:file "ffi-util")
                              (:file "wire")
-                             (:file "io")))))
+                             (:file "io")
+                             (:file "epoll")
+                             (:file "reactor")))))

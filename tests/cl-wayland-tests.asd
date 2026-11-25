@@ -11,7 +11,8 @@
                (:module "unit"
                 :serial t
                 :components ((:file "wire")
-                             (:file "io"))))
+                             (:file "io")
+                             (:file "reactor"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
              (unless (zerop (uiop:symbol-call :wayland.test :run-all))

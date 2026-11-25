@@ -6,8 +6,9 @@ A Wayland stack written in Common Lisp, from the socket up.
 documents in [`docs/`](docs/), and the decision log [`DECISIONS.md`](DECISIONS.md) — and
 the first slice of `cl-wayland-core` exists: `wayland.wire` (framing and argument
 codec), `wayland.ffi` (sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, errno) and
-`wayland.io` (flush and pump, descriptor passing, partial-message handling), with
-byte-exact, property and real-descriptor tests. No reactor or protocol schema yet.
+`wayland.io` (flush and pump, descriptor passing, partial-message handling) and
+`wayland.reactor` (epoll, timerfd, eventfd wakeups, signalfd, idles), with
+byte-exact, property, real-descriptor and real-signal tests. No protocol schema yet.
 
 ## What this is
 

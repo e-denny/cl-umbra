@@ -42,12 +42,15 @@ empty `.asd` per system; `protocols/` populated with pinned XML.
 - [ ] fuzz harness feeding a `socketpair` (needs the I/O path below)
 
 `wayland.reactor`
-- [ ] epoll wrapper (`epoll_create1`, `epoll_ctl`, `epoll_wait`) via CFFI
-- [ ] fd sources with read/write interest toggling
-- [ ] timerfd timers with nearest-deadline timeout computation
-- [ ] eventfd wakeups + command queue (for threads, REPL and the control channel later)
-- [ ] signalfd for `SIGCHLD`/`SIGTERM`/`SIGUSR1`; `SIGPIPE` ignored
-- [ ] idle callbacks; dispatch-order tests
+- [x] epoll wrapper (`epoll_create1`, `epoll_ctl`, `epoll_wait`) via CFFI; level-triggered
+- [x] fd sources with read/write interest toggling; hangup and error reach the callback
+- [x] timerfd timers with nearest-deadline timeout computation; repeating timers
+- [x] eventfd wakeups + command queue (for threads, REPL and the control channel later)
+- [x] signalfd for `SIGCHLD`/`SIGTERM`/`SIGUSR1`; `SIGPIPE` ignored
+      (`SB-CHILD`-style reaping is wired up with `xwayland-satellite` in phase 6)
+- [x] idle callbacks; dispatch-order tests
+- [ ] re-entrancy guard is tested; the 50 ms watchdog log and the per-cycle dispatch
+      budget arrive with the connection layer that can attribute a slow cycle
 
 `wayland.protocol`
 - [ ] XML → CLOS schema (protocol, interface, request, event, arg, enum, entry)
@@ -280,7 +283,7 @@ Session
 4. Record fixtures: `WAYLAND_DEBUG=1 kitty` capture, plus a `wayland-info` capture.
 5. [x] `sendmsg`/`recvmsg` fd path with `socketpair` + `memfd_create`; test the 28-fd
    boundary and `MSG_CTRUNC`.
-6. Reactor + epoll + timerfd; a test that sleeps exactly as long as asked.
+6. [x] Reactor + epoll + timerfd; a test that sleeps exactly as long as asked.
 7. XML schema parser; assert opcodes match `wayland-scanner`.
 8. `demo-globals` against the live session.
 9. [x] `scripts/purity-check.sh` (fails if `libwayland*` or `libwlroots*` appears in

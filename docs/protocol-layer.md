@@ -238,6 +238,12 @@ Cycle:
 5. compute timeout = nearest timer (frame pacing, animation, watchdog)
 6. `epoll_wait`, handle events, goto 1
 
+Steps 2 and 3 become descriptors: the connection layer registers each client's
+socket as a source whose readable callback pumps and dispatches; the reactor
+itself only orders commands, descriptors, timers and idles.  That order is
+implemented in `wayland.reactor` (`run-once`) and is a tested contract, not a
+convention.
+
 Details that are easy to get wrong and are therefore tested explicitly:
 
 - Level-triggered epoll; always read until `EAGAIN`, then re-arm.

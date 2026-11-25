@@ -340,3 +340,204 @@ leak into a child."
             (nreverse fds)
             truncated
             (zerop octets-read))))
+
+;;; ---------------------------------------------------------------------------
+;;; Clocks and plain byte streams
+;;; ---------------------------------------------------------------------------
+
+(cffi:defcstruct (timespec :conc-name timespec-)
+  (seconds :long)
+  (nanoseconds :long))
+
+(cffi:defcfun ("clock_gettime" %clock-gettime) :int
+  (clock-id :int) (time :pointer))
+
+(defconstant +clock-monotonic+ 1)
+
+(defun monotonic-seconds ()
+  "CLOCK_MONOTONIC as seconds, for deadlines that must not jump when the wall
+clock is adjusted."
+  (cffi:with-foreign-object (time '(:struct timespec))
+    (when (minusp (%clock-gettime +clock-monotonic+ time))
+      (syscall-failed 'clock-gettime (errno)))
+    (+ (timespec-seconds time)
+       (/ (timespec-nanoseconds time) 1d9))))
+
+(cffi:defcfun ("read" %read) :ssize
+  (fd :int) (buffer :pointer) (count :size))
+
+(cffi:defcfun ("write" %write) :ssize
+  (fd :int) (buffer :pointer) (count :size))
+
+(defun read-into-pointer (fd pointer length)
+  "read(2) into foreign memory.
+
+Returns (values octets-read eof-p).  EAGAIN returns zero and no EOF; a zero
+return with LENGTH above zero is end of stream.  EINTR is retried."
+  (loop
+    (let ((result (%read fd pointer length)))
+      (cond ((>= result 0)
+             (return (values result (and (plusp length) (zerop result)))))
+            ((= (errno) +eintr+))
+            ((= (errno) +eagain+) (return (values 0 nil)))
+            (t (syscall-failed 'read (errno)))))))
+
+(defun read-into (fd octets start end)
+  "read(2) into OCTETS[START:END].  Returns (values octets-read eof-p)."
+  (cffi:with-pointer-to-vector-data (data octets)
+    (read-into-pointer fd (cffi:inc-pointer data start) (- end start))))
+
+(defun write-from-pointer (fd pointer length)
+  "write(2); returns the octets written, zero on EAGAIN.  EINTR is retried."
+  (loop
+    (let ((result (%write fd pointer length)))
+      (cond ((>= result 0) (return result))
+            ((= (errno) +eintr+))
+            ((= (errno) +eagain+) (return 0))
+            (t (syscall-failed 'write (errno)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; eventfd, timerfd, signalfd
+;;; ---------------------------------------------------------------------------
+;;;
+;;; These three exist to feed epoll, which is why they live at the syscall edge
+;;; and not in the reactor: the reactor decides *when* to arm a timer, this file
+;;; only knows how.
+
+(defconstant +efd-nonblock+ #x800)
+(defconstant +efd-cloexec+ #x80000)
+(defconstant +tfd-nonblock+ #x800)
+(defconstant +tfd-cloexec+ #x80000)
+(defconstant +tfd-timer-abstime+ 1)
+(defconstant +sfd-nonblock+ #x800)
+(defconstant +sfd-cloexec+ #x80000)
+
+(defconstant +sig-block+ 0)
+(defconstant +sig-unblock+ 1)
+(defconstant +sigmask-size+ 128
+  "sizeof(sigset_t) on 64-bit Linux: 16 unsigned longs.")
+(defconstant +signalfd-siginfo-size+ 128
+  "sizeof(struct signalfd_siginfo); ssi_signo is the first u32.")
+(defconstant +itimerspec-size+ 32
+  "sizeof(struct itimerspec): interval and value, two timespecs of two longs.")
+(defconstant +sig-ign+ 1
+  "SIG_IGN as a handler pointer.")
+
+(defconstant +sigint+ 2)
+(defconstant +sigusr1+ 10)
+(defconstant +sigpipe+ 13)
+(defconstant +sigterm+ 15)
+(defconstant +sigchld+ 17)
+
+(cffi:defcfun ("eventfd" %eventfd) :int
+  (initial-value :unsigned-int) (flags :int))
+
+(cffi:defcfun ("timerfd_create" %timerfd-create) :int
+  (clock-id :int) (flags :int))
+
+(cffi:defcfun ("timerfd_settime" %timerfd-settime) :int
+  (fd :int) (flags :int) (new-value :pointer) (old-value :pointer))
+
+(cffi:defcfun ("signalfd" %signalfd) :int
+  (fd :int) (mask :pointer) (flags :int))
+
+(cffi:defcfun ("sigemptyset" %sigemptyset) :int (set :pointer))
+(cffi:defcfun ("sigaddset" %sigaddset) :int (set :pointer) (signal :int))
+(cffi:defcfun ("pthread_sigmask" %pthread-sigmask) :int
+  (how :int) (set :pointer) (old-set :pointer))
+(cffi:defcfun ("raise" %raise) :int (signal :int))
+(cffi:defcfun ("signal" %signal) :pointer (signal :int) (handler :pointer))
+
+(defun check-fd (fd operation)
+  (when (minusp fd)
+    (syscall-failed operation (errno)))
+  fd)
+
+(defun make-event-fd ()
+  "A non-blocking, close-on-exec eventfd counter, for waking the loop."
+  (check-fd (%eventfd 0 (logior +efd-nonblock+ +efd-cloexec+)) 'eventfd))
+
+(defun read-event-fd (fd)
+  "Read and reset the counter.  Zero when nothing is pending (EAGAIN)."
+  (cffi:with-foreign-object (value :uint64)
+    (multiple-value-bind (count) (read-into-pointer fd value 8)
+      (if (plusp count) (cffi:mem-ref value :uint64) 0))))
+
+(defun signal-event-fd (fd)
+  "Increment the counter.  EAGAIN means it is already saturated, which is a
+wakeup either way."
+  (cffi:with-foreign-object (value :uint64)
+    (setf (cffi:mem-ref value :uint64) 1)
+    (write-from-pointer fd value 8)))
+
+(defun make-timer-fd ()
+  (check-fd (%timerfd-create +clock-monotonic+
+                             (logior +tfd-nonblock+ +tfd-cloexec+))
+            'timerfd-create))
+
+(defun set-timer-absolute (fd seconds)
+  "Arm the timerfd for the absolute CLOCK_MONOTONIC time SECONDS, or disarm it
+when SECONDS is NIL.  A time in the past fires immediately, which is what a
+deadline that slipped during dispatch should do."
+  (declare (type (or null real) seconds))
+  (cffi:with-foreign-object (spec :char +itimerspec-size+)
+    (dotimes (index 4)
+      (setf (cffi:mem-ref spec :long (* index 8)) 0))
+    (when seconds
+      (let* ((whole (floor seconds))
+             (fraction (round (* (- seconds whole) 1000000000))))
+        (when (>= fraction 1000000000)
+          (incf whole)
+          (decf fraction 1000000000))
+        (setf (cffi:mem-ref spec :long 16) whole
+              (cffi:mem-ref spec :long 24) fraction)))
+    (when (minusp (%timerfd-settime fd +tfd-timer-abstime+ spec
+                                    (cffi:null-pointer)))
+      (syscall-failed 'timerfd-settime (errno)))))
+
+(defun read-timer-fd (fd)
+  "Expirations since the last read; zero on EAGAIN."
+  (cffi:with-foreign-object (value :uint64)
+    (multiple-value-bind (count) (read-into-pointer fd value 8)
+      (if (plusp count) (cffi:mem-ref value :uint64) 0))))
+
+(defun make-signal-fd (&rest signal-numbers)
+  "Block SIGNAL-NUMBERS in the calling thread and return a signalfd for them.
+
+Blocking is the point: a signal that is blocked stays pending, so this thread
+can read it from the descriptor instead of having a handler preempt a dispatch.
+SIGCHLD for children and SIGTERM/SIGUSR1 for shutdown go here, not in handlers."
+  (cffi:with-foreign-object (mask :char +sigmask-size+)
+    (%sigemptyset mask)
+    (dolist (signal signal-numbers)
+      (%sigaddset mask signal))
+    (when (minusp (%pthread-sigmask +sig-block+ mask (cffi:null-pointer)))
+      (syscall-failed 'pthread-sigmask (errno)))
+    (check-fd (%signalfd -1 mask (logior +sfd-nonblock+ +sfd-cloexec+))
+              'signalfd)))
+
+(defun unblock-signals (&rest signal-numbers)
+  (cffi:with-foreign-object (mask :char +sigmask-size+)
+    (%sigemptyset mask)
+    (dolist (signal signal-numbers)
+      (%sigaddset mask signal))
+    (when (minusp (%pthread-sigmask +sig-unblock+ mask (cffi:null-pointer)))
+      (syscall-failed 'pthread-sigmask (errno)))))
+
+(defun read-signal (fd)
+  "The next pending signal number, or NIL when none is queued."
+  (cffi:with-foreign-object (info :char +signalfd-siginfo-size+)
+    (multiple-value-bind (count) (read-into-pointer fd info +signalfd-siginfo-size+)
+      (if (plusp count)
+          (cffi:mem-ref info :uint32 0)
+          nil))))
+
+(defun raise-signal (signal)
+  (when (minusp (%raise signal))
+    (syscall-failed 'raise (errno))))
+
+(defun ignore-sigpipe ()
+  "Ignore SIGPIPE process-wide.  A compositor whose clients vanish constantly
+must see EPIPE from write(2), not die from a signal."
+  (%signal +sigpipe+ (cffi:make-pointer +sig-ign+))
+  nil)
