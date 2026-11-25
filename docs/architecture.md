@@ -60,7 +60,7 @@ does not compile the world.
 | `wayland.wire` | — | buffers, message codec, fd queue (pure: no sockets) |
 | `wayland.ffi` | — | libc: socket pairs, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, errno, `FD_CLOEXEC` |
 | `wayland.io` | — | transport: flush an out buffer with its descriptors, pump a socket into whole messages |
-| `wayland.protocol` | — | schema objects, interface registry, `define-*` macros |
+| `wayland.protocol` | — | XML reader, schema objects (interfaces, messages, args, enums), signatures, interface registry; `define-*` macros still to come with codegen |
 | `wayland.object` | — | object tables, ids, destruction protocol |
 | `wayland.reactor` | — | epoll sources (level-triggered), timers, idles, posted commands, signalfd; `epoll.lisp` holds the packed-event syscall wrapper |
 | `wayland.client` | `wl.client` | display, proxies, registry |

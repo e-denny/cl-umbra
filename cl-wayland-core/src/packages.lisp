@@ -214,3 +214,81 @@ Wayland client is.")
    #:reactor-reentry
    #:epoll-error
    #:duplicate-source))
+
+(defpackage #:wayland.protocol
+  (:use #:cl)
+  (:documentation
+   "Protocol metadata: the XML corpus parsed into CLOS objects.
+
+An INTERFACE knows its version, its requests and events in wire order (so the
+opcode is the position), its enums, and the generated signature of every
+message.  This package parses and validates; it does not generate code and does
+not open sockets.")
+  (:export
+   ;; XML
+   #:xml-element
+   #:xml-element-name
+   #:xml-element-attributes
+   #:xml-element-children
+   #:parse-xml
+   ;; schema objects
+   #:wl-protocol
+   #:protocol-name
+   #:protocol-copyright
+   #:protocol-interfaces
+   #:protocol-source
+   #:wl-interface
+   #:interface-name
+   #:interface-version
+   #:interface-requests
+   #:interface-events
+   #:interface-enums
+   #:interface-summary
+   #:interface-description
+   #:interface-protocol
+   #:wl-message
+   #:message-name
+   #:message-opcode
+   #:message-kind
+   #:message-args
+   #:message-since
+   #:message-summary
+   #:message-description
+   #:message-interface
+   #:message-signature
+   #:message-interface-references
+   #:wl-arg
+   #:arg-name
+   #:arg-type
+   #:arg-type-character
+   #:arg-interface
+   #:arg-allow-null
+   #:arg-enum
+   #:arg-summary
+   #:wl-enum
+   #:enum-name
+   #:enum-bitfield-p
+   #:enum-entries
+   #:enum-summary
+   #:enum-description
+   #:enum-interface
+   #:wl-entry
+   #:entry-name
+   #:entry-value
+   #:entry-since
+   #:entry-summary
+   #:entry-description
+   ;; parsing
+   #:parse-protocol-string
+   #:parse-protocol-file
+   #:resolve-interface
+   ;; registry
+   #:register-protocol
+   #:unregister-protocol
+   #:find-interface
+   #:registered-interfaces
+   #:clear-protocol-registry
+   ;; conditions
+   #:schema-error
+   #:xml-error
+   #:invalid-schema))

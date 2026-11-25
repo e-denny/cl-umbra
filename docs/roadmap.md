@@ -53,12 +53,12 @@ empty `.asd` per system; `protocols/` populated with pinned XML.
       budget arrive with the connection layer that can attribute a slow cycle
 
 `wayland.protocol`
-- [ ] XML → CLOS schema (protocol, interface, request, event, arg, enum, entry)
-- [ ] `define-interface`, `define-request`, `define-event`, `define-enum`
-- [ ] interface registry, version/since metadata, opcode assignment
-- [ ] ASDF component `:wayland-protocol`
-- [ ] parse every vendored XML file; compare opcodes/signatures against `wayland-scanner`
-      output as an oracle
+- [x] XML → CLOS schema (protocol, interface, request, event, arg, enum, entry)
+- [x] interface registry, version/since metadata, opcode assignment, libwayland signatures
+- [x] parse every vendored XML file (69); compare opcodes, signatures and object types
+      against `wayland-scanner private-code` as an oracle
+- [ ] `define-interface`, `define-request`, `define-event`, `define-enum` macros
+- [ ] ASDF component `:wayland-protocol` generating those forms from XML at build time
 
 `cl-wayland-client` (minimal)
 - [ ] connect (`WAYLAND_DISPLAY`, absolute paths, `$XDG_RUNTIME_DIR` default)
@@ -277,14 +277,15 @@ Session
 
 1. [x] `git init`, six system dirs, `.asd` skeletons, SPDX headers (the GPL-3.0 `LICENSE`
    is already in place), `qlfile`, `Makefile`.
-2. Vendor `wayland.xml`, `wayland-protocols`, `wlr-protocols`; pin versions in a README.
+2. [x] Vendor `wayland.xml`, `wayland-protocols`, `wlr-protocols`; pin versions in
+   `protocols/README.md`.
 3. [x] `wayland.wire` + tests: header, ints, strings, arrays, fixed, objects, fds
    (queued, not yet sent). No sockets yet.
 4. Record fixtures: `WAYLAND_DEBUG=1 kitty` capture, plus a `wayland-info` capture.
 5. [x] `sendmsg`/`recvmsg` fd path with `socketpair` + `memfd_create`; test the 28-fd
    boundary and `MSG_CTRUNC`.
 6. [x] Reactor + epoll + timerfd; a test that sleeps exactly as long as asked.
-7. XML schema parser; assert opcodes match `wayland-scanner`.
+7. [x] XML schema parser; assert opcodes match `wayland-scanner` (all 69 files).
 8. `demo-globals` against the live session.
 9. [x] `scripts/purity-check.sh` (fails if `libwayland*` or `libwlroots*` appears in
    `ldd`); `scripts/check-loads.sh` probes the loaded image's `/proc/self/maps`.

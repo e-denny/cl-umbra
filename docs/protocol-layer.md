@@ -272,6 +272,7 @@ libwayland for behaviour not defined in the spec" — is adopted here without re
 | `wl_seat.capabilities` | on bind, and on every device add/remove |
 | `wl_keyboard.keymap` → `repeat_info` | keymap first, then repeat info |
 | `wl_output` | geometry, mode, scale, then name/description (v4), then `done` last |
+| `wl_registry.bind` arguments | XML says `(name, id)`; the wire carries `(name, interface-string, version, id)`, signature `"usun"`, because the server needs the interface to instantiate |
 | initial `xdg_toplevel.configure` | size 0×0, states empty, before first buffer commit |
 | `xdg_surface.configure` | only after the initial commit |
 | `wl_pointer.frame` | one frame per input event batch, always last |

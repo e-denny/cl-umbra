@@ -7,8 +7,9 @@ documents in [`docs/`](docs/), and the decision log [`DECISIONS.md`](DECISIONS.m
 the first slice of `cl-wayland-core` exists: `wayland.wire` (framing and argument
 codec), `wayland.ffi` (sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, errno) and
 `wayland.io` (flush and pump, descriptor passing, partial-message handling) and
-`wayland.reactor` (epoll, timerfd, eventfd wakeups, signalfd, idles), with
-byte-exact, property, real-descriptor and real-signal tests. No protocol schema yet.
+`wayland.reactor` (epoll, timerfd, eventfd wakeups, signalfd, idles) and
+`wayland.protocol` (the 69-file protocol XML corpus, parsed and checked against
+`wayland-scanner`). Code generation is the next slice.
 
 ## What this is
 
@@ -85,6 +86,13 @@ cl-wayland-core
 Developed on Arch, SBCL 2.6.10, AMD Renoir (Mesa 26.3), wlroots 0.20 and libwayland
 installed **only as test fixtures and to run reference compositors** — never linked by
 this project. Test clients: `kitty`, `weston-simple-shm`, `wayland-info`.
+
+## Vendored protocols
+
+`protocols/` holds the protocol XML (wayland, wayland-protocols stable/unstable/staging,
+wlr-protocols) with versions pinned in `protocols/README.md`. It is vendored, not a
+submodule: a build must not need the network, and the oracle test re-derives every
+opcode and signature from `wayland-scanner`.
 
 ## Building and testing
 
