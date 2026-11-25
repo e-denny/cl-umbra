@@ -9,16 +9,17 @@
 # Exit status:
 #   0  every clause passed
 #   1  a clause failed
-#   2  no clause failed, but at least one has nothing behind it yet (today: the
-#      fuzz harness), so the gate is not met
+#   2  no clause failed, but at least one has nothing behind it yet, so the
+#      gate is not met (no clause is in that state today; the machinery stays
+#      for the clauses later phases will add)
 #
 # Clauses:
 #   1. the unit suite is green (Rove, six suites)
 #   2. every vendored protocol XML generates Lisp that compiles (69 files)
 #   3. demo-globals prints the live session's globals, and they match
 #      wayland-info (skipped, not failed, when there is no session)
-#   4. a fuzz harness feeds random buffers through the decoder for 10^6
-#      iterations with no crash, no unbounded allocation and no fd leak
+#   4. the fuzz harness feeds 10^6 random cases through the decoder with no
+#      crash, hang, unbounded allocation or descriptor leak
 #   5. purity: no libwayland or libwlroots in the loaded image (D1)
 #
 # Logs land in a temporary directory that is printed when something fails.
@@ -100,7 +101,11 @@ else
 fi
 
 # 4. Fuzz harness ----------------------------------------------------------
-not_implemented 'fuzz harness' '10^6 iterations: no crash, hang or descriptor leak (docs/testing.md §4)'
+if gb "$log_dir/fuzz.log" "$repo_root/scripts/fuzz.sh" 1000000; then
+  pass 'fuzz harness' "$(grep -a '[0-9]* cases:' "$log_dir/fuzz.log" | tail -n 1 | sed 's/^ *//')"
+else
+  fail 'fuzz harness' 'a fuzz case crashed, hung, leaked or broke an invariant' "$log_dir/fuzz.log"
+fi
 
 # 5. Purity ----------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then

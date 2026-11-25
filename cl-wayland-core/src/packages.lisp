@@ -144,6 +144,8 @@ only place that touches a socket.")
    #:make-input-buffer
    #:input-buffer-pending-octets
    #:input-buffer-pending-fds
+   #:input-buffer-capacity
+   #:reset-input-buffer
    #:pump
    #:truncated-descriptors
    #:truncated-descriptors-count))

@@ -70,9 +70,10 @@ affected; remove it when dissect fixes its SBCL backend.
 `scripts/gate.sh` encodes `PLAN.md` §5's exit gate as five clauses it checks rather than
 assumes: the unit suite, "every vendored protocol compiles", `demo-globals` against
 `wayland-info`, the fuzz harness, and purity (D1). Each prints `PASS`, `FAIL`, `SKIP` (no
-session to talk to) or `NOT BUILT`, and the exit status is 0 when all pass, 1 when one fails
-and 2 when a clause has nothing behind it — so a missing clause can never look like a green
-gate. Failure logs land in a temporary directory whose path is printed.
+session to talk to) or `NOT BUILT`; the exit status is 0 when all pass, 1 when one fails and
+2 when a clause has nothing behind it, so a clause that is merely planned can never look
+like a green gate. All five pass as of the fuzz harness landing. Failure logs land in a
+temporary directory whose path is printed.
 
 Two details worth knowing: the protocol clause compiles all 69 files into throwaway packages
 without loading them (duplicate interface versions across the corpus make loading unsafe,
@@ -92,17 +93,33 @@ compiling is local), and the demo clause is skipped rather than failed when ther
 
 ## 4. Fuzzing
 
-A harness connects two `socketpair` ends: the fuzzer writes, our decoder reads.
+`tests/fuzz/fuzz.lisp` (system `cl-wayland-tests/fuzz`, driver `scripts/fuzz.sh
+[ITERATIONS] [SEED]`) runs three kinds of case, chosen at random:
 
-- Random-length, random-content messages, with the object table seeded by a real handshake.
-- Structured fuzzing: valid message with one field mutated (id, opcode, length, string
-  length, array length, fd count).
-- Assertions: no crash, no hang (deadline), no unbounded allocation, no fd left open
-  (`/proc/self/fd` count returns to baseline), no debugger entry.
-- Pool/buffer fuzzing: random `(offset, stride, width, height, format)` against random pool
-  sizes; every accepted buffer must be in-bounds, every rejected one must produce the right
-  protocol error.
-- 10⁶ iterations in CI (nightly), 10⁴ per commit.
+| Case | What it feeds | What must hold |
+|---|---|---|
+| header | random octets, half the time with a plausible header | `decode-header` returns NIL or a header with `size ≥ 8`, `size % 4 = 0`, `size ≤ 65532`, object id ≠ 0; no crash |
+| schema | random octets decoded as the arguments of a random message from the loaded protocols | values or a `wayland.wire` condition; never overrun the buffer or loop |
+| transport | random writes to one end of a real `socketpair`, `pump` on the other: garbage, truncated messages, whole messages, some with descriptors attached | only whole messages dispatch; the partial tail stays under 2× the maximum message size; the input buffer never exceeds 4× its 64 KiB start; every descriptor the stream delivered is closed |
+
+Hard rules: a case that signals anything other than a `wayland.wire` condition is a
+failure; a run that misses its deadline (60 s, or 1 s per 10 000 iterations) is a hang; the
+open descriptor count (`/proc/self/fd`) must return to what it was once the harness closes
+its own socket pair, pool and buffers. The random source is a seeded xorshift64* in the
+harness, not `cl:random`, so a failure prints a seed that reproduces it on any SBCL:
+
+```
+./scripts/fuzz.sh 1000000 12345
+```
+
+Budget: 10⁶ cases in the phase-0 gate (`scripts/gate.sh`), 10⁴ in `make check`, both well
+under three seconds today. Finding so far, on its first run: `wayland.io` queued descriptors
+that a rejected stream would discard without closing, so `reset-input-buffer` now closes them
+by default.
+
+Not yet: mutating structured messages of a *client* against a *server* (`wl_shm` pool
+validation, `(offset, stride, format)` against pool sizes). That arrives with the server in
+phase 1, where there is a peer to reject them.
 
 ## 5. Interop matrix
 

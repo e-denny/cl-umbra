@@ -430,3 +430,41 @@ runs them all; `scripts/run-tests.sh` quits with Rove's verdict.
   whether it was signalled, so the idiom is `(ok (signals (f) 'type))` rather than
   `(signals type (f))`. The old order is not preserved: one convention is better than a
   wrapper that hides it.
+
+---
+
+## D18 — The fuzzer is a decoder fuzzer with its own seeded random source
+
+**Status:** accepted
+
+**Context.** The phase-0 gate asks for 10⁶ fuzz iterations with no crash, hang, unbounded
+allocation or descriptor leak. "Fuzz the decoder" can mean anything from feeding random
+bytes to a parser to a full grammar-driven protocol fuzzer, and a fuzzer whose failures
+cannot be reproduced is a fuzzer nobody uses.
+
+**Decision.** `tests/fuzz/fuzz.lisp` (system `cl-wayland-tests/fuzz`, driver
+`scripts/fuzz.sh ITERATIONS [SEED]`) runs three cases, one per iteration, chosen by a
+xorshift64\* generator seeded from the command line:
+
+1. **header** — random octets, half the time with a plausible `(object-id, size, opcode)`,
+   through `decode-header`, checking every invariant it promises;
+2. **schema** — random octets decoded as the arguments of a random request or event from the
+   loaded protocols, asserting that the only escape is a `wayland.wire` condition;
+3. **transport** — random writes (garbage, truncated messages, whole messages, some with
+   descriptors attached) to one end of a real `socketpair`, `pump` on the other, checking
+   what dispatches, that the partial tail and the buffer capacity stay bounded, and that
+   every descriptor the stream delivered is closed.
+
+**Consequences.**
+
+- A failure prints the seed, and the seed reproduces it exactly on any SBCL: `cl:random` is
+  not used because its sequence is implementation-defined.
+- The in-memory cases are cheap (10⁶ plus socket I/O in under three seconds), so the gate
+  runs the full 10⁶ rather than a smaller nightly budget.
+- The hang clause is `sb-ext:with-timeout`, which is SBCL-specific; the project is SBCL-only
+  and the alternative would only detect a hang after the fact.
+- The first run found a real hazard: `wayland.io` queued descriptors that a rejected stream
+  would drop without closing them. `reset-input-buffer` now closes them by default (and
+  returns how many), because the kernel's duplicates are nobody else's to close.
+- It does not fuzz a *peer*: pool validation, stride/format checks and protocol errors need a
+  server to reject them, and arrive with phase 1.

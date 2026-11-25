@@ -40,3 +40,14 @@
              (declare (ignore operation component))
              (unless (uiop:symbol-call :wayland.test.runner :run-all)
                (error "the test suite did not pass"))))
+
+(defsystem "cl-wayland-tests/fuzz"
+  :description "Decoder fuzzer: random octets through the header decoder,
+argument decoders and a real socket pair (docs/testing.md §4)."
+  :license "GPL-3.0-or-later"
+  :version "0.0.1"
+  ;; The protocol system is required so there are real schemas to decode random
+  ;; bodies against; it also proves the client's schema path under garbage.
+  :depends-on ("cl-wayland-core" "cl-wayland-protocols")
+  :serial t
+  :components ((:file "fuzz/fuzz")))

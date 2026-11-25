@@ -39,7 +39,8 @@ empty `.asd` per system; `protocols/` populated with pinned XML.
       protocol layer that knows how many descriptors a message declares)
 - [ ] `WAYLAND_DEBUG`-compatible trace logging
 - [x] unit tests: byte-exact vectors, roundtrip property tests, boundary sizes
-- [ ] fuzz harness feeding a `socketpair` (needs the I/O path below)
+- [x] fuzz harness: 10^6 cases through the header decoder, real message schemas and a
+      `socketpair`; no crash, hang, unbounded allocation or descriptor leak (`scripts/fuzz.sh`)
 
 `wayland.reactor`
 - [x] epoll wrapper (`epoll_create1`, `epoll_ctl`, `epoll_wait`) via CFFI; level-triggered
@@ -71,9 +72,9 @@ empty `.asd` per system; `protocols/` populated with pinned XML.
       on a live session, verified 2026-11-25: 55 globals)
 
 - [x] `scripts/gate.sh`: runs the Rove suite, compiles every vendored protocol,
-      diffs `demo-globals` against `wayland-info`, and reports purity; the fuzz
-      clause prints `NOT BUILT` until the harness exists, so the gate cannot
-      pass early (exit 0 pass, 1 fail, 2 clauses unmet)
+      diffs `demo-globals` against `wayland-info`, runs the fuzzer for 10^6 cases
+      and reports purity; exit 0 pass, 1 fail, 2 clauses unmet. All five clauses
+      pass (2026-11-25).
 
 **Gate:** unit + fuzz suites green; all protocols compile; `demo-globals` output equals
 `wayland-info`; fuzz 10⁶ iterations with no crash/hang/leak.

@@ -59,6 +59,10 @@ attached to the octets that did go out."
                       0
                       nil))
 
+(defun input-buffer-capacity (input-buffer)
+  "Allocated octets, which is the number the allocation bound is checked against."
+  (length (input-buffer-octets input-buffer)))
+
 (defun input-buffer-pending-octets (input-buffer)
   "Octets received but not yet forming a whole message."
   (input-buffer-size input-buffer))
@@ -66,6 +70,21 @@ attached to the octets that did go out."
 (defun input-buffer-pending-fds (input-buffer)
   "Descriptors received but not yet claimed by a message."
   (input-buffer-fds input-buffer))
+
+(defun reset-input-buffer (input-buffer &key (close-fds t))
+  "Discard pending octets and the descriptor queue; return closed descriptors.
+
+For when the stream can no longer be trusted -- a protocol error, a dead
+connection, or a fuzzer feeding garbage -- rather than for ordinary partial
+messages.  Descriptors that arrived are duplicates the kernel made for us and
+nobody else will close them, so they are closed here unless the caller has
+already taken ownership and passes :CLOSE-FDS NIL."
+  (let ((fds (input-buffer-fds input-buffer)))
+    (when close-fds
+      (dolist (fd fds) (wayland.ffi:close-fd fd)))
+    (setf (input-buffer-size input-buffer) 0)
+    (setf (input-buffer-fds input-buffer) nil)
+    (if close-fds (length fds) 0)))
 
 (defun ensure-input-room (input-buffer extra)
   (let* ((octets (input-buffer-octets input-buffer))

@@ -6,7 +6,12 @@ The repository is named for where the stack is going: `cl-umbra`, a daily-driver
 Everything that makes it possible is here too — the protocol implementation, the server, the
 compositor framework, and a tinywl port — as the six systems below.
 
-**Status: phase 0 in progress.** Planning is complete — [`PLAN.md`](PLAN.md), the design
+**Status: phase 0 gate passing.** `./scripts/gate.sh` checks the five phase-0 clauses —
+unit suite, every protocol compiling, `demo-globals` against a live compositor, 10⁶ fuzz
+cases, purity — and exits 0. Three roadmap quality items are still open and are not gate
+clauses: fixed-size in/out rings, `WAYLAND_DEBUG`-compatible tracing, and surplus-descriptor
+detection (which needs a protocol layer that knows a message's descriptor count).
+Planning is complete — [`PLAN.md`](PLAN.md), the design
 documents in [`docs/`](docs/), and the decision log [`DECISIONS.md`](DECISIONS.md) — and
 the first slice of `cl-wayland-core` exists: `wayland.wire` (framing and argument
 codec), `wayland.ffi` (sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, errno) and
