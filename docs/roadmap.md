@@ -70,6 +70,11 @@ empty `.asd` per system; `protocols/` populated with pinned XML.
       (system `cl-wayland-client/demo`; output is byte-identical to `wayland-info`
       on a live session, verified 2026-11-25: 55 globals)
 
+- [x] `scripts/gate.sh`: runs the Rove suite, compiles every vendored protocol,
+      diffs `demo-globals` against `wayland-info`, and reports purity; the fuzz
+      clause prints `NOT BUILT` until the harness exists, so the gate cannot
+      pass early (exit 0 pass, 1 fail, 2 clauses unmet)
+
 **Gate:** unit + fuzz suites green; all protocols compile; `demo-globals` output equals
 `wayland-info`; fuzz 10⁶ iterations with no crash/hang/leak.
 

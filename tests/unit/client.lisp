@@ -108,10 +108,18 @@
             (wc:socket-path :display-name "/tmp/nested-wayland" :runtime-dir "/run/user/1000")))
   (ok (equal "/run/user/1000/wayland-7"
             (wc:socket-path :display-name "wayland-7" :runtime-dir "/run/user/1000/")))
+  ;; The bare default, independent of this machine's WAYLAND_DISPLAY; then the
+  ;; environment value, passed in explicitly so the test owns it.
   (ok (equal "wayland-0"
-            (pathname-name (pathname (wc:socket-path :display-name nil
-                                                     :runtime-dir "/run/user/1000")))))
-  (ok (plusp (length (wc:socket-path))))
+             (pathname-name (pathname (wc:socket-path :display-name nil
+                                                      :wayland-display nil
+                                                      :runtime-dir "/run/user/1000")))))
+  (ok (equal "/run/user/1000/wayland-9"
+             (wc:socket-path :display-name nil
+                             :wayland-display "wayland-9"
+                             :runtime-dir "/run/user/1000")))
+  (ok (plusp (length (wc:socket-path :wayland-display "wayland-0"
+                                    :runtime-dir "/run/user/1000"))))
   (ok (signals (wc:socket-path :display-name "wayland-0" :runtime-dir nil) 'wc:client-error))
   (ok (signals (wc:socket-path :display-name "" :runtime-dir "/run/user/1000") 'wc:client-error)))
 

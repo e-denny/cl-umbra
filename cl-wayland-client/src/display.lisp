@@ -41,13 +41,17 @@ DISCONNECT releases all three."))
 ;;; Where the socket lives
 ;;; ---------------------------------------------------------------------------
 
-(defun socket-path (&key display-name (runtime-dir (uiop:getenv "XDG_RUNTIME_DIR")))
-  "The socket path the environment describes (docs/protocol-layer.md §5).
+(defun socket-path (&key display-name
+                         (wayland-display (uiop:getenv "WAYLAND_DISPLAY"))
+                         (runtime-dir (uiop:getenv "XDG_RUNTIME_DIR")))
+  "The socket path to connect to (docs/protocol-layer.md §5).
 
-WAYLAND_DISPLAY may be a bare name, which lives in $XDG_RUNTIME_DIR, or an
-absolute path, which is how nested compositors name their socket.  The default
-name is \"wayland-0\"."
-  (let ((name (or display-name (uiop:getenv "WAYLAND_DISPLAY") "wayland-0")))
+The name comes from DISPLAY-NAME, else WAYLAND-DISPLAY (defaulting to the
+environment), else \"wayland-0\"; passing NIL for both is how a caller -- or a
+test -- asks for the bare default regardless of the environment.  A name may be
+absolute, which is how a nested compositor names its socket; otherwise it lives
+in RUNTIME-DIR."
+  (let ((name (or display-name wayland-display "wayland-0")))
     (cond
       ((zerop (length name))
        (error 'client-error :detail "WAYLAND_DISPLAY is empty"))

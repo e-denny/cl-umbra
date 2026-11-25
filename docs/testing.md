@@ -65,6 +65,20 @@ before Rove loads, because dissect 20231021 (Rove's failure renderer) interns sy
 and SBCL 2.6 locks it. The unlock lives in the test system only, so no shipped system is
 affected; remove it when dissect fixes its SBCL backend.
 
+### The phase-0 gate
+
+`scripts/gate.sh` encodes `PLAN.md` §5's exit gate as five clauses it checks rather than
+assumes: the unit suite, "every vendored protocol compiles", `demo-globals` against
+`wayland-info`, the fuzz harness, and purity (D1). Each prints `PASS`, `FAIL`, `SKIP` (no
+session to talk to) or `NOT BUILT`, and the exit status is 0 when all pass, 1 when one fails
+and 2 when a clause has nothing behind it — so a missing clause can never look like a green
+gate. Failure logs land in a temporary directory whose path is printed.
+
+Two details worth knowing: the protocol clause compiles all 69 files into throwaway packages
+without loading them (duplicate interface versions across the corpus make loading unsafe,
+compiling is local), and the demo clause is skipped rather than failed when there is no
+`WAYLAND_DISPLAY` socket, so the gate runs headless.
+
 ## 3. Wire codec
 
 - **Byte-exact vectors**: hand-written expected bytes for every argument type, including

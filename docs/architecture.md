@@ -49,7 +49,8 @@ cl-wayland-project/
 │                    config/  control/  session.lisp
 ├── tests/           cl-wayland-tests.asd  runner.lisp  unit/  fuzz/  interop/
 │                    golden/  perf/  scripts/
-├── scripts/         run-nested.sh  run-tty.sh  capture.sh  purity-check.sh
+├── scripts/         gate.sh  gate-protocols.lisp  run-tests.sh  check-loads.sh
+│                    purity-check.sh  capture.sh  run-nested.sh  run-tty.sh
 └── qlfile           local Quicklisp/qlot project set
 ```
 

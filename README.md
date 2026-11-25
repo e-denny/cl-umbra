@@ -106,6 +106,7 @@ opcode and signature from `wayland-scanner`.
 
 ```
 make check     # test suite (Rove), every system loads, purity scan
+./scripts/gate.sh                       # the phase-0 gate, clause by clause
 TEST_VERBOSE=1 ./scripts/run-tests.sh   # list every assertion instead of dots
 ```
 

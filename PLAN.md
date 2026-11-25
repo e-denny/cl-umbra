@@ -156,6 +156,10 @@ start the next phase to escape a gate.
   `demo-globals` binary) prints the global list of the session you are already running in,
   and the output matches `wayland-info`.
 
+Every clause above is checked by `scripts/gate.sh`, which exits 0 when they all pass, 1 when
+one fails, and 2 when a clause has nothing behind it yet. The phase-0 gate is met when that
+script exits 0.
+
 **Demo:** a REPL session dumping the live session's globals from Lisp.
 
 ### Phase 1 — Server core (4-6 weeks)
