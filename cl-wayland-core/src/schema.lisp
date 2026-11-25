@@ -308,7 +308,11 @@ Returns (values attributes self-closing-p)."
    (since :initarg :since :initform 1 :reader message-since)
    (summary :initarg :summary :initform nil :reader message-summary)
    (description :initarg :description :initform nil :reader message-description)
-   (interface :initarg :interface :initform nil :accessor message-interface))
+   (interface :initarg :interface :initform nil :accessor message-interface)
+   ;; The generic function, when the message came from a DEFINE-REQUEST or
+   ;; DEFINE-EVENT form.  Messages parsed straight from XML have no Lisp names
+   ;; yet, so this is NIL for them.
+   (symbol :initarg :symbol :initform nil :reader message-symbol))
   (:documentation "A <request> or an <event>; identical on the wire apart from direction."))
 
 (defclass wl-arg ()
@@ -760,23 +764,39 @@ The wire name defaults to the symbol with its dash replaced by an underscore."
                                        *package*)
                             ,value))))))
 
-(defun parameter-names (arguments)
-  "A safe generic function lambda list: (object arg1 arg2 ...), with duplicate
-or reserved names replaced."
+(defun parameter-names (arguments kind)
+  "The generic function lambda list: (object arg1 arg2 ...).
+
+NEW_ID arguments are left out of a request's lambda list.  The wire carries an
+id, but neither side takes one as an argument: the sender allocates it (a client
+from its own id range, a server from its range) and the dispatch layer hands
+back the created object.  A client calls
+
+  (wl-registry.bind registry name interface version)
+
+and gets the bound proxy; a compositor specialises the same function and creates
+the resource.  Events keep every argument, because there the *sender* chose the
+id and the receiver must learn it (wl_data_device.data_offer).
+
+Duplicate or reserved names are replaced: OBJECT is the first parameter, and T
+and NIL cannot be parameters at all."
   (let ((object (intern "OBJECT" *package*))
         (used (list "OBJECT"))
         (names '()))
     (loop for argument in arguments
           for index from 0
-          for name = (first argument)
+          for (name type) = argument
           for string = (symbol-name name)
-          for usable = (and (not (member string '("T" "NIL") :test #'string=))
+          for dropped = (and (eq kind :request) (eq type :new-id))
+          for usable = (and (not dropped)
+                            (not (member string '("T" "NIL") :test #'string=))
                             (not (member string used :test #'string=)))
-          do (push (if usable
-                    name
-                     (intern (format nil "ARG~D" index) *package*))
-                 names)
-             (push string used))
+          do (push string used)
+             (unless dropped
+               (push (if usable
+                         name
+                         (intern (format nil "ARG~D" index) *package*))
+                     names)))
     (cons object (nreverse names))))
 
 (defun %define-message (message-symbol interface-symbol opcode kind since arguments documentation)
@@ -787,6 +807,7 @@ or reserved names replaced."
                                  :kind kind
                                  :interface interface
                                  :since since
+                                 :symbol message-symbol
                                  :description documentation
                                  :args (loop for (name type . options) in arguments
                                              collect (make-instance
@@ -810,7 +831,7 @@ or reserved names replaced."
 
 (defmacro define-message (kind message-symbol interface-symbol opcode arguments &body options)
   `(progn
-     (defgeneric ,message-symbol ,(parameter-names arguments)
+     (defgeneric ,message-symbol ,(parameter-names arguments kind)
        ,@(let ((documentation (option-value options :documentation)))
            (when documentation `((:documentation ,documentation)))))
      (defconstant ,(intern (opcode-constant-name

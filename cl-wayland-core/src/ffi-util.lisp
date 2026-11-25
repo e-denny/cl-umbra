@@ -40,12 +40,16 @@
 
 (defconstant +mfd-cloexec+ 1)
 
+(defconstant +unix-path-max+ 108
+  "sizeof(sun_path) in struct sockaddr_un on Linux, NUL included.")
+
 (defconstant +eintr+ 4)
 (defconstant +ebadf+ 9)
 (defconstant +eagain+ 11)
 (defconstant +epipe+ 32)
 (defconstant +emsgsize+ 90)
 (defconstant +econnreset+ 104)
+(defconstant +enametoolong+ 36)
 
 ;;; ---------------------------------------------------------------------------
 ;;; C structures
@@ -71,6 +75,11 @@
   (len :size)
   (level :int)
   (type :int))
+
+;; struct sockaddr_un: sa_family_t sun_family, then char sun_path[108].
+(cffi:defcstruct (sockaddr-un :conc-name sockaddr-un-)
+  (family :unsigned-short)
+  (path (:array :char 108)))
 
 (defconstant +cmsghdr-size+ 16
   "sizeof(struct cmsghdr) on 64-bit Linux: 8 + 4 + 4, no tail padding.")
@@ -116,6 +125,12 @@ which is the proof we want; other implementations simply run the check."
 (cffi:defcfun ("recvmsg" %recvmsg) :ssize
   (fd :int) (message :pointer) (flags :int))
 
+(cffi:defcfun ("socket" %socket) :int
+  (domain :int) (type :int) (protocol :int))
+
+(cffi:defcfun ("connect" %connect) :int
+  (fd :int) (address :pointer) (length :unsigned-int))
+
 (cffi:defcfun ("close" %close) :int
   (fd :int))
 
@@ -129,6 +144,9 @@ which is the proof we want; other implementations simply run the check."
 
 (cffi:defcfun ("strerror" %strerror) :string
   (error-number :int))
+
+(cffi:defcfun ("strlen" %strlen) :size
+  (string :pointer))
 
 (defun errno ()
   "The calling thread's errno (glibc's __errno_location)."
@@ -220,6 +238,51 @@ default so a pool can never leak into xwayland or a spawned client."
     (when (minusp fd)
       (syscall-failed 'memfd-create (errno)))
     fd))
+
+;;; ---------------------------------------------------------------------------
+;;; Connecting
+;;; ---------------------------------------------------------------------------
+
+(defun connect-unix-socket (path &key (nonblocking t))
+  "Connect to the AF_UNIX stream socket at PATH; return a close-on-exec descriptor.
+
+The connect itself is blocking, which is what a client wants: a Unix stream
+connection either succeeds immediately or fails with a reason worth reporting.
+Non-blocking mode is applied afterwards, so a client never has to distinguish
+EINPROGRESS from a broken socket."
+  (when (>= (length path) +unix-path-max+)
+    (error 'io-error :operation 'connect :errno +enametoolong+))
+  (let ((fd (%retry-on-eintr
+             (lambda () (%socket +af-unix+ (logior +sock-stream+ +sock-cloexec+) 0)))))
+    (when (minusp fd)
+      (syscall-failed 'socket (errno)))
+    (cffi:with-foreign-object (address '(:struct sockaddr-un))
+      (setf (cffi:foreign-slot-value address '(:struct sockaddr-un) 'family)
+            +af-unix+)
+      (cffi:with-foreign-string (octets path)
+        (let ((octets-length (%strlen octets)))
+          (when (>= octets-length +unix-path-max+)
+            (close-fd fd)
+            (error 'io-error :operation 'connect :errno +enametoolong+))
+          ;; Copy the path and its NUL into sun_path.  A byte loop beats
+          ;; pulling in memcpy for at most 108 octets, and the struct was
+          ;; zeroed for us by WITH-FOREIGN-OBJECT?  It was not, which is why
+          ;; the NUL is copied explicitly.
+          (let ((path-field (cffi:foreign-slot-pointer address '(:struct sockaddr-un)
+                                                       'path)))
+            (loop for index from 0 to octets-length
+                  do (setf (cffi:mem-aref path-field :char index)
+                           (cffi:mem-aref octets :char index))))))
+      (when (minusp (%retry-on-eintr
+                     (lambda ()
+                       (%connect fd address
+                                 (cffi:foreign-type-size '(:struct sockaddr-un))))))
+        (let ((error-number (errno)))
+          (close-fd fd)
+          (syscall-failed 'connect error-number)))
+      (when nonblocking
+        (set-fd-nonblocking fd))
+      fd)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; sendmsg / recvmsg

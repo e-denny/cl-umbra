@@ -39,6 +39,22 @@
 (defmethod asdf:source-file-type ((component wayland-protocol) (module asdf:module))
   "xml")
 
+(defun generator-input-files ()
+  "The files whose contents determine the generated text.
+
+Without these, ASDF would consider a protocol fasl up to date as long as the
+XML had not changed -- so a change to the schema parser or the generator would
+silently leave the old generated code in place, and a downstream system would
+be compiled against a generic function lambda list that no longer exists."
+  (loop for (system . path) in '(("cl-wayland-core" . "src/schema.lisp")
+                                 ("cl-wayland-core" . "src/codegen.lisp"))
+        for file = (ignore-errors (asdf:system-relative-pathname system path))
+        when (and file (probe-file file))
+          collect file))
+
+(defmethod asdf:input-files ((operation asdf:compile-op) (component wayland-protocol))
+  (append (call-next-method) (generator-input-files)))
+
 ;; ASDF looks the component type up as a class named after the keyword.  Register
 ;; under both spellings: the keyword itself, and the name interned in ASDF, which
 ;; is where cffi-grovel registers its own component types.

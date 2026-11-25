@@ -10,7 +10,11 @@ codec), `wayland.ffi` (sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, errno) an
 `wayland.reactor` (epoll, timerfd, eventfd wakeups, signalfd, idles) and
 `wayland.protocol` (the 69-file protocol XML corpus, parsed and checked against
 `wayland-scanner`) and `wayland.codegen` (schema to Lisp, generated at build time by
-the `:wayland-protocol` ASDF component).
+the `:wayland-protocol` ASDF component). `cl-wayland-client` is now a working client:
+it connects to the compositor named by `WAYLAND_DISPLAY`, reads the registry, completes a
+`sync` roundtrip, and dispatches events to hooks or methods on the generated functions.
+`wayland.client.demo:run` prints the live session's globals in `wayland-info`'s format;
+on a running session the two outputs are byte-identical.
 
 ## What this is
 
@@ -105,8 +109,30 @@ make check     # test suite, every system loads, purity scan
 ```
 
 Each probe also runs alone: `scripts/run-tests.sh`, `scripts/check-loads.sh`,
-`scripts/purity-check.sh`. SBCL only; there are no external Lisp dependencies yet, so
-neither Quicklisp nor `qlot install` is needed to build phase 0.
+`scripts/purity-check.sh`. SBCL plus CFFI is the whole dependency list — CFFI is for libc
+(sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, `memfd_create`), never for libwayland. The
+scripts find Quicklisp at the usual places or through `QUICKLISP_SETUP`.
+
+## Hello, compositor
+
+`demo-globals` connects to the compositor this process would draw on, reads the registry,
+and prints every global: the phase-0 walking skeleton.
+
+```
+sbcl --eval '(require :asdf)' \
+     --eval '(asdf:load-system "cl-wayland-client/demo")' \
+     --eval '(wayland.client.demo:main)'
+
+# or build a binary (written to cl-wayland-client/demo-globals)
+sbcl --eval '(require :asdf)' --eval '(asdf:make "cl-wayland-client/demo")'
+./cl-wayland-client/demo-globals
+```
+
+The output is deliberately `wayland-info`'s line format, so the check is a diff:
+
+```
+diff <(wayland-info | grep '^interface:') <(./cl-wayland-client/demo-globals)
+```
 
 ## License
 

@@ -136,7 +136,7 @@ Each form defines names, not just metadata:
 | Form | Defines |
 |---|---|
 | `define-interface` | `+wl-surface-version+` |
-| `define-request` / `define-event` | `+wl-surface-attach+` (opcode) and the generic function `wl-surface.attach` |
+| `define-request` / `define-event` | `+wl-surface-attach+` (opcode), the generic function `wl-surface.attach`, and `message-symbol` on the metadata |
 | `define-enum` | one constant per entry, `+wl-surface-error-invalid-scale+` |
 
 The generic function is the single handler for both directions: a compositor specialises it
@@ -144,9 +144,26 @@ as `(surface buffer x y)`, a client calls it the same way.  Argument types are e
 (`:int`, `:object :interface "wl_buffer"`) rather than inferred from the interface
 position, so a generated line says exactly what the wire says.
 
+**`new_id` arguments are not parameters** (D15). The wire carries an id the sender chooses,
+but neither side takes one from its caller: the dispatch layer allocates it, so a client
+call returns the created proxy and a compositor method creates the resource:
+
+```lisp
+(wl-display.get-registry display)                  ; defgeneric wl-display.get-registry (object)
+(wl-registry.bind registry 5 "wl_compositor" 3)    ; defgeneric wl-registry.bind (object name interface version)
+```
+
+Events keep every argument, including `new_id`, because there the sender picked the id and
+the receiver has to learn it (`wl_data_device.data_offer`).
+
 A message whose `since` exceeds 1 carries the version as a prefix in its signature
 (`"3?oii"`), matching `wayland-scanner`;
 `tests/unit/schema.lisp` checks every signature against it.
+
+Message metadata records the generic function it became (`message-symbol`), so the client's
+event dispatch can find a handler without re-deriving a symbol name. Messages parsed from
+XML alone have no symbol: names come from the `define-*` forms, which is what the ASDF
+component emits.
 
 ### 4.3 Two dispatch models, one schema
 
@@ -158,12 +175,25 @@ The generator emits both ends from the same metadata:
    define-enum       │  arg types, allow-null, since, docs   │
                      └────────────┬──────────────┬───────────┘
                                   │              │
-             server codegen ──────┘              └────── client codegen
-             • resource class                     • proxy class
-             • opcode table + handler fns          • build-message fns
-             • event emitters (send)               • event dispatch table
-             • version gating                      • new_id allocation
+                  one generator ──┘              │
+                  (wayland.codegen)              │
+                                  │              │
+        ┌─────────────────────────┴──────────────┴────────────────────────┐
+        │  the same generated generic functions, specialised per direction │
+        ├──────────────────────────────────┬───────────────────────────────┤
+        │ wayland.client (phase 0, exists) │ wayland.server (phase 1)      │
+        │ • proxy class + object table     │ • resource class + object table│
+        │ • id allocation / delete_id      │ • id ranges, bind validation   │
+        │ • request methods (send)         │ • request methods (handle)     │
+        │ • event hooks + event methods    │ • event emitters (send)        │
+        │ • version clamping on bind       │ • version gating               │
+        └──────────────────────────────────┴───────────────────────────────┘
 ```
+
+The two dispatch layers are hand-written because they differ where the protocol does not
+say anything: what an id means, who allocates it, what happens to a destroyed object. The
+schema-derived part — opcodes, argument types, signatures, the generic functions — is
+generated once and shared.
 
 ### 4.4 ASDF component
 
@@ -180,7 +210,9 @@ The generator emits both ends from the same metadata:
 The component is a `CL-SOURCE-FILE` whose source is XML: `source-file-type` says `xml`, and
 `perform` on `compile-op` parses the file, writes `<name>.lisp` into the ASDF output cache,
 and compiles it to exactly the fasl ASDF expects.  `load-op` is inherited.  Rebuild happens
-when the XML changes, and only then.
+when the XML changes, or when `wayland.schema`/`wayland.codegen` change: those are declared
+as input files of the component (D16), because they determine the generated text just as
+much as the XML does.
 
 Generated code is ordinary Lisp compiled into the system: no runtime XML parsing in the
 deployed binary, no reflection on the hot path.  `cl-wayland-protocols` is the system that
@@ -223,23 +255,50 @@ wl_display (id 1)
 
 ## 6. Client semantics
 
-Needed for the nested backend, for tests, and for tooling. Shaped like wayflan so existing
-wayflan examples port with cosmetic changes:
+Needed for the nested backend, for tests, and for tooling. Shaped like wayflan, so a wayflan
+example ports with cosmetic changes. This is what `cl-wayland-client` implements:
 
 ```lisp
-(with-open-display (display)
+(with-open-display (display)                       ; WAYLAND_DISPLAY / $XDG_RUNTIME_DIR
   (let ((registry (wl-display.get-registry display)))
     (push (lambda (event &rest args)
             (ecase event (:global (destructuring-bind (name iface version) args …))))
-          (wl-proxy-hooks registry))
-    (wl-display-roundtrip display)))
+          (proxy-hooks registry))
+    (roundtrip display)))                           ; sync + dispatch until done
 ```
 
-Differences from libwayland that matter: no manual proxy destruction for GC'd objects, no
-toplevel-only callbacks, enums as keywords, `handler-case` instead of error codes.
+What exists:
 
-A roundtrip is: send `sync`, dispatch until that callback's `done` arrives, with a deadline.
-A dispatch never blocks indefinitely when a deadline is supplied.
+- **Connect**: `WAYLAND_DISPLAY` may be a bare name under `$XDG_RUNTIME_DIR` or an absolute
+  path; the default name is `wayland-0`. `connect` returns a `display`;
+  `with-open-display` disconnects on the way out, error or not.
+- **Proxies and ids** (D15): `display` is a subclass of `proxy` with id 1. Ids are allocated
+  from 2 upward, returned to a free list on `wl_display.delete_id`, and a request on a
+  destroyed proxy signals `destroyed-proxy` instead of sending a message the server would
+  reject.
+- **Requests** are methods on the generated generic functions: `wl-display.get-registry`,
+  `wl-display.sync`, `wl-registry.bind` (four wire arguments, version clamped to what the
+  loaded schema knows). Everything else arrives with the protocols the client declares.
+- **Events** reach hooks — `(push (lambda (event &rest args) …) (proxy-hooks proxy))`, with
+  `event` a keyword such as `:global` — and, independently, methods specialised on the
+  generated event function (`(defmethod wl-registry.global ((registry my-registry) name
+  interface version) …)`), which is how one interface gets behaviour. The connection layer
+  keeps three events to itself: `wl_display.error` signals `display-error`,
+  `wl_display.delete_id` frees the id, `wl_callback.done` completes a roundtrip.
+- **Flushing** is batched: requests accumulate in one buffer and are written by `flush`,
+  which is called by the reactor's writable callback when the socket was full. `roundtrip`
+  flushes before and after, so a hook can queue requests and be understood.
+- **Roundtrip** sends `sync` and dispatches until that callback's `done` arrives, with a
+  deadline (`roundtrip-timeout`); `dispatch` never blocks past its timeout.
+
+Differences from libwayland that matter: no manual proxy destruction for GC'd objects, no
+toplevel-only callbacks, enums as keywords, `handler-case` instead of error codes, and one
+table of objects per connection instead of per-proxy vtables.
+
+Not yet: receiving descriptors into typed arguments for real protocols (the transport handles
+fds; no client-side protocol in phase 0 declares one), `wl_registry.bind` for protocols the
+system does not declare, and any notion of a client-side "destroy" request that is not
+`wl_display.delete_id`.
 
 ## 7. The reactor
 
@@ -301,6 +360,10 @@ libwayland for behaviour not defined in the spec" — is adopted here without re
 | `wl_keyboard.keymap` → `repeat_info` | keymap first, then repeat info |
 | `wl_output` | geometry, mode, scale, then name/description (v4), then `done` last |
 | `wl_registry.bind` arguments | XML says `(name, id)`; the wire carries `(name, interface-string, version, id)`, signature `"usun"`, because the server needs the interface to instantiate |
+| client id allocation | the client picks 2 upward and reclaims an id only after `wl_display.delete_id` (D15); a client that ignores `delete_id` runs out at `0xFEFFFFFF` and is told so |
+| `new_id` in a request | allocated by the sender's dispatch layer before the message is encoded; the generic function returns the created object instead of taking an id |
+| `wl_display.error` | signals a Lisp condition (`display-error`); the connection is finished, as in libwayland, rather than left half-usable |
+| event to an unknown object | refused (`unknown-object`), not ignored: an event for an object we do not have is a protocol mismatch worth seeing |
 | initial `xdg_toplevel.configure` | size 0×0, states empty, before first buffer commit |
 | `xdg_surface.configure` | only after the initial commit |
 | `wl_pointer.frame` | one frame per input event batch, always last |

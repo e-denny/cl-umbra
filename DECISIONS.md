@@ -329,3 +329,60 @@ no client library: `socat` plus a form. Costs: evaluating a form is shell-equiva
 so the channel is opt-in, `0600`, peer-credential checked, deadline-bounded and logged; a
 third-party tool that insists on a specific protocol (`waybar`'s sway mode, say) gets a small
 out-of-tree adapter if and when someone needs it, not a protocol in the core.
+
+---
+
+## D15 — A `new_id` is allocated by the dispatch layer, not passed in
+
+**Status:** accepted
+
+**Context.** The wire carries a `new_id` argument — an object id the sender chooses — in
+about a third of all requests (`wl_display.get_registry`, `wl_display.sync`,
+`wl_surface.get_buffer_release`, `wl_shm.create_pool`, every `create_*` factory). The
+schema has to record it: the type is `n`, not `o`, and the id may be null only in `object`
+position. But *as a Lisp argument* it is noise: a client allocates the id from its own
+range, the server allocates it from its range, and either way the caller of a request
+function wants the created object, not the number.
+
+**Decision.** Generated request generic functions omit `:new-id` arguments from their
+lambda lists; the schema keeps them for the wire. The dispatch layer allocates, the request
+method returns the proxy (client) or creates the resource (server, phase 1):
+
+```lisp
+(wl-display.get-registry display)                 ; -> wl_registry proxy
+(wl-registry.bind registry 5 "wl_compositor" 3)   ; -> wl_compositor proxy at version 3
+(wl-shm.create-pool shm fd size)                  ; -> wl_shm_pool proxy
+```
+
+Events keep every argument, `new_id` included: there the *sender* chose the id, and the
+receiver must learn it (`wl_data_device.data_offer` introduces a `wl_data_offer` the client
+never asked for by id).
+
+**Consequences.** One schema, two directions, still (D8): the same generic function is the
+client's sending method and the compositor's handler. Clients cannot accidentally send an
+id they do not own — allocation happens in one place, `allocate-proxy`. Server code in
+phase 1 must allocate before it calls the handler, which is where the "unused new_id" check
+belongs anyway. `wl_registry.bind` is the exception that proves the rule: its interface
+name and version come from the caller, so its *client* method resolves the interface and
+clamps the version before allocating. The generated code for a request whose only argument
+was a `new_id` (`wl_display.sync`) is now `(defgeneric wl-display.sync (object))`.
+
+## D16 — Generated protocol fasls depend on the generator's sources
+
+**Status:** accepted
+
+**Context.** The `:wayland-protocol` ASDF component writes a Lisp file from XML and compiles
+it. ASDF decides whether that fasl is stale from the component's *inputs*, which by default
+are just the XML. So changing `wayland.codegen` or `wayland.schema` — which change every
+generated file — rebuilt nothing: the image kept the old generic function lambda lists,
+and the next system to compile against them failed somewhere unrelated, or worse, agreed
+with itself and disagreed with the XML.
+
+**Decision.** `asdf:input-files` for the component includes `cl-wayland-core`'s
+`src/schema.lisp` and `src/codegen.lisp`. A change to either re-generates and recompiles
+every declared protocol on the next build.
+
+**Consequences.** Editing the generator costs one regeneration (~1 s for the two protocols
+currently declared), which is the correct price. It also means a `git checkout` of an older
+generator forces the same rebuild, so a stale fasl cannot outlive the source it came from.
+This was found the hard way: D15's change compiled against a fasl that predated it.

@@ -507,6 +507,41 @@ types + 0)."
     (is (equal '(:uint :string :uint :new-id)
                (mapcar #'wp:arg-type (wp:message-args bind))))))
 
+(deftest request-generic-functions-omit-new-ids
+  "A new_id is the sender's to allocate, so it is not a parameter.
+
+A client calls (wl-shm.create-pool shm fd size) and gets the pool; a compositor
+specialises the same function and creates the resource.  Events keep the id:
+there the sender chose it, and the receiver has to learn it."
+  (flet ((lambda-list-of (form)
+           (let ((expansion (macroexpand form)))
+             (is (eq 'defgeneric (first (second expansion))))
+             (mapcar #'symbol-name (third (second expansion))))))
+    (is-equal '("OBJECT" "FD" "SIZE")
+              (lambda-list-of
+               '(wayland.protocol:define-request (wl-shm.create-pool wl-shm 0)
+                  ((id :new-id :interface "wl_shm_pool")
+                   (fd :fd)
+                   (size :int)))))
+    (is-equal '("OBJECT" "ID")
+              (lambda-list-of
+               '(wayland.protocol:define-event (wl-data-device.data-offer
+                                                wl-data-device 0)
+                  ((id :new-id :interface "wl_data_offer")))))))
+
+(deftest messages-record-the-generic-function-that-implements-them
+  "A message defined by a DEFINE-* form knows its generic function; one parsed
+from XML alone has no Lisp names yet, which is why this is NIL for the corpus."
+  (let ((sync (first (wp:interface-requests (wp:find-interface "wl_display")))))
+    (is (eq 'wayland:wl-display.sync (wp:message-symbol sync)))
+    (is (fboundp (wp:message-symbol sync)))
+    (is (eq :request (wp:message-kind sync))))
+  (let* ((path (merge-pathnames "wayland/wayland.xml" (protocol-root)))
+         (protocol (wp:parse-protocol-file path :register nil))
+         (display (find "wl_display" (wp:protocol-interfaces protocol)
+                        :key #'wp:interface-name :test #'string=)))
+    (is (null (wp:message-symbol (first (wp:interface-requests display)))))))
+
 (deftest every-vendored-protocol-matches-wayland-scanner
   (let ((files (sort (collect-xml-files (protocol-root)) #'string< :key #'namestring)))
     (is (>= (length files) 60)

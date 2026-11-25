@@ -55,8 +55,12 @@
          (%fail ',form ,description
                 (format nil "signalled ~A: ~A" (type-of condition) condition))))))
 
-(defmacro is-equal (expected form &key (test 'equal) description)
-  "Check that FORM equals EXPECTED under TEST."
+(defmacro is-equal (expected form &key (test ''equal) description)
+  "Check that FORM equals EXPECTED under TEST.
+
+TEST is spliced as a form, not evaluated at macroexpansion time; hence the
+doubled quote in the default, so a call that does not name a test expands to
+\(funcall 'equal ...) rather than to a function object a fasl cannot hold."
   `(progn
      (incf *checks*)
      (handler-case

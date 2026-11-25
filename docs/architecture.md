@@ -18,11 +18,12 @@ cl-wayland-project/
 │   └── umbra/                   our own protocols, if any (none planned: control is Lisp, D14)
 ├── cl-wayland-core/
 │   ├── cl-wayland-core.asd
-│   └── src/  packages.lisp  ffi-util.lisp  wire.lisp  io.lisp  schema.lisp
-│             codegen.lisp  interface.lisp  object.lisp  reactor.lisp
-│             epoll.lisp  log.lisp
+│   └── src/  packages.lisp  ffi-util.lisp  wire.lisp  io.lisp  epoll.lisp
+│             reactor.lisp  schema.lisp  codegen.lisp
 ├── cl-wayland-client/
-│   └── src/  display.lisp  proxy.lisp  registry.lisp
+│   ├── cl-wayland-client.asd        (also the demo system)
+│   ├── src/  package.lisp  proxy.lisp  display.lisp  registry.lisp
+│   └── demo/ demo-globals.lisp
 ├── cl-wayland-server/
 │   └── src/  display.lisp  socket.lisp  client.lisp  global.lisp  resource.lisp
 │             serial.lisp  error.lisp  core-protocol.lisp
@@ -55,6 +56,13 @@ cl-wayland-project/
 One ASDF system per directory; each system declares the protocols it needs, so a build
 does not compile the world.
 
+What phase 0 has actually built, so a reader can tell the shape from the plan: the core
+(`wayland.wire`, `wayland.ffi`, `wayland.io`, `wayland.reactor`, `wayland.protocol`,
+`wayland.codegen`), the ASDF component, and `wayland.client` in its minimal form — connect,
+proxies and ids, `get_registry`, `bind`, `sync` roundtrip, hooks and generic-function event
+dispatch, plus `demo-globals`. The remaining files named below (`interface.lisp`,
+`object.lisp`, `log.lisp`, `wayland.server`, the framework) are the plan, not the tree.
+
 ## 2. Packages
 
 | Package | Nickname | Contents |
@@ -67,7 +75,7 @@ does not compile the world.
 | `wayland.asdf` | — | the `:wayland-protocol` component type (build time only) |
 | `wayland.object` | — | object tables, ids, destruction protocol |
 | `wayland.reactor` | — | epoll sources (level-triggered), timers, idles, posted commands, signalfd; `epoll.lisp` holds the packed-event syscall wrapper |
-| `wayland.client` | `wl.client` | display, proxies, registry |
+| `wayland.client` | `wl.client` | display, proxies, client ids, registry, roundtrip, event dispatch |
 | `wayland.server` | `wl.server` | display, globals, resources, clients |
 | `cl-compositor-framework` | `cf` | framework, one sub-package per module (`cf.backend`, `cf.scene`, …) |
 | `tinywl` | — | the tutorial compositor |

@@ -60,11 +60,15 @@ empty `.asd` per system; `protocols/` populated with pinned XML.
 - [x] `define-interface`, `define-request`, `define-event`, `define-enum` macros
 - [x] ASDF component `:wayland-protocol` generating those forms from XML at build time
       (`cl-wayland-asdf`), used by `cl-wayland-protocols`
+- [x] a change to the schema or the generator re-generates every declared protocol
+      (`input-files` includes `schema.lisp`/`codegen.lisp`, D16)
 
 `cl-wayland-client` (minimal)
-- [ ] connect (`WAYLAND_DISPLAY`, absolute paths, `$XDG_RUNTIME_DIR` default)
-- [ ] proxy table, ids, `wl_display.get_registry`, `sync`/roundtrip
-- [ ] `demo-globals` that prints the live session's globals
+- [x] connect (`WAYLAND_DISPLAY`, absolute paths, `$XDG_RUNTIME_DIR` default)
+- [x] proxy table, ids, `wl_display.get_registry`, `sync`/roundtrip
+- [x] `demo-globals` that prints the live session's globals
+      (system `cl-wayland-client/demo`; output is byte-identical to `wayland-info`
+      on a live session, verified 2026-11-25: 55 globals)
 
 **Gate:** unit + fuzz suites green; all protocols compile; `demo-globals` output equals
 `wayland-info`; fuzz 10⁶ iterations with no crash/hang/leak.

@@ -142,8 +142,9 @@ start the next phase to escape a gate.
   entry); `define-interface`/`define-request`/`define-event`/`define-enum` compile that
   metadata into classes, opcode constants, signature tables, docs.
 - ASDF component type: `(:wayland-protocol "protocols/wayland.xml" :export t)`.
-- `cl-wayland-client`: enough to connect, get the registry, bind nothing, and print
-  globals (wayflan's hello-world, our way).
+- `cl-wayland-client`: enough to connect, get the registry, bind nothing, and print globals
+  (wayflan's hello-world, our way): display, proxies, client-side ids, `sync` roundtrip,
+  hook and generic-function event dispatch, `demo-globals`.
 
 **Exit gate**
 
@@ -151,8 +152,9 @@ start the next phase to escape a gate.
 - Byte-exact roundtrip tests on recorded message vectors, including fd-carrying messages.
 - A fuzz harness feeds random buffers to the decoder for 10⁶ iterations: no crash, no
   unbounded allocation, no fd leak.
-- `(wayland.client:demo-globals)` prints the global list of the session you are already
-  running in, and the output matches `wayland-info`.
+- The `cl-wayland-client/demo` system (`wayland.client.demo:run`, or the built
+  `demo-globals` binary) prints the global list of the session you are already running in,
+  and the output matches `wayland-info`.
 
 **Demo:** a REPL session dumping the live session's globals from Lisp.
 

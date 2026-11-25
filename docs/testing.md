@@ -13,6 +13,7 @@ class of bug the others cannot.
 |---|---|---|---|
 | Unit (codec, schema, regions, ids) | arithmetic and encoding mistakes | anywhere | ms |
 | Property/fuzz (decoder, pool validation) | crashes, overreads, leaks | anywhere | seconds |
+| Client loopback (socket pair standing in for a compositor) | client dispatch, ids, roundtrip, event decoding | anywhere | ms |
 | Trace replay (recorded `WAYLAND_DEBUG`) | divergence from libwayland behaviour | anywhere | seconds |
 | Interop (real clients against our server; our client against real servers) | protocol conformance | needs a session | minutes |
 | Golden image (headless render → PNG hash) | rendering, damage, transforms, scale | anywhere, no GPU | seconds |
@@ -76,6 +77,13 @@ A harness connects two `socketpair` ends: the fuzzer writes, our decoder reads.
 The matrix is a script, not a checklist: `scripts/interop.sh <server> <client>` starts the
 pair on a private socket, runs a scenario, and diffs the observed client log against
 expectations.
+
+What runs today without a session: `tests/unit/client.lisp` puts a socket pair in place of a
+compositor and asserts the bytes the client writes (`get_registry`, `bind`'s four wire
+arguments) and what it makes of the bytes a compositor would write (globals, `delete_id`,
+`wl_display.error`, a message split across two writes, an event carrying a server-allocated
+`new_id`). `demo-globals` against the live session is the one check that needs a real peer;
+it is compared with `wayland-info` by diff, not by eye.
 
 ## 6. Golden images
 

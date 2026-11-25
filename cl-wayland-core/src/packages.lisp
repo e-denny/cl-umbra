@@ -87,14 +87,16 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    ;; errno
    #:errno
    #:strerror
+   #:+econnreset+
+   #:+enametoolong+
    #:+eintr+
    #:+ebadf+
    #:+eagain+
    #:+epipe+
    #:+emsgsize+
-   #:+econnreset+
    ;; descriptors
    #:make-socket-pair
+   #:connect-unix-socket
    #:close-fd
    #:fd-open-p
    #:fd-cloexec-p
@@ -251,6 +253,7 @@ not open sockets.")
    #:message-opcode
    #:message-kind
    #:message-args
+   #:message-symbol
    #:message-since
    #:message-summary
    #:message-description

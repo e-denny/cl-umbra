@@ -9,3 +9,6 @@
 .cache/
 *.orig
 *~
+
+# asdf:make "cl-wayland-client/demo"
+cl-wayland-client/demo-globals
