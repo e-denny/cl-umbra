@@ -24,9 +24,11 @@ docs/protocol-layer.md §1 for the format it implements.")
    #:make-message-buffer
    #:clear-message-buffer
    #:buffer-octets
+   #:buffer-contents
    #:buffer-size
    #:buffer-fds
    #:buffer-fd-count
+   #:trim-buffer
    #:begin-message
    #:end-message
    #:put-int
@@ -67,3 +69,56 @@ docs/protocol-layer.md §1 for the format it implements.")
    #:invalid-string
    #:invalid-array
    #:missing-fd))
+
+(defpackage #:wayland.ffi
+  (:use #:cl)
+  (:documentation
+   "The syscall edge: descriptors, socket pairs, sendmsg/recvmsg with
+SCM_RIGHTS, errno and FD_CLOEXEC.  Everything here is libc, not libwayland.
+
+Linux/x86-64 values are asserted at load time rather than guessed: a wrong
+MSG_CMSG_CLOEXEC is a silent descriptor leak.")
+  (:export
+   ;; conditions
+   #:io-error
+   #:io-error-operation
+   #:io-error-errno
+   #:connection-closed
+   ;; errno
+   #:errno
+   #:strerror
+   #:+eintr+
+   #:+ebadf+
+   #:+eagain+
+   #:+epipe+
+   #:+emsgsize+
+   #:+econnreset+
+   ;; descriptors
+   #:make-socket-pair
+   #:close-fd
+   #:fd-open-p
+   #:fd-cloexec-p
+   #:set-fd-nonblocking
+   #:memfd-create
+   ;; i/o
+   #:send-with-ancillary
+   #:receive-with-ancillary
+   #:cmsg-align
+   #:cmsg-space))
+
+(defpackage #:wayland.io
+  (:use #:cl #:wayland.wire)
+  (:documentation
+   "Transport for Wayland connections: flushing a message buffer with its
+descriptors, receiving into an input buffer, and turning a byte stream back
+into whole messages.  WAYLAND.WIRE stays pure format; this package is the
+only place that touches a socket.")
+  (:export
+   #:flush-buffer
+   #:input-buffer
+   #:make-input-buffer
+   #:input-buffer-pending-octets
+   #:input-buffer-pending-fds
+   #:pump
+   #:truncated-descriptors
+   #:truncated-descriptors-count))

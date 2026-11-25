@@ -18,8 +18,9 @@ cl-wayland-project/
 │   └── umbra/                   our own protocols, if any (none planned: control is Lisp, D14)
 ├── cl-wayland-core/
 │   ├── cl-wayland-core.asd
-│   └── src/  packages.lisp  wire.lisp  schema.lisp  codegen.lisp  interface.lisp
-│             object.lisp  reactor.lisp  epoll.lisp  log.lisp  ffi-util.lisp
+│   └── src/  packages.lisp  ffi-util.lisp  wire.lisp  io.lisp  schema.lisp
+│             codegen.lisp  interface.lisp  object.lisp  reactor.lisp
+│             epoll.lisp  log.lisp
 ├── cl-wayland-client/
 │   └── src/  display.lisp  proxy.lisp  registry.lisp
 ├── cl-wayland-server/
@@ -56,7 +57,9 @@ does not compile the world.
 
 | Package | Nickname | Contents |
 |---|---|---|
-| `wayland.wire` | — | buffers, message codec, fd passing |
+| `wayland.wire` | — | buffers, message codec, fd queue (pure: no sockets) |
+| `wayland.ffi` | — | libc: socket pairs, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, errno, `FD_CLOEXEC` |
+| `wayland.io` | — | transport: flush an out buffer with its descriptors, pump a socket into whole messages |
 | `wayland.protocol` | — | schema objects, interface registry, `define-*` macros |
 | `wayland.object` | — | object tables, ids, destruction protocol |
 | `wayland.reactor` | — | epoll, timers, idles, wakeups, safe points |

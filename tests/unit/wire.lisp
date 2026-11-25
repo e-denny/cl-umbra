@@ -45,9 +45,10 @@
     buffer))
 
 (defun read-back (buffer &key fds)
-  "A reader positioned just past the header of BUFFER."
+  "A reader over BUFFER's arguments, positioned just past the header."
   (wire:make-reader (wire:buffer-octets buffer)
                     :start wire:+header-size+
+                    :end (wire:buffer-size buffer)
                     :fds (or fds #())))
 
 (defun roundtrip (writer reader &key fds)
@@ -62,18 +63,18 @@
 (deftest header-only
   ;; size 8, opcode 0 -> (8 << 16) | 0 = #x00080000
   (is-equal (bytes 1 0 0 0 0 0 8 0)
-            (wire:buffer-octets (encode 1 0))
+            (wire:buffer-contents (encode 1 0))
             :test #'equalp))
 
 (deftest header-size-and-opcode-share-a-word
   ;; size 12, opcode 3 -> (12 << 16) | 3 = #x000C0003
   (is-equal (bytes 2 0 0 0 3 0 12 0 255 255 255 255)
-            (wire:buffer-octets (encode 2 3 (lambda (b) (wire:put-int b -1))))
+            (wire:buffer-contents (encode 2 3 (lambda (b) (wire:put-int b -1))))
             :test #'equalp))
 
 (deftest header-decodes-what-it-encoded
   (multiple-value-bind (object-id opcode size)
-      (wire:decode-header (wire:buffer-octets
+      (wire:decode-header (wire:buffer-contents
                            (encode 7 9 (lambda (b) (wire:put-uint b 1)))))
     (is (eql 7 object-id))
     (is (eql 9 opcode))
@@ -97,9 +98,23 @@
     (is-equal (bytes 1 0 0 0   1 0 12 0   2 0 0 0
                      2 0 0 0   0 0 20 0   7 0 0 0
                      3 0 0 0   111 107 0 0)
-              (wire:buffer-octets buffer)
+              (wire:buffer-contents buffer)
               :test #'equalp)
     (is (eql 32 (wire:buffer-size buffer)))))
+
+(deftest trim-buffer-shifts-the-tail-and-can-drop-fds
+  (let ((buffer (encode 1 0 (lambda (b) (wire:put-fd b 9)))))
+    (is (eql 12 (wire:buffer-size buffer)))
+    (wire:trim-buffer buffer 4)
+    (is (eql 8 (wire:buffer-size buffer)))
+    (is (equalp (bytes 0 0 12 0 0 0 0 0) (wire:buffer-contents buffer))
+        "trimming keeps the tail, in place")
+    (is (eql 1 (wire:buffer-fd-count buffer)) "descriptors survive a plain trim")
+    (wire:trim-buffer buffer 8 :drop-fds t)
+    (is (zerop (wire:buffer-size buffer)))
+    (is (null (wire:buffer-fds buffer))))
+  (signals wire:encode-error
+    (wire:trim-buffer (encode 1 0) 99)))
 
 (deftest clear-message-buffer-resets-size-and-fds
   (let ((buffer (encode 1 0 (lambda (b) (wire:put-fd b 5)))))
@@ -128,11 +143,11 @@
 
 (deftest int-encoding-is-little-endian
   (is-equal (bytes 1 0 0 0 0 0 12 0 1 0 0 0)
-            (wire:buffer-octets (encode 1 0 (lambda (b) (wire:put-int b 1))))
+            (wire:buffer-contents (encode 1 0 (lambda (b) (wire:put-int b 1))))
             :test #'equalp)
   ;; #x12345678, low octet first.
   (is-equal (bytes 120 86 52 18)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-uint b #x12345678))))
                     8)
             :test #'equalp))
@@ -156,13 +171,13 @@
 (deftest fixed-encoding
   ;; 3/2 * 256 = 384 = #x180
   (is-equal (bytes 128 1 0 0)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-fixed b 3/2))))
                     8)
             :test #'equalp)
   ;; -3/2 * 256 = -384 = #xFFFFFE80
   (is-equal (bytes 128 254 255 255)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-fixed b -3/2))))
                     8)
             :test #'equalp)
@@ -186,25 +201,25 @@
 (deftest string-encoding
   ;; "wl": 3 octets including the NUL, one pad octet.
   (is-equal (bytes 3 0 0 0 119 108 0 0)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-string b "wl"))))
                     8)
             :test #'equalp)
   ;; "": one octet, the NUL, then three pad octets.  Distinct from NIL.
   (is-equal (bytes 1 0 0 0 0 0 0 0)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-string b ""))))
                     8)
             :test #'equalp)
   ;; NIL: length 0 and nothing else.
   (is-equal (bytes 0 0 0 0)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-string b nil))))
                     8)
             :test #'equalp)
   ;; "abcd": 5 octets, three pad octets, so the message stays 4-aligned.
   (is-equal (bytes 5 0 0 0 97 98 99 100 0 0 0 0)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-string b "abcd"))))
                     8)
             :test #'equalp))
@@ -212,7 +227,7 @@
 (deftest string-utf8
   ;; U+00E9 is C3 A9; with the NUL that is 3 octets, one pad octet.
   (is-equal (bytes 3 0 0 0 195 169 0 0)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-string b "é"))))
                     8)
             :test #'equalp))
@@ -249,12 +264,12 @@
 
 (deftest array-encoding
   (is-equal (bytes 5 0 0 0 1 2 3 4 5 0 0 0)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-array b (bytes 1 2 3 4 5)))))
                     8)
             :test #'equalp)
   (is-equal (bytes 0 0 0 0)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-array b nil))))
                     8)
             :test #'equalp))
@@ -283,12 +298,12 @@
 
 (deftest object-encoding
   (is-equal (bytes 0 0 0 0)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-object b nil))))
                     8)
             :test #'equalp)
   (is-equal (bytes 7 0 0 0)
-            (subseq (wire:buffer-octets
+            (subseq (wire:buffer-contents
                      (encode 1 0 (lambda (b) (wire:put-object b 7))))
                     8)
             :test #'equalp)
@@ -304,7 +319,7 @@
   (let ((buffer (encode 1 0 (lambda (b) (wire:put-fd b 42)))))
     ;; Four octets of placeholder in the stream...
     (is-equal (bytes 0 0 0 0)
-              (subseq (wire:buffer-octets buffer) 8)
+              (subseq (wire:buffer-contents buffer) 8)
               :test #'equalp)
     ;; ...and the descriptor in the buffer's queue.
     (is (equal '(42) (wire:buffer-fds buffer)))
@@ -440,6 +455,6 @@
                            (lambda (b) (wire:put-string b value)))))
       (is (zerop (mod (wire:buffer-size buffer) 4)))
       (multiple-value-bind (object-id opcode size)
-          (wire:decode-header (wire:buffer-octets buffer))
+          (wire:decode-header (wire:buffer-contents buffer))
         (declare (ignore object-id opcode))
         (is (eql size (wire:buffer-size buffer)))))))

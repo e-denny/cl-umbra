@@ -6,8 +6,13 @@
 for libwayland, written from the socket up."
   :license "GPL-3.0-or-later"
   :version "0.0.1"
+  ;; CFFI is for libc: sockets, sendmsg/recvmsg, memfd.  It never touches
+  ;; libwayland or wlroots (D1).
+  :depends-on ("cffi")
   :serial t
   :components ((:module "src"
                 :serial t
                 :components ((:file "packages")
-                             (:file "wire")))))
+                             (:file "ffi-util")
+                             (:file "wire")
+                             (:file "io")))))

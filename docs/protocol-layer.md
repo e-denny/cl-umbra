@@ -65,7 +65,8 @@ Constraints that shape the implementation:
 
 ## 2. Buffers and I/O
 
-Per connection:
+Per connection (implementation: `wayland.io`, with `wayland.wire` holding the
+octets and `wayland.ffi` making the syscalls):
 
 - **In buffer**: a 64 KiB ring. `recvmsg` fills it; the decoder walks complete messages;
   partial tails stay. If a message does not fit, the buffer grows once, then errors.

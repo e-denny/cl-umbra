@@ -27,12 +27,16 @@ revise after each phase, not a promise.
 empty `.asd` per system; `protocols/` populated with pinned XML.
 
 `wayland.wire`
-- [ ] 64 KiB in/out rings with partial-message handling
+- [ ] 64 KiB in/out rings with partial-message handling (partial-message handling
+      and buffer growth are done in `wayland.io:pump`; the fixed-size rings and the
+      out-buffer high-water mark belong with the reactor)
 - [x] header encode/decode; size/opcode split; alignment assertions
 - [x] encoders/decoders: int, uint, fixed, string, object, new_id, array
-      (fd argument bookkeeping included; `sendmsg`/`recvmsg` still open)
-- [ ] `sendmsg`/`recvmsg` with `SCM_RIGHTS`; fd queue; 28-fd flush ceiling; `MSG_CMSG_CLOEXEC`
+      (fd argument bookkeeping included)
+- [x] `sendmsg`/`recvmsg` with `SCM_RIGHTS`; fd queue; 28-fd flush ceiling; `MSG_CMSG_CLOEXEC`
 - [ ] `MSG_CTRUNC`, missing-fd, surplus-fd handling (all ⇒ error + close)
+      (`MSG_CTRUNC` and missing-fd are done and tested; surplus-fd waits for the
+      protocol layer that knows how many descriptors a message declares)
 - [ ] `WAYLAND_DEBUG`-compatible trace logging
 - [x] unit tests: byte-exact vectors, roundtrip property tests, boundary sizes
 - [ ] fuzz harness feeding a `socketpair` (needs the I/O path below)
@@ -274,7 +278,8 @@ Session
 3. [x] `wayland.wire` + tests: header, ints, strings, arrays, fixed, objects, fds
    (queued, not yet sent). No sockets yet.
 4. Record fixtures: `WAYLAND_DEBUG=1 kitty` capture, plus a `wayland-info` capture.
-5. `sendmsg`/`recvmsg` fd path with `socketpair` + `memfd_create`; test the 28-fd boundary.
+5. [x] `sendmsg`/`recvmsg` fd path with `socketpair` + `memfd_create`; test the 28-fd
+   boundary and `MSG_CTRUNC`.
 6. Reactor + epoll + timerfd; a test that sleeps exactly as long as asked.
 7. XML schema parser; assert opcodes match `wayland-scanner`.
 8. `demo-globals` against the live session.

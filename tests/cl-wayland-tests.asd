@@ -10,7 +10,8 @@
   :components ((:file "harness")
                (:module "unit"
                 :serial t
-                :components ((:file "wire"))))
+                :components ((:file "wire")
+                             (:file "io"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
              (unless (zerop (uiop:symbol-call :wayland.test :run-all))

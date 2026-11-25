@@ -3,17 +3,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Load every system from a clean image and check the loaded image for
-# forbidden shared objects.  This is the cheap half of the purity gate:
-# it proves the skeleton compiles and that nothing links libwayland.
+# forbidden shared objects.  This is the cheap half of the purity gate.
 
 set -euo pipefail
-
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 exec sbcl --non-interactive --no-userinit --no-sysinit \
-  --eval '(require :asdf)' \
-  --eval "(asdf:initialize-source-registry
-            '(:source-registry (:tree \"$root/\") :ignore-inherited-configuration))" \
+  "${sbcl_evals[@]}" \
   --eval '(dolist (name (list "cl-wayland-core" "cl-wayland-client" "cl-wayland-server"
                               "cl-compositor-framework" "cl-tinywl" "cl-umbra"))
             (asdf:load-system name)

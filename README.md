@@ -4,8 +4,10 @@ A Wayland stack written in Common Lisp, from the socket up.
 
 **Status: phase 0 in progress.** Planning is complete — [`PLAN.md`](PLAN.md), the design
 documents in [`docs/`](docs/), and the decision log [`DECISIONS.md`](DECISIONS.md) — and
-the first slice of `cl-wayland-core` exists: `wayland.wire`, the message framing and
-argument codec, with byte-exact and property tests. No sockets yet, by design.
+the first slice of `cl-wayland-core` exists: `wayland.wire` (framing and argument
+codec), `wayland.ffi` (sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, errno) and
+`wayland.io` (flush and pump, descriptor passing, partial-message handling), with
+byte-exact, property and real-descriptor tests. No reactor or protocol schema yet.
 
 ## What this is
 

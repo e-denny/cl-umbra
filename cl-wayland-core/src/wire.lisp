@@ -167,18 +167,21 @@ silently byte-swapped codec is invisible until something subtle breaks."
 ;;; The message buffer (encode side)
 ;;; ---------------------------------------------------------------------------
 
-(defstruct (message-buffer (:constructor %make-message-buffer))
-  (octets #() :type (array (unsigned-byte 8) (*)))
+(defstruct (message-buffer (:constructor %make-message-buffer (octets size fds)))
+  ;; A simple array with an explicit size, not an adjustable vector with a fill
+  ;; pointer: the transport pins this vector and hands the kernel a raw pointer
+  ;; (cffi:with-pointer-to-vector-data), which requires an unboxed simple array.
+  (octets #() :type (simple-array (unsigned-byte 8) (*)))
+  (size 0 :type fixnum)
   ;; Most recently queued descriptor first; callers see BUFFER-FDS in order.
   (fds '() :type list))
 
 (defun make-message-buffer (&key (capacity 256))
   "A fresh, empty outbound buffer.  CAPACITY is a growth hint, not a limit."
-  (%make-message-buffer
-   :octets (make-array capacity
-                      :element-type '(unsigned-byte 8)
-                      :adjustable t
-                      :fill-pointer 0)))
+  (%make-message-buffer (make-array (max capacity 1)
+                                    :element-type '(unsigned-byte 8))
+                        0
+                        nil))
 
 (defun buffer-octets (buffer)
   "The buffer's octet vector.  Its fill pointer is the number of valid octets."
@@ -186,7 +189,14 @@ silently byte-swapped codec is invisible until something subtle breaks."
 
 (defun buffer-size (buffer)
   "Number of octets written so far, including any header placeholders."
-  (fill-pointer (message-buffer-octets buffer)))
+  (message-buffer-size buffer))
+
+(defun buffer-contents (buffer)
+  "A fresh vector holding only the octets written.
+
+BUFFER-OCTETS is the whole allocation and is what the transport pins; this is
+the view tests, hashes and traces want."
+  (subseq (message-buffer-octets buffer) 0 (message-buffer-size buffer)))
 
 (defun buffer-fds (buffer)
   "Queued descriptors, in the order their arguments appeared."
@@ -200,20 +210,51 @@ silently byte-swapped codec is invisible until something subtle breaks."
 
 The caller keeps ownership of the descriptors: clearing does not close them.
 The I/O layer closes what it dequeued, or hands them to their `release'."
-  (setf (fill-pointer (message-buffer-octets buffer)) 0)
+  (setf (message-buffer-size buffer) 0)
   (setf (message-buffer-fds buffer) nil)
   buffer)
 
+(defun trim-buffer (buffer count &key drop-fds)
+  "Discard the first COUNT octets, which a successful write has consumed.
+
+DROP-FDS clears the descriptor queue too: descriptors ride with the first
+octets of a write, so once any part of the buffer went out they are gone."
+  (let ((size (buffer-size buffer)))
+    (unless (<= 0 count size)
+      (error 'encode-error
+             :format-control "cannot trim ~D octets from a ~D-octet buffer"
+             :format-arguments (list count size)))
+    (when (plusp count)
+      (let ((octets (message-buffer-octets buffer)))
+        (replace octets octets :start1 0 :start2 count :end2 size))
+      (setf (message-buffer-size buffer) (- size count))))
+  (when drop-fds
+    (setf (message-buffer-fds buffer) nil))
+  buffer)
+
+(defun ensure-capacity (buffer extra)
+  "Make room for EXTRA more octets, growing the vector at least by doubling."
+  (let* ((octets (message-buffer-octets buffer))
+         (size (message-buffer-size buffer))
+         (needed (+ size extra)))
+    (when (> needed (length octets))
+      (let ((new (make-array (max needed (* 2 (length octets)) 64)
+                             :element-type '(unsigned-byte 8))))
+        (replace new octets :end2 size)
+        (setf (message-buffer-octets buffer) new)))
+    buffer))
+
 (declaim (inline store-u8))
 (defun store-u8 (buffer octet)
-  (vector-push-extend octet (message-buffer-octets buffer))
+  (ensure-capacity buffer 1)
+  (setf (aref (message-buffer-octets buffer) (message-buffer-size buffer)) octet)
+  (incf (message-buffer-size buffer))
   buffer)
 
 (defun store-u32 (buffer value)
-  (store-u8 buffer (ldb (byte 8 0) value))
-  (store-u8 buffer (ldb (byte 8 8) value))
-  (store-u8 buffer (ldb (byte 8 16) value))
-  (store-u8 buffer (ldb (byte 8 24) value))
+  (ensure-capacity buffer 4)
+  (store-u32-at (message-buffer-octets buffer) (message-buffer-size buffer) value)
+  (incf (message-buffer-size buffer) 4)
   buffer)
 
 (defun begin-message (buffer object-id opcode)
