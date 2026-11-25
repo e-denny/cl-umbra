@@ -23,17 +23,20 @@
   :description "Test suite for the cl-wayland-project systems (Rove)."
   :license "GPL-3.0-or-later"
   :version "0.0.1"
-  :depends-on ("rove" "cl-wayland-core" "cl-wayland-protocols" "cl-wayland-client")
+  :depends-on ("rove" "cl-wayland-core" "cl-wayland-protocols" "cl-wayland-client"
+               "cl-wayland-server")
   :serial t
   :components ((:file "runner")
                (:module "unit"
                 :serial t
                 :components ((:file "wire")
                              (:file "io")
+                             (:file "object")
                              (:file "reactor")
                              (:file "schema")
                              (:file "codegen")
-                             (:file "client"))))
+                             (:file "client")
+                             (:file "server"))))
   ;; The perform body is read while this file is loaded, long before the runner
   ;; is on the system, so its symbols are looked up by name.
   :perform (test-op (operation component)

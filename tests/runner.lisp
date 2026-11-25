@@ -32,10 +32,12 @@
 (defparameter +suites+
   '(wayland.test.wire
     wayland.test.io
+    wayland.test.object
     wayland.test.reactor
     wayland.test.schema
     wayland.test.codegen
-    wayland.test.client)
+    wayland.test.client
+    wayland.test.server)
   "Test packages, in dependency order.  Each holds one file's tests.")
 
 (defun suite-result (suite style)
