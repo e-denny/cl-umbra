@@ -57,8 +57,9 @@ empty `.asd` per system; `protocols/` populated with pinned XML.
 - [x] interface registry, version/since metadata, opcode assignment, libwayland signatures
 - [x] parse every vendored XML file (69); compare opcodes, signatures and object types
       against `wayland-scanner private-code` as an oracle
-- [ ] `define-interface`, `define-request`, `define-event`, `define-enum` macros
-- [ ] ASDF component `:wayland-protocol` generating those forms from XML at build time
+- [x] `define-interface`, `define-request`, `define-event`, `define-enum` macros
+- [x] ASDF component `:wayland-protocol` generating those forms from XML at build time
+      (`cl-wayland-asdf`), used by `cl-wayland-protocols`
 
 `cl-wayland-client` (minimal)
 - [ ] connect (`WAYLAND_DISPLAY`, absolute paths, `$XDG_RUNTIME_DIR` default)

@@ -5,7 +5,7 @@
   :description "Test suite for the cl-wayland-project systems."
   :license "GPL-3.0-or-later"
   :version "0.0.1"
-  :depends-on ("cl-wayland-core")
+  :depends-on ("cl-wayland-core" "cl-wayland-protocols")
   :serial t
   :components ((:file "harness")
                (:module "unit"
@@ -13,7 +13,8 @@
                 :components ((:file "wire")
                              (:file "io")
                              (:file "reactor")
-                             (:file "schema"))))
+                             (:file "schema")
+                             (:file "codegen"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
              (unless (zerop (uiop:symbol-call :wayland.test :run-all))

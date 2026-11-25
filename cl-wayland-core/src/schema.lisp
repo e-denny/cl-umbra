@@ -36,6 +36,17 @@
 (define-condition xml-error (schema-error) ())
 (define-condition invalid-schema (schema-error) ())
 
+(define-condition conflicting-interface (schema-error)
+  ((name :initarg :name :reader conflicting-interface-name)
+   (old-version :initarg :old-version :reader conflicting-interface-old-version)
+   (new-version :initarg :new-version :reader conflicting-interface-new-version))
+  (:report (lambda (condition stream)
+             (format stream
+                     "interface ~A is already loaded at version ~D, and this source says version ~D; a system must not load two versions of one protocol"
+                     (conflicting-interface-name condition)
+                     (conflicting-interface-old-version condition)
+                     (conflicting-interface-new-version condition)))))
+
 (defun xml-fail (origin control &rest arguments)
   (error 'xml-error :origin origin :detail (apply #'format nil control arguments)))
 
@@ -279,13 +290,13 @@ Returns (values attributes self-closing-p)."
 
 (defclass wl-interface ()
   ((name :initarg :name :reader interface-name)
-   (version :initarg :version :initform 1 :reader interface-version)
+   (version :initarg :version :initform 1 :accessor interface-version)
    ;; Document order; the position in each list is the opcode.
    (requests :initarg :requests :initform '() :accessor interface-requests)
    (events :initarg :events :initform '() :accessor interface-events)
    (enums :initarg :enums :initform '() :accessor interface-enums)
-   (summary :initarg :summary :initform nil :reader interface-summary)
-   (description :initarg :description :initform nil :reader interface-description)
+   (summary :initarg :summary :initform nil :accessor interface-summary)
+   (description :initarg :description :initform nil :accessor interface-description)
    (protocol :initarg :protocol :initform nil :accessor interface-protocol))
   (:documentation "One <interface>: a version and two ordered message lists."))
 
@@ -568,6 +579,9 @@ libwayland's wayland-scanner.c."
 (defvar *interfaces* (make-hash-table :test #'equal)
   "Interface name -> WL-INTERFACE, across every loaded protocol.")
 
+(defvar *interface-symbols* (make-hash-table :test #'equal)
+  "Interface symbol name (\"WL-SURFACE\") -> WL-INTERFACE, for the define-* forms.")
+
 (defvar *protocols* '()
   "Loaded WL-PROTOCOL objects, most recent first.")
 
@@ -602,5 +616,222 @@ reload of the protocol corpus wants."
 
 (defun clear-protocol-registry ()
   (clrhash *interfaces*)
+  (clrhash *interface-symbols*)
   (setf *protocols* nil)
   nil)
+
+;;; ---------------------------------------------------------------------------
+;;; define-* forms
+;;; ---------------------------------------------------------------------------
+;;;
+;;; These are what the code generator emits (WAYLAND.CODEGEN) and what a human
+;;; writes when a protocol is small enough to spell out.  Each registers schema
+;;; metadata and defines the names a compositor or client wants to mention: a
+;;; version constant, an opcode constant, an enum constant, and a generic
+;;; function per message to specialise.
+;;;
+;;; Lookup goes through the interface's *symbol name*, so a generated file can
+;;; define wl-surface in package WAYLAND while another protocol refers to the
+;;; same interface by the string "wl_surface" in an :interface option.
+
+(defun interface-symbol-for (symbol)
+  (or (gethash (symbol-name symbol) *interface-symbols*)
+      (schema-fail nil
+                   "no interface is defined for ~S; define the interface before its messages"
+                   symbol)))
+
+(defun wire-name-of (symbol)
+  "wl-surface -> \"wl_surface\"."
+  (string-downcase (substitute #\_ #\- (symbol-name symbol))))
+
+(defun lisp-name-of (wire-name)
+  "wl_surface -> wl-surface."
+  (string-downcase (substitute #\- #\_ wire-name)))
+
+(defun wire-name-string (lisp-name)
+  "wl-surface -> \"wl_surface\".  The inverse of LISP-NAME-OF, for symbols whose
+names are written in Lisp style and need to go back on the wire."
+  (string-downcase (substitute #\_ #\- lisp-name)))
+
+(defun option-value (options key &optional default)
+  (let ((option (find key options :key #'first :test #'eq)))
+    (if option (second option) default)))
+
+(defun split-dotted-symbol (symbol)
+  "wl-surface.error -> (values \"WL-SURFACE\" \"ERROR\")."
+  (let* ((name (symbol-name symbol))
+         (dot (position #\. name)))
+    (unless dot
+      (schema-fail nil "~S must be written as interface.name" symbol))
+    (values (subseq name 0 dot) (subseq name (1+ dot)))))
+
+(defun message-wire-name (symbol)
+  "wl-surface.attach -> \"attach\"."
+  (nth-value 1 (split-dotted-symbol symbol)))
+
+;; Constant names are built as strings so the code generator can print the same
+;; tokens without interning anything in its own package.
+
+(defun version-constant-name (interface-name)
+  (format nil "+~A-VERSION+" (string-upcase interface-name)))
+
+(defun opcode-constant-name (interface-name message-name)
+  (format nil "+~A-~A+" (string-upcase interface-name) (string-upcase message-name)))
+
+(defun enum-constant-name (interface-name enum-name entry-name)
+  (format nil "+~A-~A-~A+"
+          (string-upcase interface-name)
+          (string-upcase enum-name)
+          (string-upcase entry-name)))
+
+(defun %define-interface (symbol version wire-name documentation)
+  (let ((previous (find-interface wire-name)))
+    (when (and previous (/= version (interface-version previous)))
+      (error 'conflicting-interface :name wire-name
+                                     :old-version (interface-version previous)
+                                     :new-version version))
+    (let ((interface (make-instance 'wl-interface
+                                    :name wire-name
+                                    :version version
+                                    :description documentation)))
+      (setf (gethash wire-name *interfaces*) interface)
+      (setf (gethash (symbol-name symbol) *interface-symbols*) interface)
+      interface)))
+
+(defmacro define-interface (symbol &body options)
+  "Register an interface and define +INTERFACE-VERSION+.
+
+OPTIONS: (:version N), (:wire-name \"wl_surface\"), (:documentation \"...\").
+The wire name defaults to the symbol with its dash replaced by an underscore."
+  (let ((version (option-value options :version 1))
+        (wire-name (option-value options :wire-name (wire-name-of symbol)))
+        (documentation (option-value options :documentation "")))
+    `(progn
+       (eval-when (:load-toplevel :execute)
+         (%define-interface ',symbol ,version ,wire-name ,documentation))
+       (defconstant ,(intern (version-constant-name (lisp-name-of (wire-name-of symbol)))
+                             *package*)
+         ,version))))
+
+(defun %define-enum (interface-symbol enum-name bitfield-p entries)
+  (let* ((interface (interface-symbol-for interface-symbol))
+         (enum (make-instance 'wl-enum
+                              :name enum-name
+                              :bitfield-p bitfield-p
+                              :interface interface
+                              :entries
+                              (loop for (name value since summary) in entries
+                                    collect (make-instance 'wl-entry
+                                                           :name name
+                                                           :value value
+                                                           :since since
+                                                           :summary summary)))))
+    (setf (interface-enums interface)
+          (append (remove enum-name (interface-enums interface)
+                          :key #'enum-name :test #'string=)
+                  (list enum)))
+    enum))
+
+(defmacro define-enum (symbol options &body entries)
+  "Register an enum (wl-surface.error) and define one constant per entry:
++wl-surface-error-invalid-scale+."
+  (multiple-value-bind (interface-name enum-name) (split-dotted-symbol symbol)
+    (let ((interface-symbol (intern interface-name *package*))
+          (wire-enum (wire-name-string enum-name))
+          (specs '()))
+      (dolist (entry entries)
+        (destructuring-bind (name value &rest rest) entry
+          (push (list (wire-name-string (symbol-name name)) value
+                      (or (getf rest :since) 1) (getf rest :summary))
+                specs)))
+      `(progn
+         (eval-when (:load-toplevel :execute)
+           (%define-enum ',interface-symbol ,wire-enum
+                         ,(and (getf options :bitfield) t)
+                         ',(nreverse specs)))
+         ,@(loop for (name value) in (mapcar (lambda (entry)
+                                               (list (first entry) (second entry)))
+                                             entries)
+                 collect `(defconstant
+                              ,(intern (enum-constant-name
+                                        (lisp-name-of (wire-name-of interface-symbol))
+                                        wire-enum
+                                        (string-downcase (symbol-name name)))
+                                       *package*)
+                            ,value))))))
+
+(defun parameter-names (arguments)
+  "A safe generic function lambda list: (object arg1 arg2 ...), with duplicate
+or reserved names replaced."
+  (let ((object (intern "OBJECT" *package*))
+        (used (list "OBJECT"))
+        (names '()))
+    (loop for argument in arguments
+          for index from 0
+          for name = (first argument)
+          for string = (symbol-name name)
+          for usable = (and (not (member string '("T" "NIL") :test #'string=))
+                            (not (member string used :test #'string=)))
+          do (push (if usable
+                    name
+                     (intern (format nil "ARG~D" index) *package*))
+                 names)
+             (push string used))
+    (cons object (nreverse names))))
+
+(defun %define-message (message-symbol interface-symbol opcode kind since arguments documentation)
+  (let* ((interface (interface-symbol-for interface-symbol))
+         (message (make-instance 'wl-message
+                                 :name (wire-name-string (message-wire-name message-symbol))
+                                 :opcode opcode
+                                 :kind kind
+                                 :interface interface
+                                 :since since
+                                 :description documentation
+                                 :args (loop for (name type . options) in arguments
+                                             collect (make-instance
+                                                      'wl-arg
+                                                      :name (wire-name-string (symbol-name name))
+                                                      :type type
+                                                      :interface (getf options :interface)
+                                                      :allow-null (and (getf options :allow-null) t)
+                                                      :enum (getf options :enum)
+                                                      :summary (getf options :summary))))))
+    (let ((messages (if (eq kind :request)
+                        (interface-requests interface)
+                        (interface-events interface))))
+      (loop while (<= (length messages) opcode)
+            do (setf messages (append messages (list nil))))
+      (setf (nth opcode messages) message)
+      (if (eq kind :request)
+          (setf (interface-requests interface) messages)
+          (setf (interface-events interface) messages)))
+    message))
+
+(defmacro define-message (kind message-symbol interface-symbol opcode arguments &body options)
+  `(progn
+     (defgeneric ,message-symbol ,(parameter-names arguments)
+       ,@(let ((documentation (option-value options :documentation)))
+           (when documentation `((:documentation ,documentation)))))
+     (defconstant ,(intern (opcode-constant-name
+                            (lisp-name-of (wire-name-of interface-symbol))
+                            (string-downcase (message-wire-name message-symbol)))
+                           *package*)
+       ,opcode)
+     (eval-when (:load-toplevel :execute)
+       (%define-message ',message-symbol ',interface-symbol ,opcode ,kind
+                        ,(or (option-value options :since) 1)
+                        ',arguments
+                        ,(option-value options :documentation)))))
+
+(defmacro define-request ((message-symbol interface-symbol opcode) arguments &body options)
+  "Register a request and define wl-surface.attach as a generic function.
+
+The generic function is the handler a compositor specialises (server side) and
+the callable a client uses (client side): one schema, two directions."
+  `(define-message :request ,message-symbol ,interface-symbol ,opcode ,arguments
+                   ,@options))
+
+(defmacro define-event ((message-symbol interface-symbol opcode) arguments &body options)
+  `(define-message :event ,message-symbol ,interface-symbol ,opcode ,arguments
+                   ,@options))

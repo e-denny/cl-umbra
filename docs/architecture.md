@@ -41,6 +41,8 @@ cl-wayland-project/
 │       ├── util/      box.lisp region.lisp matrix.lisp output-layout.lisp
 │       │              xcursor.lisp edges.lisp time.lisp log.lisp
 │       └── session/   seat.lisp vt.lisp
+├── cl-wayland-asdf/              the :wayland-protocol ASDF component (build time)
+├── cl-wayland-protocols/         generated metadata, one component per XML file
 ├── cl-tinywl/       tinywl.lisp  main.lisp
 ├── cl-umbra/        compositor.lisp  layouts/  workspaces.lisp  rules.lisp
 │                    config/  control/  session.lisp
@@ -60,7 +62,9 @@ does not compile the world.
 | `wayland.wire` | — | buffers, message codec, fd queue (pure: no sockets) |
 | `wayland.ffi` | — | libc: socket pairs, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, errno, `FD_CLOEXEC` |
 | `wayland.io` | — | transport: flush an out buffer with its descriptors, pump a socket into whole messages |
-| `wayland.protocol` | — | XML reader, schema objects (interfaces, messages, args, enums), signatures, interface registry; `define-*` macros still to come with codegen |
+| `wayland.protocol` | — | XML reader, schema objects (interfaces, messages, args, enums), signatures, interface registry, `define-*` forms |
+| `wayland.codegen` | — | schema → Lisp source, one package per protocol |
+| `wayland.asdf` | — | the `:wayland-protocol` component type (build time only) |
 | `wayland.object` | — | object tables, ids, destruction protocol |
 | `wayland.reactor` | — | epoll sources (level-triggered), timers, idles, posted commands, signalfd; `epoll.lisp` holds the packed-event syscall wrapper |
 | `wayland.client` | `wl.client` | display, proxies, registry |
@@ -70,8 +74,9 @@ does not compile the world.
 | `umbra` | — | the daily-driver compositor |
 
 Generated protocol symbols (`wl-surface`, `xdg-toplevel`, `+wl-surface-error-invalid-scale+`,
-`wl-surface.attach`) live in a package named after the protocol family, re-exported by the
-system that implements it. No package ever shadows a protocol name with a framework name:
+`wl-surface.attach`) live in a package named after the protocol (`WAYLAND`, `XDG-SHELL`),
+created by the generated file, re-exported by the system that implements it.  Generated
+sources are written to the ASDF output cache, never next to the XML. No package ever shadows a protocol name with a framework name:
 framework objects carry their own prefix (`cf-surface`, `cf-output`).
 
 ## 3. Two kinds of object

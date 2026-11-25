@@ -18,4 +18,5 @@ for libwayland, written from the socket up."
                              (:file "io")
                              (:file "epoll")
                              (:file "reactor")
-                             (:file "schema")))))
+                             (:file "schema")
+                             (:file "codegen")))))

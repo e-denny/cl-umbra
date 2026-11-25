@@ -41,3 +41,9 @@ protocols/
 ```
 
 69 XML files, 214 interfaces.
+
+## How they are consumed
+
+`cl-wayland-protocols` declares the files a build needs as `:wayland-protocol`
+components; each is parsed at build time and compiled into a Lisp package named
+after the protocol.  Nothing here is loaded by a running compositor.

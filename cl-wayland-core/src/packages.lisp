@@ -289,6 +289,32 @@ not open sockets.")
    #:registered-interfaces
    #:clear-protocol-registry
    ;; conditions
+   ;; define-* forms and their helpers
+   #:define-interface
+   #:define-enum
+   #:define-request
+   #:define-event
+   #:wire-name-of
+   #:lisp-name-of
+   #:version-constant-name
+   #:opcode-constant-name
+   #:enum-constant-name
+   ;; conditions
    #:schema-error
    #:xml-error
-   #:invalid-schema))
+   #:invalid-schema
+   #:conflicting-interface
+   #:conflicting-interface-name))
+
+(defpackage #:wayland.codegen
+  (:use #:cl #:wayland.protocol)
+  (:documentation
+   "Schema -> Lisp source: the DEFINE-* forms the ASDF component writes.
+
+Generation is a re-spelling of the schema, never a second opinion: loading what
+this produces must yield exactly the metadata the XML produced.")
+  (:export
+   #:generate-protocol-text
+   #:generate-protocol-file
+   #:protocol-package-name
+   #:protocol-export-names))

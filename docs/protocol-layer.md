@@ -108,25 +108,45 @@ in the REPL.
 
 ### 4.2 Generated forms
 
+One package per protocol (`WAYLAND`, `XDG-SHELL`, `WLR-LAYER-SHELL-UNSTABLE-V1`), holding
+every symbol the protocol defines:
+
 ```lisp
-(define-interface wl-surface (:version 7) (:interface-name "wl_surface")
-  (:documentation "An onscreen surface…"))
+(define-interface wl-surface
+    (:version 7)
+    (:wire-name "wl_surface")
+    (:documentation "An onscreen surface…"))
 
 (define-enum wl-surface.error ()
-  (:invalid-scale 0 :summary "buffer scale must be positive")
-  (:invalid-transform 1 …)
-  (:invalid-size 2 …))
+  (invalid-scale 0 :summary "buffer scale must be positive")
+  (invalid-transform 1 :summary "…"))
 
 (define-request (wl-surface.attach wl-surface 1)
-  ((buffer wl-buffer :allow-null t) (x :int) (y :int))
-  (:since 1))
+    ((buffer :object :interface "wl_buffer" :allow-null t)
+     (x :int)
+     (y :int))
+  (:documentation "…"))
 
-(define-event (:enter wl-surface 0) ((output wl-output)) (:since 1))
+(define-event (wl-surface.enter wl-surface 0)
+    ((output :object :interface "wl_output")))
 ```
 
-`define-request` produces, for the server: an opcode constant, an entry in the class's
-dispatch vector, and `wl-surface.attach` as the handler function to specialize/override.
-For the client: a marshaller `(wl-surface.attach proxy buffer x y)`.
+Each form defines names, not just metadata:
+
+| Form | Defines |
+|---|---|
+| `define-interface` | `+wl-surface-version+` |
+| `define-request` / `define-event` | `+wl-surface-attach+` (opcode) and the generic function `wl-surface.attach` |
+| `define-enum` | one constant per entry, `+wl-surface-error-invalid-scale+` |
+
+The generic function is the single handler for both directions: a compositor specialises it
+as `(surface buffer x y)`, a client calls it the same way.  Argument types are explicit
+(`:int`, `:object :interface "wl_buffer"`) rather than inferred from the interface
+position, so a generated line says exactly what the wire says.
+
+A message whose `since` exceeds 1 carries the version as a prefix in its signature
+(`"3?oii"`), matching `wayland-scanner`;
+`tests/unit/schema.lisp` checks every signature against it.
 
 ### 4.3 Two dispatch models, one schema
 
@@ -149,14 +169,22 @@ The generator emits both ends from the same metadata:
 
 ```lisp
 (defsystem "umbra"
-  :defsystem-depends-on ("cl-wayland-core")
-  :components ((:wayland-protocol "protocols/wayland/wayland.xml" :export t)
-               (:wayland-protocol "protocols/wlr-protocols/layer-shell.xml")
-               …))
+  :defsystem-depends-on ("cl-wayland-asdf")
+  :depends-on ("cl-wayland-core")
+  :components ((:module "protocols"
+                :pathname "../protocols/"
+                :components ((:wayland-protocol "wayland/wayland" :export t)
+                             (:wayland-protocol "wlr-protocols/unstable/…")))))
 ```
 
+The component is a `CL-SOURCE-FILE` whose source is XML: `source-file-type` says `xml`, and
+`perform` on `compile-op` parses the file, writes `<name>.lisp` into the ASDF output cache,
+and compiles it to exactly the fasl ASDF expects.  `load-op` is inherited.  Rebuild happens
+when the XML changes, and only then.
+
 Generated code is ordinary Lisp compiled into the system: no runtime XML parsing in the
-deployed binary, no reflection on the hot path.
+deployed binary, no reflection on the hot path.  `cl-wayland-protocols` is the system that
+exists purely to prove and use this: it declares `wayland.xml` and stable `xdg-shell`.
 
 ## 5. Server semantics
 

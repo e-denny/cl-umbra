@@ -202,8 +202,11 @@
 ;;; ---------------------------------------------------------------------------
 
 (deftest registry-roundtrip
-  (wp:clear-protocol-registry)
-  (unwind-protect
+  ;; A dynamic rebinding, not CLear: other tests depend on the registry that
+  ;; cl-wayland-protocols populated at load time.
+  (let ((wayland.protocol::*interfaces* (make-hash-table :test #'equal))
+        (wayland.protocol::*interface-symbols* (make-hash-table :test #'equal)))
+    (unwind-protect
        (let* ((protocol (wp:parse-protocol-string *sample* :origin "sample.xml"))
               (surface (first (wp:protocol-interfaces protocol))))
          (wp:register-protocol protocol)
@@ -214,7 +217,7 @@
          (is (eql 2 (length (wp:registered-interfaces))))
          (wp:unregister-protocol protocol)
          (is (null (wp:find-interface "sm_surface"))))
-    (wp:clear-protocol-registry)))
+      (wp:clear-protocol-registry))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The oracle: wayland-scanner private-code

@@ -9,7 +9,8 @@ codec), `wayland.ffi` (sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, errno) an
 `wayland.io` (flush and pump, descriptor passing, partial-message handling) and
 `wayland.reactor` (epoll, timerfd, eventfd wakeups, signalfd, idles) and
 `wayland.protocol` (the 69-file protocol XML corpus, parsed and checked against
-`wayland-scanner`). Code generation is the next slice.
+`wayland-scanner`) and `wayland.codegen` (schema to Lisp, generated at build time by
+the `:wayland-protocol` ASDF component).
 
 ## What this is
 
@@ -23,6 +24,9 @@ Six systems, built in order, each useful on its own:
 | `cl-compositor-framework` | Backends, renderers, scene graph, seat/input, output, shell protocol state machines | **wlroots** | 2-5 |
 | `cl-tinywl` | The tutorial compositor | tinywl | 3 |
 | `cl-umbra` | A compositor for daily use | Umbriel / niri / sway | 6-7 |
+
+Two build-time systems sit beside those six: `cl-wayland-asdf` (the
+`:wayland-protocol` component type) and `cl-wayland-protocols` (its generated output).
 
 Dependency direction is strictly one-way:
 
