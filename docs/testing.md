@@ -54,31 +54,72 @@ ASDF. Assertions are Rove's own: `(ok FORM "description")` for a predicate, and
 `(ok (signals FORM 'condition-type))` for an expected error; a failure prints the test name,
 the assertion, its source location and the arguments' values.
 
-The scripts go through `wayland.test.runner`, which names the six suites instead of letting
+The scripts go through `wayland.test.runner`, which names the eight suites instead of letting
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 112 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 147 tests ran.
+
+Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
+a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
+real socket in a private directory and puts either our client or a hand-written peer on the
+other end:
+
+- **Our client, pumped.** Neither side may block, so the client's reactor gets a 1 ms
+  repeating timer that runs one server cycle; an ordinary `(roundtrip client)` then drives
+  both ends, and registry order, bind validation, initial-event ordering and version gating
+  are checked through the public client API.
+- **A raw peer, for illegal requests.** Unknown object ids, unknown opcodes, a `new_id`
+  already in use or in the server's range, a version above the global's, a request above the
+  resource's version, and a request with no handler (`implementation`) are each written to
+  the wire directly, and the test reads the server's `wl_display.error` reply field by field.
+- **The transport itself.** Peer credentials, `CLOEXEC` on accepted descriptors, the accept
+  budget, a half-written message kept as a partial tail, 50 connect/disconnect cycles with a
+  flat descriptor count, and backpressure: queue more than a socket buffer, check the interest
+  dropped to write-only, drain it, check reading came back.
+
+Those fixtures bind `wayland.server:*log-level*` to `:warn`: the assertions are the evidence,
+and 50 connect/disconnect log lines are not.
 
 One workaround is load-bearing: `tests/cl-wayland-tests.asd` unlocks SBCL's `SB-DI` package
 before Rove loads, because dissect 20231021 (Rove's failure renderer) interns symbols from it
 and SBCL 2.6 locks it. The unlock lives in the test system only, so no shipped system is
 affected; remove it when dissect fixes its SBCL backend.
 
-### The phase-0 gate
+### The gates
 
-`scripts/gate.sh` encodes `PLAN.md` §5's exit gate as five clauses it checks rather than
-assumes: the unit suite, "every vendored protocol compiles", `demo-globals` against
-`wayland-info`, the fuzz harness, and purity (D1). Each prints `PASS`, `FAIL`, `SKIP` (no
-session to talk to) or `NOT BUILT`; the exit status is 0 when all pass, 1 when one fails and
-2 when a clause has nothing behind it, so a clause that is merely planned can never look
-like a green gate. All five pass as of the fuzz harness landing. Failure logs land in a
-temporary directory whose path is printed.
+`scripts/gate.sh` encodes `PLAN.md` §5's exit gates as clauses it checks rather than assumes.
+Each prints `PASS`, `FAIL`, `SKIP` (no session to talk to) or `NOT BUILT`; the exit status is
+0 when all pass, 1 when one fails and 2 when a clause has nothing behind it, so a clause that
+is merely planned can never look like a green gate. Failure logs land in a temporary directory
+whose path is printed.
 
-Two details worth knowing: the protocol clause compiles all 69 files into throwaway packages
-without loading them (duplicate interface versions across the corpus make loading unsafe,
-compiling is local), and the demo clause is skipped rather than failed when there is no
-`WAYLAND_DISPLAY` socket, so the gate runs headless.
+Phase 0 (protocol core and a hello-world client), five clauses: the unit suite, "every
+vendored protocol compiles", `demo-globals` against the live session, the fuzz harness, and
+purity (D1).
+
+Phase 1 (server core), two clauses:
+
+1. **`wayland-info` against our server** (`scripts/wayland-info-server.sh`). The demo server is
+   started on its own socket in a private runtime directory, `wayland-info` — the system's own
+   build, with its own libwayland — runs against it and must exit 0, the output must name both
+   demo globals and the output's mode, the server must exit 0 on `SIGTERM`, and its socket
+   and lock file must be gone afterwards. This is the first clause in the project that puts a
+   real libwayland peer on the other end.
+2. **Soak** (`scripts/soak.sh`, `scripts/soak.lisp`). 10k connect/disconnect cycles, each
+   asking for the registry and a sync, half of them closing mid-exchange. Descriptor count
+   must be identical before and after, the resident set must not grow by more than 2 MiB, and
+   no client or object may survive its connection. `SOAK_CYCLES` overrides the count; 1000
+   runs in well under a second, 10k in about half a second, so the gate runs the full 10k.
+
+Purity runs last, after both phases' clauses, because it is a standing constraint rather than
+a phase deliverable.
+
+All seven clauses pass as of the phase-1 slice. Two details worth knowing: the protocol clause
+compiles all 69 files into throwaway packages without loading them (duplicate interface
+versions across the corpus make loading unsafe, compiling is local), and the demo clause is
+skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs
+headless apart from that one clause.
 
 ## 3. Wire codec
 
@@ -92,6 +133,12 @@ compiling is local), and the demo clause is skipped rather than failed when ther
 - **Trace replay**: decode a real client's messages and assert the resulting call sequence.
 
 ## 4. Fuzzing
+
+Not yet a *peer* fuzzer: the three cases below exercise the decoder and the transport, and a
+client that sends nonsense to a server (pool validation, stride/format checks, protocol
+errors) needs the server to exist first. The server exists as of phase 1; the peer fuzzer is
+the next piece of this section, and `scripts/soak.sh` is its crude stand-in for now (random
+truncation points, 10k of them).
 
 `tests/fuzz/fuzz.lisp` (system `cl-wayland-tests/fuzz`, driver `scripts/fuzz.sh
 [ITERATIONS] [SEED]`) runs three kinds of case, chosen at random:

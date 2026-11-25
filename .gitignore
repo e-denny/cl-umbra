@@ -10,5 +10,6 @@
 *.orig
 *~
 
-# asdf:make "cl-wayland-client/demo"
+# asdf:make for the demo systems
 cl-wayland-client/demo-globals
+cl-wayland-server/wayland-server-demo

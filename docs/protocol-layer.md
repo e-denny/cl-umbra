@@ -77,6 +77,13 @@ octets and `wayland.ffi` making the syscalls):
   compositor from queueing new non-critical events to it, and (b) if it is still full after
   draining, disable its `EPOLLIN` interest until flush succeeds. libwayland behaves
   similarly; clients that never read must not be able to make us grow memory.
+
+Implementation status (phase 1, `cl-wayland-server`): the out buffer is batched and
+watermarked — once it passes `+output-high-water-mark+` (64 KiB) the client's epoll interest
+drops to write-only, so requests stop arriving and the buffer stops growing; draining it below
+the mark restores read interest. Buffers still grow with doubling rather than being fixed
+64 KiB rings, which stays a phase-0 leftover; the watermark, not the ring size, is what bounds
+a hostile client today.
 - Writes are non-blocking. `EAGAIN` re-arms `EPOLLOUT`; `EPIPE`/`ECONNRESET` disconnects.
 
 ## 3. Identifiers
@@ -90,7 +97,9 @@ octets and `wayland.ffi` making the syscalls):
   `wl_display.delete_id(id)`; the id becomes reusable. Server-owned objects are destroyed by
   the server emitting their destructor event (or handling their destructor request) and no
   `delete_id` follows, because the id was never the client's to reuse.
-- Allocation strategy mimics libwayland: lowest free id, so traces look familiar.
+- Allocation strategy mimics libwayland: lowest free id, so traces look familiar. Both ends
+  do it through `wayland.object` (D19), so a client and a server here recycle ids the same
+  way libwayland's two ends do.
 - `delete_id` must be emitted before any event that reuses the id, and after the destructor
   request has been fully processed.
 - Serials are a per-display monotonic u32, bumped for every serial-bearing action
@@ -181,9 +190,9 @@ The generator emits both ends from the same metadata:
         ┌─────────────────────────┴──────────────┴────────────────────────┐
         │  the same generated generic functions, specialised per direction │
         ├──────────────────────────────────┬───────────────────────────────┤
-        │ wayland.client (phase 0, exists) │ wayland.server (phase 1)      │
+        │ wayland.client                   │ wayland.server                │
         │ • proxy class + object table     │ • resource class + object table│
-        │ • id allocation / delete_id      │ • id ranges, bind validation   │
+        │ • id allocation / delete_id      │ • new_id validation, globals   │
         │ • request methods (send)         │ • request methods (handle)     │
         │ • event hooks + event methods    │ • event emitters (send)        │
         │ • version clamping on bind       │ • version gating               │
@@ -193,7 +202,8 @@ The generator emits both ends from the same metadata:
 The two dispatch layers are hand-written because they differ where the protocol does not
 say anything: what an id means, who allocates it, what happens to a destroyed object. The
 schema-derived part — opcodes, argument types, signatures, the generic functions — is
-generated once and shared.
+generated once and shared. Both are now implemented; the identity half of the table below is
+shared code (`wayland.object`, D19), and the difference is the direction.
 
 ### 4.4 ASDF component
 
@@ -222,36 +232,56 @@ exists purely to prove and use this: it declares `wayland.xml` and stable `xdg-s
 
 ```
 wl_display (id 1)
- ├── wl_registry (per client, on get_registry)
+ ├── wl_registry (per get_registry, may be several)
  ├── wl_callback (per sync)
- └── globals: wl_compositor, wl_shm, wl_seat, wl_output, xdg_wm_base, …
+ └── globals: wl_compositor, wl_output, …
 ```
 
-- **Global registration** happens before the socket accepts clients, or, if later, appends
-  `wl_registry.global` events to every connected registry in a defined order (and the
-  client's next `sync` completes after all of them).
-- **bind** validates: name exists, interface string matches, requested version is between 1
-  and the global's version, and the client's `new_id` is unused. It then instantiates the
-  global's configured resource class, sends initial events (e.g. `wl_shm.format`,
-  `wl_seat.capabilities`, `wl_output.geometry/mode/scale/name/description/done`), and
-  returns.
-- **Versioning** is per-resource: an event with `since > resource.version` is never sent;
-  a request above the resource version is a protocol error. The generated code enforces
-  both, so version bugs are compile-time visible in the interface table rather than at
-  runtime.
-- **`wl_display.sync`** creates a `wl_callback` and emits `done` after the current batch of
-  requests is processed — not immediately, or roundtrips lose their meaning.
-- **Errors**: `wl_display.error(object_id, code, message)`, flush, disconnect. Codes are the
-  protocol's own where defined; `wl_display.error` has `invalid-object`, `invalid-method`,
-  `no-memory`, and `implementation` (an internal error we are reporting rather than
-  hiding).
-- **Socket**: `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, default `wayland-0`; a `wayland-0.lock`
-  file with pid holds it; `WAYLAND_DISPLAY` may be an absolute path (nested/CI use case).
-  Permissions 0700 socket, 0600 lock. `SO_PEERCRED` gives pid/uid/gid, kept for policy and
-  logging, and validated against the socket's owner.
+Phase 1 implements this section in `cl-wayland-server`; the phase-2 content (surfaces, shm,
+seats) is what the request methods will add, not what the transport changes.
+
+- **Global registration** happens before the socket accepts clients when the display is
+  built, or, if later, appends `wl_registry.global` events to every connected registry in
+  registration order. Because events are appended as they are produced and `wl_callback.done`
+  is queued when the batch ends, a client's next `sync` always completes after the
+  announcements it is entitled to see. `remove-global` is the mirror image.
+- **bind** validates: the name exists, the interface string matches the global's, the
+  requested version is between 1 and the global's version inclusive, and (before the method
+  runs) the client's `new_id` is in the client range and unused. It then instantiates the
+  global's configured resource class, calls the global's bind function for initial events
+  (e.g. `wl_output.geometry/mode/scale/name/description/done`), and returns. Each failure is
+  `invalid_object` on the registry object.
+- **Versioning** is per-resource: an event with `since > resource.version` is never sent —
+  `send-event` drops it, so a compositor call site does not have to ask — and a request above
+  the resource's version is `invalid_method`. `wl_output.done`, for instance, is version 2,
+  so a version-1 output gets geometry and mode and nothing else.
+- **`wl_display.sync`** creates a `wl_callback` with the id the client chose, queues it, and
+  answers at the end of the batch: `wl_callback.done(0)`, then `wl_display.delete_id`, because
+  the id was the client's. Not inside the request, or roundtrips would lose their meaning.
+- **Errors**: `wl_display.error(object_id, code, message)`, flush, disconnect. Codes are
+  `invalid_object` 0, `invalid_method` 1, `no_memory` 2, `implementation` 3. A request with no
+  method specialised on the resource (anything phase 2 has not built yet) is
+  `implementation`, which is the honest answer rather than silently ignoring it.
+- **Failure policy** (D9, `docs/architecture.md` §6): a client-caused failure is the error
+  event and a disconnect; EOF/EPIPE/ECONNRESET is an orderly teardown; a Lisp error in our
+  own code is logged with a backtrace while the stack is live, reported as `implementation`,
+  and also disconnects. None of them reaches the debugger.
+- **Socket**: `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, default `wayland-0`; an absolute
+  `WAYLAND_DISPLAY` is used as-is (nested and CI use, and how the tests run). A
+  `<socket>.lock` file holds the server's pid, mode 0600, locked with `flock` for the
+  server's lifetime (D20); the socket is mode 0700, so only this user can connect. Setup
+  order is: take the lock, unlink a stale socket file, bind, listen, chmod. Teardown is the
+  reverse: unlink the socket, release the lock, unlink the lock file. `SO_PEERCRED` gives
+  pid/uid/gid at accept time; a peer whose uid is not ours is refused and closed immediately,
+  and the credentials are kept for the log line.
+- **Accepting** is budgeted: one readable event accepts at most
+  `display-accept-budget` (default 16) connections, so a connect storm cannot starve the
+  clients that are already connected. Level-triggered epoll brings the rest next cycle.
 - **Teardown**: EOF, protocol error, or shutdown → one idempotent path that destroys
-  resources in reverse creation order, unmaps pools, closes fds, kills spawned children,
-  removes the client from every seat/focus/scene, and logs with the peer pid.
+  resources in reverse creation order, closes the socket, closes descriptors that arrived but
+  no message claimed, closes any descriptor queued in the out buffer that never went out, and
+  removes the client from the display's list. It is the only function allowed to free
+  per-client state.
 
 ## 6. Client semantics
 
@@ -339,8 +369,16 @@ Details that are easy to get wrong and are therefore tested explicitly:
   not call back into the reactor.
 - Timers never fire late because a client flooded us: the loop budget per cycle is bounded
   (e.g. 16 ms of dispatch) and the remainder is deferred with a wakeup.
-- `signalfd` for `SIGTERM`/`SIGINT`/`SIGUSR1` (VT switch), `SIGCHLD` for children; `SIGPIPE`
-  ignored; per-client `SIGBUS` risk is discussed in `memory-and-rendering.md` §4.
+- Signals, with one measured amendment (D21): `signalfd` only sees a process-directed signal
+  if every thread blocks it, and an implementation brings threads of its own — SBCL creates a
+  finalizer thread, and a `SIGTERM` sent to the demo server landed there and never reached
+  the descriptor. So termination signals go through `wayland.reactor:add-signal-handler`,
+  which installs the implementation's interrupt handler and does nothing there but post a
+  command; the command runs inside a cycle, between messages. `add-signal-source` stays for
+  signals whose blocking we control from the start of the image (`SIGUSR1` for VT switch,
+  `SIGCHLD` for children in phase 6) and for implementations without extra threads.
+  `SIGPIPE` is ignored and sends use `MSG_NOSIGNAL`; the per-client `SIGBUS` risk is discussed
+  in `memory-and-rendering.md` §4.
 - A watchdog logs when a cycle exceeds 50 ms, with the offending client and message.
 
 ## 8. Mimicking libwayland where the spec is silent
@@ -376,19 +414,21 @@ libwayland client's trace for the same interaction.
 
 Every item is a test, not an aspiration.
 
-- [ ] Message size not a multiple of 4 → error, no allocation
-- [ ] Message size < 8 or > cap → error
-- [ ] Object id unknown / already destroyed → `invalid-object`
-- [ ] Request opcode above resource version → error
-- [ ] Wrong argument types (e.g. string with absurd length) → error before reading
-- [ ] `new_id` already in use → error
-- [ ] fd count mismatch (missing or surplus) → close fds, error
-- [ ] `SCM_RIGHTS` with more than 28 fds → error, close all
-- [ ] Client writes 1 byte then stalls → no blocking, no unbounded buffer
-- [ ] Client never reads → out buffer capped, `EPOLLIN` disabled, no growth
-- [ ] Client disconnects mid-message → resources freed, no crash, no fd leak
-- [ ] 10k connect/disconnect cycles → flat RSS and fd count
-- [ ] Fuzz: random buffers via `socketpair`, 10⁶ iterations, no crash/hang/leak
+- [x] Message size not a multiple of 4 → error, no allocation (wire decoder)
+- [x] Message size < 8 or > cap → error
+- [x] Object id unknown / already destroyed → `invalid_object` (server dispatch)
+- [x] Request opcode above resource version → `invalid_method`
+- [x] Wrong argument types (e.g. string with absurd length) → error before reading
+- [x] `new_id` already in use, or outside the client range → `invalid_object`
+- [ ] fd count mismatch (missing or surplus) → close fds, error — missing is done; surplus
+      still needs per-message descriptor counts from the schema
+- [x] `SCM_RIGHTS` with more than 28 fds → error, close all
+- [x] Client writes 1 byte then stalls → no blocking, no unbounded buffer
+- [x] Client never reads → interest drops to write-only above a 64 KiB watermark, no growth
+- [x] Client disconnects mid-message → resources freed, no crash, no fd leak
+- [x] 10k connect/disconnect cycles → flat RSS and fd count (`scripts/soak.sh`)
+- [x] Fuzz: random buffers via `socketpair`, 10⁶ iterations, no crash/hang/leak (decoder and
+      transport; a *peer* fuzzer that talks nonsense to the server is still to come)
 
 ## 10. Performance targets
 

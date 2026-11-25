@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# The phase-0 gate (PLAN.md §5): the claims that must hold before phase 1
-# starts.  Each clause is checked, not asserted, and a clause with nothing
-# behind it says so instead of passing quietly.
+# The phase gates so far (PLAN.md §5).  Each clause is checked, not asserted, and
+# a clause with nothing behind it says so instead of passing quietly.
 #
 # Exit status:
 #   0  every clause passed
@@ -20,7 +19,15 @@
 #      wayland-info (skipped, not failed, when there is no session)
 #   4. the fuzz harness feeds 10^6 random cases through the decoder with no
 #      crash, hang, unbounded allocation or descriptor leak
-#   5. purity: no libwayland or libwlroots in the loaded image (D1)
+#   5. purity: no libwayland or libwlroots in the loaded image (D1), a standing
+#      clause that runs after the phase-1 ones
+#
+# Phase 1 (server core):
+#
+#   6. wayland-info -- a real libwayland client -- talks to our server and exits
+#      0, sees both demo globals, and the server shuts down cleanly on SIGTERM
+#   7. soak: 10k connect/disconnect cycles with flat descriptor count and a flat
+#      resident set
 #
 # Logs land in a temporary directory that is printed when something fails.
 
@@ -107,7 +114,23 @@ else
   fail 'fuzz harness' 'a fuzz case crashed, hung, leaked or broke an invariant' "$log_dir/fuzz.log"
 fi
 
-# 5. Purity ----------------------------------------------------------------
+# 6. wayland-info against our server ---------------------------------------
+printf '\nphase 1 gate: server core\n\n'
+
+if gb "$log_dir/wayland-info-server.log" "$repo_root/scripts/wayland-info-server.sh"; then
+  pass 'wayland-info vs server' "$(grep -a '^wayland-info: exit' "$log_dir/wayland-info-server.log" | tail -n 1 | sed 's/^wayland-info: //')"
+else
+  fail 'wayland-info vs server' 'our server did not serve wayland-info' "$log_dir/wayland-info-server.log"
+fi
+
+# 7. Soak -------------------------------------------------------------------
+if gb "$log_dir/soak.log" "$repo_root/scripts/soak.sh"; then
+  pass 'soak' "$(grep -a '^soak: descriptors' "$log_dir/soak.log" | sed 's/^soak: //')"
+else
+  fail 'soak' 'the server leaked descriptors or memory over 10k connections' "$log_dir/soak.log"
+fi
+
+# Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
 else
@@ -118,15 +141,15 @@ fi
 printf '\n  %d passed, %d failed, %d skipped, %d not built\n' \
        "$passed" "$failed" "$skipped" "$todo"
 if [ "$failed" -gt 0 ]; then
-  printf '  phase 0 gate: FAILED\n\n'
+  printf '  gate: FAILED\n\n'
   printf '  logs: %s\n\n' "$log_dir"
   exit 1
 elif [ "$todo" -gt 0 ]; then
-  printf '  phase 0 gate: NOT MET (%d clause(s) unimplemented)\n\n' "$todo"
+  printf '  gate: NOT MET (%d clause(s) unimplemented)\n\n' "$todo"
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  phase 0 gate: PASSED\n\n'
+  printf '  gate: PASSED (phase 0 and phase 1 clauses)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

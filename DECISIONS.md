@@ -468,3 +468,88 @@ xorshift64\* generator seeded from the command line:
   returns how many), because the kernel's duplicates are nobody else's to close.
 - It does not fuzz a *peer*: pool validation, stride/format checks and protocol errors need a
   server to reject them, and arrive with phase 1.
+
+---
+
+## D19 — One object table and one socket-name rule, in the core
+
+**Status:** accepted
+
+**Context.** Phase 1 needs what phase 0's client already had: an object table per connection
+and the two id namespaces (`2 .. 0xFEFFFFFF` for the client, `0xFF000000 ..` for the server),
+with lowest-free-id allocation. It also needs the socket-name rule
+(`$WAYLAND_DISPLAY` under `$XDG_RUNTIME_DIR`, absolute names used as-is) that the client
+already implemented. Two copies of either would drift, and the second copy would be the one
+nobody tested.
+
+**Decision.** `cl-wayland-core/src/object.lisp` (package `wayland.object`) owns the id ranges,
+`object-table`, allocation and release; `wayland.client` and `wayland.server` both use it.
+`wayland.io:socket-path` owns the socket-name rule, and `wayland.client:socket-path` is now a
+thin wrapper that re-signals the failure as its own `client-error`.
+
+**Consequences.**
+
+- The client's `display-next-id` and `display-free-ids` slots are gone (replaced by the
+  table); the suite stayed green, which is the check that nothing depended on them.
+- Client id reuse is now *lowest free id* rather than most-recently-released, which is what
+  `docs/protocol-layer.md` §8 already claimed. Traces read like libwayland's.
+- A bad socket name is reported as `wayland.io:socket-path-error`; each end wraps it in the
+  condition its callers already catch. One message, two vocabularies, no duplicated rule.
+- `wayland.object` deliberately knows nothing about destruction or `delete_id`: who may
+  recycle an id, and when, differs between the two ends and stays in their dispatch layers.
+
+---
+
+## D20 — The socket lock is `flock(2)`, not a POSIX record lock
+
+**Status:** accepted
+
+**Context.** A compositor has to answer "is another one already using this name?" without a
+race, and leave a pid for the session manager. The two candidate locks are `fcntl`'s
+`F_SETLK` and `flock(2)`.
+
+**Decision.** `flock(fd, LOCK_EX | LOCK_NB)` on `<socket>.lock`, the holder's pid written into
+it, mode 0600, taken *before* a stale socket file is unlinked; socket mode 0700. Teardown
+unlinks the socket, releases the lock by closing, then unlinks the lock file.
+
+**Consequences.**
+
+- POSIX record locks belong to the *process*, so two servers in one image — a nested
+  compositor, or a test that creates two displays — would both believe they held the name.
+  A unit test caught exactly that: the expected `socket-in-use` never arrived. `flock` locks
+  belong to the open file description, so the same process conflicts with itself the way a
+  second process would.
+- The lock is advisory, which is all it needs to be: the socket file mode is the access
+  control, and the lock only arbitrates ownership of the name.
+- A crashed server leaves its socket file behind; the next server holds the lock, so
+  deleting that file is safe and is what it does.
+
+---
+
+## D21 — Termination signals arrive as posted commands, not through `signalfd`
+
+**Status:** accepted
+
+**Context.** D9 and `docs/protocol-layer.md` §7 say signals reach the loop as descriptor
+events, never as handlers that preempt dispatch. `signalfd` gives that, but only sees a
+process-directed signal if *every* thread blocks it — and an implementation has threads of
+its own. SBCL creates a finalizer thread on demand (loading Quicklisp is enough), and a
+process-directed `SIGTERM` can then be delivered there. Measured, twice: the demo server with
+two threads stayed in `epoll_wait`, signalfd empty, after `kill -TERM`; the same server with
+the signal blocked in the only thread read it immediately.
+
+**Decision.** `wayland.reactor:add-signal-handler` installs the implementation's interrupt
+handler (`sb-sys:enable-interrupt`, by number) and the handler does one thing: `post` a
+command to the reactor. The command runs `ON-SIGNAL` inside a normal cycle, between messages,
+which is the guarantee `signalfd` was there to provide. `add-signal-source` remains for
+signals whose blocking we control from the start of the image, and for implementations with
+no extra threads.
+
+**Consequences.**
+
+- The handler may run on any thread, so it must not touch protocol state; the API shape
+  enforces that by giving it no access beyond `post` (mutex plus eventfd wakeup).
+- A signal that arrives after `close-reactor` is ignored instead of posting to a closed
+  eventfd — the handler checks `reactor-closed-p` first.
+- The demo server now exits 0 on `SIGTERM` and removes its socket and lock file; the gate
+  clause asserts all three.

@@ -6,24 +6,34 @@ The repository is named for where the stack is going: `cl-umbra`, a daily-driver
 Everything that makes it possible is here too — the protocol implementation, the server, the
 compositor framework, and a tinywl port — as the six systems below.
 
-**Status: phase 0 gate passing.** `./scripts/gate.sh` checks the five phase-0 clauses —
-unit suite, every protocol compiling, `demo-globals` against a live compositor, 10⁶ fuzz
-cases, purity — and exits 0. Three roadmap quality items are still open and are not gate
-clauses: fixed-size in/out rings, `WAYLAND_DEBUG`-compatible tracing, and surplus-descriptor
-detection (which needs a protocol layer that knows a message's descriptor count).
-Planning is complete — [`PLAN.md`](PLAN.md), the design
-documents in [`docs/`](docs/), and the decision log [`DECISIONS.md`](DECISIONS.md) — and
-the first slice of `cl-wayland-core` exists: `wayland.wire` (framing and argument
-codec), `wayland.ffi` (sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, errno) and
-`wayland.io` (flush and pump, descriptor passing, partial-message handling) and
-`wayland.reactor` (epoll, timerfd, eventfd wakeups, signalfd, idles) and
-`wayland.protocol` (the 69-file protocol XML corpus, parsed and checked against
-`wayland-scanner`) and `wayland.codegen` (schema to Lisp, generated at build time by
-the `:wayland-protocol` ASDF component). `cl-wayland-client` is now a working client:
-it connects to the compositor named by `WAYLAND_DISPLAY`, reads the registry, completes a
-`sync` roundtrip, and dispatches events to hooks or methods on the generated functions.
-`wayland.client.demo:run` prints the live session's globals in `wayland-info`'s format;
-on a running session the two outputs are byte-identical.
+**Status: phase 0 and phase 1 gates passing.** `./scripts/gate.sh` checks seven clauses.
+Phase 0: the unit suite, every vendored protocol compiling, `demo-globals` against a live
+compositor, 10⁶ fuzz cases. Phase 1: `wayland-info` — the system's own libwayland client —
+exits 0 against *our* server, and 10k connect/disconnect cycles leave the descriptor count
+and resident set flat. Purity (no libwayland, no wlroots) runs over both. The gate exits 0.
+
+Three roadmap quality items are still open and are not gate clauses: fixed-size in/out
+rings, `WAYLAND_DEBUG`-compatible tracing, and surplus-descriptor detection (which needs a
+protocol layer that knows a message's descriptor count). Two phase-1 items are honestly
+unticked for the same reason: an independent C client beyond `wayland-info`, and a fuzz
+*client* against the server.
+
+What exists:
+
+- `cl-wayland-core` — `wayland.wire` (framing and argument codec), `wayland.ffi` (sockets,
+  `sendmsg`/`recvmsg` with `SCM_RIGHTS`, lock files, `SO_PEERCRED`), `wayland.object` (one
+  object table and both id namespaces, shared by both ends), `wayland.io` (flush and pump,
+  descriptors, partial messages), `wayland.reactor` (epoll, timers, idles, posted commands,
+  signals), `wayland.protocol` (the 69-file XML corpus, checked against `wayland-scanner`)
+  and `wayland.codegen` (schema to Lisp, generated at build time).
+- `cl-wayland-client` — connect, proxies and ids, `get_registry`, `bind`, `sync` roundtrip,
+  hooks or methods on the generated event functions. `demo-globals` prints the live session's
+  globals in `wayland-info`'s format, byte-identical.
+- `cl-wayland-server` — the socket with its lock file and permissions, accept with peer
+  credentials, `wl_display` and both id ranges, globals and version-negotiated `bind`,
+  `wl_display.sync`, the error policy, flush batching with backpressure, and idempotent
+  teardown. The demo server offers two dummy globals so `wayland-info` has something true to
+  print; phase 2 adds the actual protocol content.
 
 ## What this is
 
@@ -114,13 +124,14 @@ opcode and signature from `wayland-scanner`.
 ## Building and testing
 
 ```
-make check     # test suite (Rove), every system loads, purity scan
-./scripts/gate.sh                       # the phase-0 gate, clause by clause
+make check     # test suite, 10k fuzz cases, every system loads, purity, wayland-info
+./scripts/gate.sh                       # every gate clause, phase 0 and phase 1
 TEST_VERBOSE=1 ./scripts/run-tests.sh   # list every assertion instead of dots
 ```
 
 Each probe also runs alone: `scripts/run-tests.sh`, `scripts/check-loads.sh`,
-`scripts/purity-check.sh`. The runtime dependency list is SBCL plus CFFI — CFFI is for libc
+`scripts/purity-check.sh`, `scripts/wayland-info-server.sh` (a real client against our
+server) and `scripts/soak.sh` (10k connections; `SOAK_CYCLES` overrides). The runtime dependency list is SBCL plus CFFI — CFFI is for libc
 (sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, `memfd_create`), never for libwayland. The
 test suite additionally uses [Rove](https://github.com/fukamachi/rove); no shipped system
 loads it. The scripts find Quicklisp at the usual places or through `QUICKLISP_SETUP`, or
@@ -145,6 +156,33 @@ The output is deliberately `wayland-info`'s line format, so the check is a diff:
 
 ```
 diff <(wayland-info | grep '^interface:') <(./cl-wayland-client/demo-globals)
+```
+
+## Hello, server
+
+The other direction, and the phase-1 walking skeleton: a Lisp server that a real libwayland
+client talks to. `wayland-info` against it exits 0.
+
+```
+# in one terminal: a private runtime directory, so the live session is untouched
+export XDG_RUNTIME_DIR="$(mktemp -d)" WAYLAND_DISPLAY=wayland-0
+chmod 700 "$XDG_RUNTIME_DIR"
+sbcl --eval '(require :asdf)' \
+     --eval '(asdf:load-system "cl-wayland-server/demo")' \
+     --eval '(wayland.server.demo:toplevel)'
+
+# in another, with the same two variables
+wayland-info
+```
+
+It offers two dummy globals — `wl_compositor` and `wl_output` — and nothing else yet: phase 2
+is where surfaces, shm and the rest arrive. From the REPL, the same thing without the
+executable wrapper:
+
+```lisp
+(defvar *display* (wayland.server:make-demo-display :display-name "wayland-0"))
+(wayland.server:run *display*)          ; Ctrl-C or (wayland.reactor:request-stop ...)
+(wayland.server:close-display *display*)
 ```
 
 ## License

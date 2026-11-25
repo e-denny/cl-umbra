@@ -85,24 +85,43 @@ empty `.asd` per system; `protocols/` populated with pinned XML.
 
 ## Phase 1 — Server core (4-6 weeks)
 
-- [ ] socket creation: `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, lock file, perms, `accept4`
-- [ ] `SO_PEERCRED` capture and validation; structured client log
-- [ ] `wl_display` object, id 1; client id allocation; server id range
-- [ ] per-client object table; `new_id` validation
-- [ ] `wl_global` add/remove; `bind` with version negotiation; initial-event ordering vs `sync`
-- [ ] resource lifecycle: destroy request, destructor events, `delete_id`, id reuse
-- [ ] `wl_display.sync` → `wl_callback.done` after batch
-- [ ] `wl_display.error` + disconnect policy; all error codes
-- [ ] flush batching (`writev`), backpressure, `EPOLLIN` gating
-- [ ] `teardown-client`, idempotent, reverse-order destruction
-- [ ] fd hygiene: everything `CLOEXEC`, nothing leaked on teardown
-- [ ] tests: dummy globals + `wayland-info`; C client bind/destroy/rebind; kill-mid-request;
+- [x] socket creation: `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, lock file, perms, `accept4`
+      (`flock` on `<socket>.lock`, socket 0700, lock 0600, stale socket removed under the lock;
+      D20)
+- [x] `SO_PEERCRED` capture and validation; structured client log
+      (uid checked at accept; pid/uid/gid kept and logged per client)
+- [x] `wl_display` object, id 1; client id allocation; server id range
+      (one table per connection in `wayland.object`, lowest free id, both ranges; D19)
+- [x] per-client object table; `new_id` validation
+      (range, unused, and only in a request that declares one)
+- [x] `wl_global` add/remove; `bind` with version negotiation; initial-event ordering vs
+      `sync` (globals in registration order; `done` queued when the batch ends)
+- [x] resource lifecycle: destroy request, destructor events, `delete_id`, id reuse
+- [x] `wl_display.sync` → `wl_callback.done` after batch
+- [x] `wl_display.error` + disconnect policy; all error codes
+      (0 invalid_object, 1 invalid_method, 2 no_memory, 3 implementation; never a debugger)
+- [x] flush batching, backpressure, `EPOLLIN` gating
+      (one `sendmsg` per flush over the whole buffer; above a 64 KiB watermark interest drops
+      to write-only until it drains.  `writev` proper is not needed for one contiguous buffer)
+- [x] `teardown-client`, idempotent, reverse-order destruction
+- [x] fd hygiene: everything `CLOEXEC`, nothing leaked on teardown
+- [x] tests: dummy globals + `wayland-info`; bind/destroy/rebind across versions; kill-mid-request;
       10k connect/disconnect with flat RSS and fd count
+      (`wayland.test.server`, 27 tests; `scripts/soak.sh`)
+- [ ] an independent C client that binds, destroys and re-binds
+      (`wayland-info` is the only C peer so far, and it does not destroy and rebind)
+- [ ] a fuzz *client* against the server: random and adversarial messages over 10^6
+      connections, asserting the server never crashes, wedges or leaks.  `scripts/soak.sh`
+      truncates at random points but does not vary the content.
 
 **Gate:** `wayland-info` exits 0 against our server; soak test flat; fuzz client cannot
-crash or wedge the server.
+crash or wedge the server.  The first two are `gate.sh` clauses 6 and 7 and pass.  The third
+has nothing behind it yet, so it is not a clause: the gate checks what exists and does not
+pretend the rest.
 
-**Demo:** `wayland-info` talking to a Lisp server.
+**Demo:** `wayland-info` talking to a Lisp server.  Done: `./scripts/wayland-info-server.sh`,
+or `(wayland.server:make-demo-display)` from the REPL plus
+`(wayland.server:run display)`.
 
 ---
 

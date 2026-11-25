@@ -18,15 +18,18 @@ cl-wayland-project/
 │   └── umbra/                   our own protocols, if any (none planned: control is Lisp, D14)
 ├── cl-wayland-core/
 │   ├── cl-wayland-core.asd
-│   └── src/  packages.lisp  ffi-util.lisp  wire.lisp  io.lisp  epoll.lisp
-│             reactor.lisp  schema.lisp  codegen.lisp
+│   └── src/  packages.lisp  ffi-util.lisp  wire.lisp  object.lisp  io.lisp
+│             epoll.lisp  reactor.lisp  schema.lisp  codegen.lisp
 ├── cl-wayland-client/
 │   ├── cl-wayland-client.asd        (also the demo system)
 │   ├── src/  package.lisp  proxy.lisp  display.lisp  registry.lisp
 │   └── demo/ demo-globals.lisp
 ├── cl-wayland-server/
-│   └── src/  display.lisp  socket.lisp  client.lisp  global.lisp  resource.lisp
-│             serial.lisp  error.lisp  core-protocol.lisp
+│   ├── cl-wayland-server.asd        (also the demo system)
+│   ├── src/  package.lisp  conditions.lisp  objects.lisp  socket.lisp
+│   │         resource.lisp  messages.lisp  client.lisp  display.lisp
+│   │         global.lisp  events.lisp  registry.lisp  dispatch.lisp  demo.lisp
+│   └── demo/ server-demo.lisp
 ├── cl-compositor-framework/
 │   ├── cl-compositor-framework.asd
 │   └── src/
@@ -49,20 +52,23 @@ cl-wayland-project/
 │                    config/  control/  session.lisp
 ├── tests/           cl-wayland-tests.asd  runner.lisp  unit/  fuzz/  interop/
 │                    golden/  perf/  scripts/
-├── scripts/         gate.sh  gate-protocols.lisp  run-tests.sh  check-loads.sh
-│                    purity-check.sh  capture.sh  run-nested.sh  run-tty.sh
+├── scripts/         gate.sh  gate-protocols.lisp  wayland-info-server.sh  soak.sh
+│                    soak.lisp  run-tests.sh  fuzz.sh  check-loads.sh
+│                    purity-check.sh  lib.sh  capture.sh  run-nested.sh  run-tty.sh
 └── qlfile           local Quicklisp/qlot project set
 ```
 
 One ASDF system per directory; each system declares the protocols it needs, so a build
 does not compile the world.
 
-What phase 0 has actually built, so a reader can tell the shape from the plan: the core
-(`wayland.wire`, `wayland.ffi`, `wayland.io`, `wayland.reactor`, `wayland.protocol`,
-`wayland.codegen`), the ASDF component, and `wayland.client` in its minimal form — connect,
-proxies and ids, `get_registry`, `bind`, `sync` roundtrip, hooks and generic-function event
-dispatch, plus `demo-globals`. The remaining files named below (`interface.lisp`,
-`object.lisp`, `log.lisp`, `wayland.server`, the framework) are the plan, not the tree.
+What is built, so a reader can tell the shape from the plan: the core (`wayland.wire`,
+`wayland.ffi`, `wayland.object`, `wayland.io`, `wayland.reactor`, `wayland.protocol`,
+`wayland.codegen`), the ASDF component, `wayland.client` — connect, proxies and ids,
+`get_registry`, `bind`, `sync` roundtrip, hooks and generic-function event dispatch, plus
+`demo-globals` — and `wayland.server` in its phase-1 form: socket and lock, accept with
+`SO_PEERCRED`, object tables and both id ranges, globals and `bind`, `sync` and callbacks,
+the error policy, flush batching with backpressure, and teardown, plus a demo server that
+`wayland-info` can talk to. The framework and compositor directories are still their plan.
 
 ## 2. Packages
 
@@ -74,7 +80,7 @@ dispatch, plus `demo-globals`. The remaining files named below (`interface.lisp`
 | `wayland.protocol` | — | XML reader, schema objects (interfaces, messages, args, enums), signatures, interface registry, `define-*` forms |
 | `wayland.codegen` | — | schema → Lisp source, one package per protocol |
 | `wayland.asdf` | — | the `:wayland-protocol` component type (build time only) |
-| `wayland.object` | — | object tables, ids, destruction protocol |
+| `wayland.object` | — | object tables and the two id namespaces, shared by both ends (D19); destruction stays in each dispatch layer |
 | `wayland.reactor` | — | epoll sources (level-triggered), timers, idles, posted commands, signalfd; `epoll.lisp` holds the packed-event syscall wrapper |
 | `wayland.client` | `wl.client` | display, proxies, client ids, registry, roundtrip, event dispatch |
 | `wayland.server` | `wl.server` | display, globals, resources, clients |
@@ -151,6 +157,14 @@ Three layers, from cheapest to most flexible:
 
 Hot path (pointer motion, key events, commits, frame callbacks) uses (1)+(2) only. Cold
 paths (registry binds, output configuration, DnD) may use (3) freely.
+
+Phase 1 dispatches through the generated generic function directly: look up the request by
+opcode, decode the arguments, check that a method applies, apply it. That is layer 3's
+mechanism on every message, which is fine at this phase's message volume (registry, bind,
+sync and a handful of events) and is the honest starting point — the opcode table and typed
+handler functions are phase-2 optimisations, to be added when there is a pointer-motion path
+to measure. Both ends use the same shape, so a compositor's request method and a client's
+event method are the same kind of thing.
 
 Unknown opcode, opcode above the negotiated version, or a wrong argument count is a
 protocol error, not a Lisp error.
