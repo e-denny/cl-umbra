@@ -8,7 +8,7 @@
 (in-package #:cl-user)
 
 (defpackage #:wayland.test.io
-  (:use #:cl #:wayland.test)
+  (:use #:cl #:rove)
   (:local-nicknames (#:ffi #:wayland.ffi)
                     (#:io #:wayland.io)
                     (#:wire #:wayland.wire))
@@ -61,31 +61,31 @@
   (with-socket-pair (writer reader)
     (let* ((buffer (encode 1 0 (lambda (b) (wire:put-string b "hello"))))
            (expected (buffer-contents buffer)))
-      (is (eql (length expected) (io:flush-buffer writer buffer)))
-      (is (zerop (wire:buffer-size buffer)) "a completed flush empties the buffer")
+      (ok (eql (length expected) (io:flush-buffer writer buffer)))
+      (ok (zerop (wire:buffer-size buffer)) "a completed flush empties the buffer")
       (let ((target (make-array 64 :element-type '(unsigned-byte 8))))
         (multiple-value-bind (count fds truncated eof) (receive-all reader target)
-          (is (eql (length expected) count))
-          (is (equalp expected (subseq target 0 count)))
-          (is (null fds))
-          (is (not truncated))
-          (is (not eof)))))))
+          (ok (eql (length expected) count))
+          (ok (equalp expected (subseq target 0 count)))
+          (ok (null fds))
+          (ok (not truncated))
+          (ok (not eof)))))))
 
 (deftest flush-of-an-empty-buffer-is-a-no-op
   (with-socket-pair (writer reader)
-    (is (zerop (io:flush-buffer writer (wire:make-message-buffer))))
+    (ok (zerop (io:flush-buffer writer (wire:make-message-buffer))))
     (let ((target (make-array 8 :element-type '(unsigned-byte 8))))
       (multiple-value-bind (count) (receive-all reader target)
-        (is (zerop count) "nothing was written, so nothing is readable")))))
+        (ok (zerop count) "nothing was written, so nothing is readable")))))
 
 (deftest receive-on-an-empty-socket-reports-would-block
   (with-socket-pair (writer reader)
     (let ((target (make-array 8 :element-type '(unsigned-byte 8))))
       (multiple-value-bind (count fds truncated eof) (receive-all reader target)
-        (is (zerop count))
-        (is (null fds))
-        (is (not truncated))
-        (is (not eof) "EAGAIN is not end of stream")))))
+        (ok (zerop count))
+        (ok (null fds))
+        (ok (not truncated))
+        (ok (not eof) "EAGAIN is not end of stream")))))
 
 (deftest pump-dispatches-whole-messages
   (with-socket-pair (writer reader)
@@ -93,13 +93,13 @@
           (seen '()))
       (io:flush-buffer writer
                        (encode 1 0 (lambda (b) (wire:put-uint b 42))))
-      (is (eql 1 (io:pump reader input
+      (ok (eql 1 (io:pump reader input
                           (lambda (object-id opcode message)
                             (push (list object-id opcode
                                         (wire:read-uint message))
                                   seen)))))
-      (is (equal '((1 0 42)) seen))
-      (is (zerop (io:input-buffer-pending-octets input))))))
+      (ok (equal '((1 0 42)) seen))
+      (ok (zerop (io:input-buffer-pending-octets input))))))
 
 (deftest pump-keeps-a-partial-message
   (with-socket-pair (writer reader)
@@ -108,21 +108,21 @@
            (input (io:make-input-buffer :capacity 256))
            (seen '()))
       ;; Six octets of a twelve-octet message: a header that is not complete.
-      (is (eql 6 (ffi:send-with-ancillary writer octets 0 6 '())))
-      (is (zerop (io:pump reader input
+      (ok (eql 6 (ffi:send-with-ancillary writer octets 0 6 '())))
+      (ok (zerop (io:pump reader input
                           (lambda (&rest arguments)
                             (declare (ignore arguments))
                             (push :dispatched seen)))))
-      (is (eql 6 (io:input-buffer-pending-octets input)))
+      (ok (eql 6 (io:input-buffer-pending-octets input)))
       ;; The rest of it.
-      (is (eql 6 (ffi:send-with-ancillary writer octets 6 12 '())))
-      (is (eql 1 (io:pump reader input
+      (ok (eql 6 (ffi:send-with-ancillary writer octets 6 12 '())))
+      (ok (eql 1 (io:pump reader input
                           (lambda (object-id opcode message)
                             (push (list object-id opcode
                                         (wire:read-uint message))
                                   seen)))))
-      (is (equal '((1 0 7)) seen))
-      (is (zerop (io:input-buffer-pending-octets input))))))
+      (ok (equal '((1 0 7)) seen))
+      (ok (zerop (io:input-buffer-pending-octets input))))))
 
 (deftest pump-dispatches-several-messages-in-order
   (with-socket-pair (writer reader)
@@ -136,12 +136,12 @@
         (wire:put-uint buffer 2)
         (wire:end-message buffer start))
       (io:flush-buffer writer buffer)
-      (is (eql 2 (io:pump reader input
+      (ok (eql 2 (io:pump reader input
                           (lambda (object-id opcode message)
                             (push (list object-id opcode
                                         (wire:read-uint message))
                                   seen)))))
-      (is (equal '((1 0 1) (2 3 2)) (nreverse seen))))))
+      (ok (equal '((1 0 1) (2 3 2)) (nreverse seen))))))
 
 (deftest large-buffer-pages-through-partial-writes
   ;; Five 60 KB messages are more than an AF_UNIX socket buffer will take at
@@ -159,7 +159,7 @@
           (wire:put-array buffer payload)
           (wire:end-message buffer start)))
       (let ((total (wire:buffer-size buffer)))
-        (is (eql (+ (* 5 60012)) total))
+        (ok (eql (+ (* 5 60012)) total))
         (loop
           (incf iterations)
           (when (> iterations 100)
@@ -169,19 +169,18 @@
                      (lambda (object-id opcode message)
                        (declare (ignore object-id opcode))
                        (incf received)
-                       (is (eql 60000 (length (wire:read-array message))))))
+                       (ok (eql 60000 (length (wire:read-array message))))))
             (when (and (zerop written) (zerop (wire:buffer-size buffer)))
               (return))))
-        (is (eql 5 received) "every message survived the split")
-        (is (> iterations 1) "the socket buffer forced a partial write")))))
+        (ok (eql 5 received) "every message survived the split")
+        (ok (> iterations 1) "the socket buffer forced a partial write")))))
 
 (deftest pump-reports-end-of-stream
   (with-socket-pair (writer reader)
     (let ((input (io:make-input-buffer :capacity 256)))
       (ffi:close-fd writer)
-      (signals ffi:connection-closed
-        (io:pump reader input (lambda (&rest arguments)
-                                (declare (ignore arguments))))))))
+      (ok (signals (io:pump reader input (lambda (&rest arguments)
+                                (declare (ignore arguments)))) 'ffi:connection-closed)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Descriptors
@@ -193,18 +192,18 @@
       (let ((buffer (encode 1 0 (lambda (b) (wire:put-fd b fd))))
             (received '())
             (input (io:make-input-buffer :capacity 256)))
-        (is (eql (wire:buffer-size buffer) (io:flush-buffer writer buffer)))
-        (is (null (wire:buffer-fds buffer)) "the queue is consumed by the write")
-        (is (eql 1 (io:pump reader input
+        (ok (eql (wire:buffer-size buffer) (io:flush-buffer writer buffer)))
+        (ok (null (wire:buffer-fds buffer)) "the queue is consumed by the write")
+        (ok (eql 1 (io:pump reader input
                             (lambda (object-id opcode message)
                               (declare (ignore object-id opcode))
                               (push (wire:read-fd message) received)))))
-        (is (eql 1 (length received)))
+        (ok (eql 1 (length received)))
         (unwind-protect
              (let ((new (first received)))
-               (is (ffi:fd-open-p new))
-               (is (ffi:fd-cloexec-p new) "MSG_CMSG_CLOEXEC must be honoured")
-               (is (/= fd new) "the receiver holds a duplicate, not the sender's fd"))
+               (ok (ffi:fd-open-p new))
+               (ok (ffi:fd-cloexec-p new) "MSG_CMSG_CLOEXEC must be honoured")
+               (ok (/= fd new) "the receiver holds a duplicate, not the sender's fd"))
           (close-descriptors received))))))
 
 (deftest twenty-eight-descriptors-in-one-message
@@ -218,17 +217,17 @@
                (let ((start (wire:begin-message buffer 1 0)))
                  (dolist (fd originals) (wire:put-fd buffer fd))
                  (wire:end-message buffer start))
-               (is (eql 120 (wire:buffer-size buffer)) "8 + 28 * 4 octets")
-               (is (eql 28 (wire:buffer-fd-count buffer)))
+               (ok (eql 120 (wire:buffer-size buffer)) "8 + 28 * 4 octets")
+               (ok (eql 28 (wire:buffer-fd-count buffer)))
                (io:flush-buffer writer buffer))
-             (is (eql 1 (io:pump reader input
+             (ok (eql 1 (io:pump reader input
                                  (lambda (object-id opcode message)
                                    (declare (ignore object-id opcode))
                                    (dotimes (i 28)
                                      (push (wire:read-fd message) received))))))
-             (is (eql 28 (length received)))
-             (is (every #'ffi:fd-open-p received))
-             (is (every #'ffi:fd-cloexec-p received)))
+             (ok (eql 28 (length received)))
+             (ok (every #'ffi:fd-open-p received))
+             (ok (every #'ffi:fd-cloexec-p received)))
         (close-descriptors originals)
         (close-descriptors received)))))
 
@@ -258,9 +257,9 @@
                         (declare (ignore object-id opcode))
                         (dotimes (i (wire:read-uint message))
                           (push (wire:read-fd message) received))))
-             (is (eql 29 (length received)))
-             (is (eql 29 (length (remove-duplicates received))))
-             (is (every #'ffi:fd-open-p received)))
+             (ok (eql 29 (length received)))
+             (ok (eql 29 (length (remove-duplicates received))))
+             (ok (every #'ffi:fd-open-p received)))
         (close-descriptors originals)
         (close-descriptors received)))))
 
@@ -281,14 +280,13 @@
                                       0
                                       (wire:buffer-size buffer)
                                       originals)
-             (signals io:truncated-descriptors
-               (io:pump reader input (lambda (&rest arguments)
-                                       (declare (ignore arguments))))))
+             (ok (signals (io:pump reader input (lambda (&rest arguments)
+                                       (declare (ignore arguments)))) 'io:truncated-descriptors)))
         (close-descriptors originals)))))
 
 (deftest closed-descriptors-are-not-open
   (with-memfd (fd)
-    (is (ffi:fd-open-p fd))
-    (is (ffi:fd-cloexec-p fd))
+    (ok (ffi:fd-open-p fd))
+    (ok (ffi:fd-cloexec-p fd))
     (ffi:close-fd fd)
-    (is (not (ffi:fd-open-p fd)))))
+    (ok (not (ffi:fd-open-p fd)))))

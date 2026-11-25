@@ -8,7 +8,7 @@
 (in-package #:cl-user)
 
 (defpackage #:wayland.test.reactor
-  (:use #:cl #:wayland.test)
+  (:use #:cl #:rove)
   (:local-nicknames (#:ffi #:wayland.ffi)
                     (#:rt #:wayland.reactor))
   (:documentation "Tests for wayland.reactor."))
@@ -64,17 +64,17 @@
                     (lambda (timer) (declare (ignore timer)) (incf fired)))
       (rt:run-once reactor :timeout 2.0)
       (let ((elapsed (elapsed-since start)))
-        (is (= 1 fired))
-        (is (>= elapsed 0.045) "woke before the deadline")
-        (is (< elapsed 0.5) "slept far longer than asked")))))
+        (ok (= 1 fired))
+        (ok (>= elapsed 0.045) "woke before the deadline")
+        (ok (< elapsed 0.5) "slept far longer than asked")))))
 
 (deftest the-callers-timeout-caps-the-wait
   (with-reactor (reactor)
     (let ((start (rt:monotonic-now)))
       (rt:run-once reactor :timeout 0.03)
       (let ((elapsed (elapsed-since start)))
-        (is (>= elapsed 0.025))
-        (is (< elapsed 0.4))))))
+        (ok (>= elapsed 0.025))
+        (ok (< elapsed 0.4))))))
 
 (deftest the-nearest-timer-wins
   (with-reactor (reactor)
@@ -85,11 +85,11 @@
       (rt:add-timer reactor 0.20
                     (lambda (timer) (declare (ignore timer)) (push :second fired)))
       (rt:run-once reactor :timeout 1.0)
-      (is (equal '(:first) fired) "only the earlier timer may fire")
-      (is (< (elapsed-since start) 0.15))
+      (ok (equal '(:first) fired) "only the earlier timer may fire")
+      (ok (< (elapsed-since start) 0.15))
       (rt:run-once reactor :timeout 1.0)
-      (is (equal '(:second :first) fired))
-      (is (>= (elapsed-since start) 0.19)))))
+      (ok (equal '(:second :first) fired))
+      (ok (>= (elapsed-since start) 0.19)))))
 
 (deftest repeating-timers-rearm-themselves
   (with-reactor (reactor)
@@ -98,9 +98,9 @@
                     (lambda (timer) (declare (ignore timer)) (incf fired))
                     :repeat 0.01)
       (rt:run-once reactor :timeout 1.0)
-      (is (= 1 fired))
+      (ok (= 1 fired))
       (rt:run-once reactor :timeout 1.0)
-      (is (= 2 fired)))))
+      (ok (= 2 fired)))))
 
 (deftest cancelled-timers-never-fire
   (with-reactor (reactor)
@@ -111,7 +111,7 @@
                                  (incf fired)))))
       (rt:cancel-timer reactor timer)
       (rt:run-once reactor :timeout 0.02)
-      (is (= 0 fired)))))
+      (ok (= 0 fired)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Descriptor sources
@@ -131,8 +131,8 @@
                                             (read-some (rt:source-fd source)))))
         (send-octets writer (octets 1 2 3))
         (rt:run-once reactor :timeout 0.5)
-        (is (= 1 calls))
-        (is (equalp (octets 1 2 3) received))))))
+        (ok (= 1 calls))
+        (ok (equalp (octets 1 2 3) received))))))
 
 (deftest interest-can-be-reprogrammed
   (with-reactor (reactor)
@@ -151,17 +151,17 @@
                                        (incf writable)))))
           ;; A socket pair end is writable at once.
           (rt:run-once reactor :timeout 0.2)
-          (is (= 1 writable))
-          (is (= 0 readable))
+          (ok (= 1 writable))
+          (ok (= 0 readable))
           ;; Stop asking for writability, then wait: silence.
           (rt:set-source-interest reactor source :read)
           (rt:run-once reactor :timeout 0.03)
-          (is (= 1 writable) "writability was switched off")
-          (is (= 0 readable))
+          (ok (= 1 writable) "writability was switched off")
+          (ok (= 0 readable))
           ;; Now there is something to read.
           (send-octets writer (octets 9))
           (rt:run-once reactor :timeout 0.3)
-          (is (= 1 readable)))))))
+          (ok (= 1 readable)))))))
 
 (deftest removed-sources-stop-firing
   (with-reactor (reactor)
@@ -175,7 +175,7 @@
           (rt:remove-source reactor source))
         (send-octets writer (octets 1))
         (rt:run-once reactor :timeout 0.05)
-        (is (= 0 calls))))))
+        (ok (= 0 calls))))))
 
 (deftest hanging-up-is-readable-news
   (with-reactor (reactor)
@@ -189,8 +189,8 @@
                                       (setf mask events)))
         (ffi:close-fd writer)
         (rt:run-once reactor :timeout 0.3)
-        (is (= 1 calls) "a closed peer must reach the readable callback")
-        (is (not (zerop (logand mask (logior rt:+epoll-hup+
+        (ok (= 1 calls) "a closed peer must reach the readable callback")
+        (ok (not (zerop (logand mask (logior rt:+epoll-hup+
                                              rt:+epoll-rdhup+))))
             "the callback must be told it was a hangup")))))
 
@@ -199,9 +199,10 @@
     (with-socket-pair (writer reader)
       (rt:add-source reactor reader :on-readable (lambda (source events)
                                                    (declare (ignore source events))))
-      (signals rt:duplicate-source
-        (rt:add-source reactor reader :on-readable (lambda (source events)
-                                                     (declare (ignore source events))))))))
+      (ok (signals (rt:add-source reactor reader
+                                  :on-readable (lambda (source events)
+                                                 (declare (ignore source events))))
+                   'rt:duplicate-source)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Commands and threads
@@ -218,9 +219,9 @@
          (rt:post reactor (lambda ()
                             (setf ran t)
                             (rt:request-stop reactor)))))
-      (is (eq :stopped (rt:run reactor :timeout 2.0)))
-      (is ran "the posted command did not run")
-      (is (< (elapsed-since start) 0.8) "the eventfd did not wake the loop"))))
+      (ok (eq :stopped (rt:run reactor :timeout 2.0)))
+      (ok ran "the posted command did not run")
+      (ok (< (elapsed-since start) 0.8) "the eventfd did not wake the loop"))))
 
 (deftest a-command-posted-by-a-callback-runs-next-cycle
   (with-reactor (reactor)
@@ -230,9 +231,9 @@
                      (push :idle order)
                      (rt:post reactor (lambda () (push :posted order)))))
       (rt:run-once reactor :timeout 0.02)
-      (is (equal '(:idle) order) "a post must not run inside the cycle that made it")
+      (ok (equal '(:idle) order) "a post must not run inside the cycle that made it")
       (rt:run-once reactor :timeout 0.02)
-      (is (equal '(:posted :idle) order)))))
+      (ok (equal '(:posted :idle) order)))))
 
 (deftest cycle-order-is-commands-then-descriptors-then-timers-then-idles
   (with-reactor (reactor)
@@ -248,7 +249,7 @@
         (rt:add-idle reactor (lambda () (push :idle order)))
         (rt:post reactor (lambda () (push :command order)))
         (rt:run-once reactor :timeout 0.2)
-        (is (equal '(:command :descriptor :timer :idle) (reverse order)))))))
+        (ok (equal '(:command :descriptor :timer :idle) (reverse order)))))))
 
 (deftest idles-run-once-per-cycle
   (with-reactor (reactor)
@@ -256,21 +257,20 @@
       (rt:add-idle reactor (lambda () (incf runs)))
       (rt:run-once reactor :timeout 0.01)
       (rt:run-once reactor :timeout 0.01)
-      (is (= 1 runs)))))
+      (ok (= 1 runs)))))
 
 (deftest reentering-the-loop-is-refused
   (with-reactor (reactor)
     (rt:add-idle reactor (lambda () (rt:run-once reactor :timeout 0)))
-    (signals rt:reactor-reentry
-      (rt:run-once reactor :timeout 0.02))
-    (is (not (rt:dispatching-p reactor))
+    (ok (signals (rt:run-once reactor :timeout 0.02) 'rt:reactor-reentry))
+    (ok (not (rt:dispatching-p reactor))
         "the reactor must be usable again after a refused re-entry")))
 
 (deftest closing-a-reactor-twice-is-harmless
   (let ((reactor (rt:make-reactor)))
-    (is (rt:close-reactor reactor))
-    (is (rt:close-reactor reactor))
-    (signals rt:reactor-error (rt:run-once reactor :timeout 0))))
+    (ok (rt:close-reactor reactor))
+    (ok (rt:close-reactor reactor))
+    (ok (signals (rt:run-once reactor :timeout 0) 'rt:reactor-error))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Signals
@@ -288,7 +288,7 @@
            (progn
              (ffi:raise-signal rt:+sigusr1+)
              (rt:run-once reactor :timeout 0.5)
-             (is (equal (list rt:+sigusr1+) seen)
+             (ok (equal (list rt:+sigusr1+) seen)
                  "a blocked signal must arrive through the descriptor"))
         (rt:remove-source reactor source)
         (ffi:close-fd (rt:source-fd source))
@@ -301,6 +301,5 @@
   (with-socket-pair (writer reader)
     (ffi:close-fd reader)
     (let ((payload (octets 1 2 3)))
-      (signals ffi:connection-closed
-        (cffi:with-pointer-to-vector-data (pointer payload)
-          (ffi:write-from-pointer writer pointer 3))))))
+      (ok (signals (cffi:with-pointer-to-vector-data (pointer payload)
+          (ffi:write-from-pointer writer pointer 3)) 'ffi:connection-closed)))))

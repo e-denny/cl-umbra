@@ -47,7 +47,7 @@ cl-wayland-project/
 ├── cl-tinywl/       tinywl.lisp  main.lisp
 ├── cl-umbra/        compositor.lisp  layouts/  workspaces.lisp  rules.lisp
 │                    config/  control/  session.lisp
-├── tests/           cl-wayland-tests.asd  harness.lisp  unit/  fuzz/  interop/
+├── tests/           cl-wayland-tests.asd  runner.lisp  unit/  fuzz/  interop/
 │                    golden/  perf/  scripts/
 ├── scripts/         run-nested.sh  run-tty.sh  capture.sh  purity-check.sh
 └── qlfile           local Quicklisp/qlot project set

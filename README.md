@@ -105,13 +105,16 @@ opcode and signature from `wayland-scanner`.
 ## Building and testing
 
 ```
-make check     # test suite, every system loads, purity scan
+make check     # test suite (Rove), every system loads, purity scan
+TEST_VERBOSE=1 ./scripts/run-tests.sh   # list every assertion instead of dots
 ```
 
 Each probe also runs alone: `scripts/run-tests.sh`, `scripts/check-loads.sh`,
-`scripts/purity-check.sh`. SBCL plus CFFI is the whole dependency list — CFFI is for libc
+`scripts/purity-check.sh`. The runtime dependency list is SBCL plus CFFI — CFFI is for libc
 (sockets, `sendmsg`/`recvmsg` with `SCM_RIGHTS`, `memfd_create`), never for libwayland. The
-scripts find Quicklisp at the usual places or through `QUICKLISP_SETUP`.
+test suite additionally uses [Rove](https://github.com/fukamachi/rove); no shipped system
+loads it. The scripts find Quicklisp at the usual places or through `QUICKLISP_SETUP`, or
+use `qlot` if you prefer the pinned `qlfile`.
 
 ## Hello, compositor
 

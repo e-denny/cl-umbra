@@ -3,8 +3,9 @@
 #
 # qlot/qlfile for the cl-wayland-project systems.
 #
-# The wire codec and the test harness are dependency-free; the transport needs
-# CFFI, for libc only (sockets, sendmsg/recvmsg, memfd).  CFFI never touches
-# libwayland or wlroots (D1).  pixman/CFFI arrives in phase 2.
+# The runtime systems need CFFI, for libc only (sockets, sendmsg/recvmsg, memfd).
+# CFFI never touches libwayland or wlroots (D1).  Tests use Rove (D17); nothing
+# a shipped system loads depends on it.  pixman/CFFI arrives in phase 2.
 
 ql cffi
+ql rove

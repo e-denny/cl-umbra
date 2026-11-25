@@ -9,7 +9,7 @@
 (in-package #:cl-user)
 
 (defpackage #:wayland.test.schema
-  (:use #:cl #:wayland.test)
+  (:use #:cl #:rove)
   (:local-nicknames (#:wp #:wayland.protocol))
   (:documentation "Tests for wayland.protocol: XML reader, schema, registry, oracle."))
 
@@ -70,46 +70,46 @@
 (deftest xml-reader-shape
   (let* ((root (wp:parse-xml *sample*))
          (interfaces (wp::xml-elements root "interface")))
-    (is (string= "protocol" (wp:xml-element-name root)))
-    (is (string= "sample" (wp::xml-attribute root "name")))
-    (is (eql 2 (length interfaces)))
-    (is (string= "sm_surface" (wp::xml-attribute (first interfaces) "name")))
-    (is (null (wp:xml-element-children (second interfaces)))
+    (ok (string= "protocol" (wp:xml-element-name root)))
+    (ok (string= "sample" (wp::xml-attribute root "name")))
+    (ok (eql 2 (length interfaces)))
+    (ok (string= "sm_surface" (wp::xml-attribute (first interfaces) "name")))
+    (ok (null (wp:xml-element-children (second interfaces)))
         "a self-closing element has no children")))
 
 (deftest xml-entities-and-comments
   (let* ((root (wp:parse-xml *sample*))
          (copyright (wp::trim-text (wp::xml-text (wp::xml-first-element root "copyright"))))
          (surface (first (wp::xml-elements root "interface"))))
-    (is (search "© 2026 Nobody & Friends" copyright))
+    (ok (search "© 2026 Nobody & Friends" copyright))
     ;; The commented-out argument must not become an argument.
     (let ((move (find "move" (wp::xml-elements surface "request")
                       :key (lambda (e) (wp::xml-attribute e "name"))
                       :test #'string=)))
-      (is (eql 2 (length (wp::xml-elements move "arg")))))))
+      (ok (eql 2 (length (wp::xml-elements move "arg")))))))
 
 (deftest schema-interface
   (let* ((protocol (sample))
          (surface (first (wp:protocol-interfaces protocol)))
          (buffer (second (wp:protocol-interfaces protocol))))
-    (is (string= "sample" (wp:protocol-name protocol)))
-    (is (search "Nobody" (wp:protocol-copyright protocol)))
-    (is (string= "sm_surface" (wp:interface-name surface)))
-    (is (= 3 (wp:interface-version surface)))
-    (is (string= "a test surface" (wp:interface-summary surface)))
-    (is (search "Words about the surface" (wp:interface-description surface)))
-    (is (string= "sm_buffer" (wp:interface-name buffer)))
-    (is (eql 0 (length (wp:interface-requests buffer))))))
+    (ok (string= "sample" (wp:protocol-name protocol)))
+    (ok (search "Nobody" (wp:protocol-copyright protocol)))
+    (ok (string= "sm_surface" (wp:interface-name surface)))
+    (ok (= 3 (wp:interface-version surface)))
+    (ok (string= "a test surface" (wp:interface-summary surface)))
+    (ok (search "Words about the surface" (wp:interface-description surface)))
+    (ok (string= "sm_buffer" (wp:interface-name buffer)))
+    (ok (eql 0 (length (wp:interface-requests buffer))))))
 
 (deftest schema-opcodes-are-document-order
   (let* ((surface (first (wp:protocol-interfaces (sample))))
          (requests (wp:interface-requests surface))
          (events (wp:interface-events surface)))
-    (is (equal '("destroy" "attach" "move" "write" "make")
+    (ok (equal '("destroy" "attach" "move" "write" "make")
                (mapcar #'wp:message-name requests)))
-    (is (equal '(0 1 2 3 4) (mapcar #'wp:message-opcode requests)))
-    (is (equal '("done" "error") (mapcar #'wp:message-name events)))
-    (is (equal '(0 1) (mapcar #'wp:message-opcode events))
+    (ok (equal '(0 1 2 3 4) (mapcar #'wp:message-opcode requests)))
+    (ok (equal '("done" "error") (mapcar #'wp:message-name events)))
+    (ok (equal '(0 1) (mapcar #'wp:message-opcode events))
         "events are numbered separately from requests")))
 
 (deftest schema-signatures
@@ -117,85 +117,82 @@
     (flet ((signature (name)
              (wp:message-signature
               (find name requests :key #'wp:message-name :test #'string=))))
-      (is (string= "" (signature "destroy")))
-      (is (string= "2?oii" (signature "attach"))
+      (ok (string= "" (signature "destroy")))
+      (ok (string= "2?oii" (signature "attach"))
           "a message with since above 1 carries the version prefix")
-      (is (string= "ff" (signature "move")))
-      (is (string= "sahu" (signature "write")))
-      (is (string= "n" (signature "make"))))))
+      (ok (string= "ff" (signature "move")))
+      (ok (string= "sahu" (signature "write")))
+      (ok (string= "n" (signature "make"))))))
 
 (deftest schema-interface-references
   (let ((requests (wp:interface-requests (first (wp:protocol-interfaces (sample))))))
     (flet ((references (name)
              (wp:message-interface-references
               (find name requests :key #'wp:message-name :test #'string=))))
-      (is (equal '("sm_buffer") (references "attach")))
-      (is (null (references "move")))
-      (is (equal '("sm_buffer") (references "make"))))))
+      (ok (equal '("sm_buffer") (references "attach")))
+      (ok (null (references "move")))
+      (ok (equal '("sm_buffer") (references "make"))))))
 
 (deftest schema-args
   (let* ((surface (first (wp:protocol-interfaces (sample))))
          (attach (second (wp:interface-requests surface)))
          (args (wp:message-args attach)))
-    (is (string= "attach" (wp:message-name attach)))
-    (is (string= "buffer" (wp:arg-name (first args))))
-    (is (eq :object (wp:arg-type (first args))))
-    (is (wp:arg-allow-null (first args)))
-    (is (string= "sm_buffer" (wp:arg-interface (first args))))
-    (is (eq :int (wp:arg-type (second args))))
-    (is (not (wp:arg-allow-null (second args))))
-    (is (string= "x coordinate" (wp:arg-summary (second args))))))
+    (ok (string= "attach" (wp:message-name attach)))
+    (ok (string= "buffer" (wp:arg-name (first args))))
+    (ok (eq :object (wp:arg-type (first args))))
+    (ok (wp:arg-allow-null (first args)))
+    (ok (string= "sm_buffer" (wp:arg-interface (first args))))
+    (ok (eq :int (wp:arg-type (second args))))
+    (ok (not (wp:arg-allow-null (second args))))
+    (ok (string= "x coordinate" (wp:arg-summary (second args))))))
 
 (deftest schema-since
   (let* ((surface (first (wp:protocol-interfaces (sample))))
          (attach (second (wp:interface-requests surface)))
          (destroy (first (wp:interface-requests surface)))
          (done (first (wp:interface-events surface))))
-    (is (= 2 (wp:message-since attach)))
-    (is (= 1 (wp:message-since destroy)) "since defaults to 1, not the interface version")
-    (is (= 3 (wp:message-since done)))))
+    (ok (= 2 (wp:message-since attach)))
+    (ok (= 1 (wp:message-since destroy)) "since defaults to 1, not the interface version")
+    (ok (= 3 (wp:message-since done)))))
 
 (deftest schema-enums
   (let* ((surface (first (wp:protocol-interfaces (sample))))
          (enum (first (wp:interface-enums surface)))
          (entries (wp:enum-entries enum)))
-    (is (string= "error" (wp:enum-name enum)))
-    (is (wp:enum-bitfield-p enum))
-    (is (equal '("none" "bad" "worse") (mapcar #'wp:entry-name entries)))
-    (is (equal '(0 2 4) (mapcar #'wp:entry-value entries))
+    (ok (string= "error" (wp:enum-name enum)))
+    (ok (wp:enum-bitfield-p enum))
+    (ok (equal '("none" "bad" "worse") (mapcar #'wp:entry-name entries)))
+    (ok (equal '(0 2 4) (mapcar #'wp:entry-value entries))
         "hexadecimal entry values are parsed")
-    (is (= 2 (wp:entry-since (third entries))))))
+    (ok (= 2 (wp:entry-since (third entries))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Reader failures
 ;;; ---------------------------------------------------------------------------
 
 (deftest xml-rejects-malformed-input
-  (signals wp:xml-error (wp:parse-xml "<a><b></a>"))
-  (signals wp:xml-error (wp:parse-xml "<a"))
-  (signals wp:xml-error (wp:parse-xml "<!-- unterminated"))
-  (signals wp:xml-error (wp:parse-xml "<a>&bogus;</a>"))
-  (signals wp:xml-error (wp:parse-xml "<a x=1/>"))
-  (signals wp:xml-error (wp:parse-xml "text before the root")))
+  (ok (signals (wp:parse-xml "<a><b></a>") 'wp:xml-error))
+  (ok (signals (wp:parse-xml "<a") 'wp:xml-error))
+  (ok (signals (wp:parse-xml "<!-- unterminated") 'wp:xml-error))
+  (ok (signals (wp:parse-xml "<a>&bogus;</a>") 'wp:xml-error))
+  (ok (signals (wp:parse-xml "<a x=1/>") 'wp:xml-error))
+  (ok (signals (wp:parse-xml "text before the root") 'wp:xml-error)))
 
 (deftest schema-rejects-invalid-protocols
-  (signals wp:invalid-schema
-    (wp:parse-protocol-string "<not-a-protocol/>"))
-  (signals wp:invalid-schema
-    (wp:parse-protocol-string
+  (ok (signals (wp:parse-protocol-string "<not-a-protocol/>") 'wp:invalid-schema))
+  (ok (signals (wp:parse-protocol-string
      "<protocol name=\"p\"><interface name=\"i\" version=\"1\">
         <request name=\"r\"><arg name=\"a\" type=\"nonsense\"/></request>
-      </interface></protocol>"))
-  (signals wp:invalid-schema
-    (wp:parse-protocol-string
+      </interface></protocol>") 'wp:invalid-schema))
+  (ok (signals (wp:parse-protocol-string
      "<protocol name=\"p\"><interface name=\"i\">
-        <request name=\"r\"/></interface></protocol>")))
+        <request name=\"r\"/></interface></protocol>") 'wp:invalid-schema)))
 
 (deftest schema-error-reports-its-file
   (handler-case
       (wp:parse-protocol-file "/nonexistent/nothing.xml")
     (error (condition)
-      (is (search "nothing.xml" (princ-to-string condition))))))
+      (ok (search "nothing.xml" (princ-to-string condition))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Registry
@@ -210,13 +207,13 @@
        (let* ((protocol (wp:parse-protocol-string *sample* :origin "sample.xml"))
               (surface (first (wp:protocol-interfaces protocol))))
          (wp:register-protocol protocol)
-         (is (eq surface (wp:find-interface "sm_surface")))
-         (is (string= "sm_buffer"
+         (ok (eq surface (wp:find-interface "sm_surface")))
+         (ok (string= "sm_buffer"
                       (wp:interface-name (wp:find-interface "sm_buffer"))))
-         (is (null (wp:find-interface "no_such_interface")))
-         (is (eql 2 (length (wp:registered-interfaces))))
+         (ok (null (wp:find-interface "no_such_interface")))
+         (ok (eql 2 (length (wp:registered-interfaces))))
          (wp:unregister-protocol protocol)
-         (is (null (wp:find-interface "sm_surface"))))
+         (ok (null (wp:find-interface "sm_surface"))))
       (wp:clear-protocol-registry))))
 
 ;;; ---------------------------------------------------------------------------
@@ -500,11 +497,11 @@ types + 0)."
          (registry (find "wl_registry" (wp:protocol-interfaces protocol)
                          :key #'wp:interface-name :test #'string=))
          (bind (first (wp:interface-requests registry))))
-    (is (string= "bind" (wp:message-name bind)))
-    (is (string= "usun" (wp:message-signature bind)))
-    (is (equal '("name" "interface" "version" "id")
+    (ok (string= "bind" (wp:message-name bind)))
+    (ok (string= "usun" (wp:message-signature bind)))
+    (ok (equal '("name" "interface" "version" "id")
                (mapcar #'wp:arg-name (wp:message-args bind))))
-    (is (equal '(:uint :string :uint :new-id)
+    (ok (equal '(:uint :string :uint :new-id)
                (mapcar #'wp:arg-type (wp:message-args bind))))))
 
 (deftest request-generic-functions-omit-new-ids
@@ -515,36 +512,36 @@ specialises the same function and creates the resource.  Events keep the id:
 there the sender chose it, and the receiver has to learn it."
   (flet ((lambda-list-of (form)
            (let ((expansion (macroexpand form)))
-             (is (eq 'defgeneric (first (second expansion))))
+             (ok (eq 'defgeneric (first (second expansion))))
              (mapcar #'symbol-name (third (second expansion))))))
-    (is-equal '("OBJECT" "FD" "SIZE")
+    (ok (equal '("OBJECT" "FD" "SIZE")
               (lambda-list-of
                '(wayland.protocol:define-request (wl-shm.create-pool wl-shm 0)
                   ((id :new-id :interface "wl_shm_pool")
                    (fd :fd)
-                   (size :int)))))
-    (is-equal '("OBJECT" "ID")
+                   (size :int))))))
+    (ok (equal '("OBJECT" "ID")
               (lambda-list-of
                '(wayland.protocol:define-event (wl-data-device.data-offer
                                                 wl-data-device 0)
-                  ((id :new-id :interface "wl_data_offer")))))))
+                  ((id :new-id :interface "wl_data_offer"))))))))
 
 (deftest messages-record-the-generic-function-that-implements-them
   "A message defined by a DEFINE-* form knows its generic function; one parsed
 from XML alone has no Lisp names yet, which is why this is NIL for the corpus."
   (let ((sync (first (wp:interface-requests (wp:find-interface "wl_display")))))
-    (is (eq 'wayland:wl-display.sync (wp:message-symbol sync)))
-    (is (fboundp (wp:message-symbol sync)))
-    (is (eq :request (wp:message-kind sync))))
+    (ok (eq 'wayland:wl-display.sync (wp:message-symbol sync)))
+    (ok (fboundp (wp:message-symbol sync)))
+    (ok (eq :request (wp:message-kind sync))))
   (let* ((path (merge-pathnames "wayland/wayland.xml" (protocol-root)))
          (protocol (wp:parse-protocol-file path :register nil))
          (display (find "wl_display" (wp:protocol-interfaces protocol)
                         :key #'wp:interface-name :test #'string=)))
-    (is (null (wp:message-symbol (first (wp:interface-requests display)))))))
+    (ok (null (wp:message-symbol (first (wp:interface-requests display)))))))
 
 (deftest every-vendored-protocol-matches-wayland-scanner
   (let ((files (sort (collect-xml-files (protocol-root)) #'string< :key #'namestring)))
-    (is (>= (length files) 60)
+    (ok (>= (length files) 60)
         (format nil "expected the vendored corpus, found ~D XML files"
                 (length files)))
     (dolist (file files)
@@ -554,5 +551,5 @@ from XML alone has no Lisp names yet, which is why this is NIL for the corpus."
              (problems (oracle-problems file protocol)))
         (dolist (problem problems)
           (format *error-output* "~&  oracle: ~A: ~A~%" (file-namestring file) problem))
-        (is (null problems)
+        (ok (null problems)
             (format nil "wayland-scanner agrees on ~A" (file-namestring file)))))))

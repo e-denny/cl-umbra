@@ -386,3 +386,47 @@ every declared protocol on the next build.
 currently declared), which is the correct price. It also means a `git checkout` of an older
 generator forces the same rebuild, so a stale fasl cannot outlive the source it came from.
 This was found the hard way: D15's change compiled against a fasl that predated it.
+
+---
+
+## D17 — Tests run on Rove
+
+**Status:** accepted (user preference)
+
+**Context.** Phase 0 started with a 105-line hand-rolled harness in `tests/harness.lisp`
+(`deftest`, `is`, `is-equal`, `signals`, `run-all`), on the theory that a dependency-free
+suite was cheaper than adopting a framework. It worked, but it had two costs that grew with
+the suite: no per-assertion reporting (a failure printed a form and two values, and nothing
+else), and a home-grown `is-equal` whose arguments were (expected, form) — the reverse of
+every other Lisp assertion library, including Rove's.
+
+**Decision.** `cl-wayland-tests` depends on Rove; the harness is deleted. Assertions are
+Rove's `ok` and `signals`, so the reporting (form, argument values, backtrace on failure) is
+the framework's. One test file's package is one suite, and `(rove:run :cl-wayland-tests)`
+runs them all; `scripts/run-tests.sh` quits with Rove's verdict.
+
+**Consequences.**
+
+- A dependency appears, but only in the test system: no shipped system loads Rove, so the
+  purity rule (D1) and the runtime dependency list (SBCL + CFFI) are unchanged. `qlfile`
+  gains `ql rove`.
+- The codegen tests now load generated code into a throwaway package under a throwaway
+  registry. Loading it over the live `WAYLAND` package cost 447 redefinition warnings per run
+  and, once the package changed, replaced the real registry entries with copies whose symbols
+  no client had methods on.
+- Rove 0.10 has no `is`/`is-equal`; assertions are `ok`. The migration rewrote 359 call
+  sites (`is` → `ok`, `is-equal` → `ok` with the predicate spelled out, `signals` → `ok
+  (signals form 'type)`), keeping the assertion count identical (2152) as the check that
+  nothing was silently dropped.
+- The runner (`tests/runner.lisp`) names the six suites instead of calling
+  `(rove:run :cl-wayland-tests)`. Rove finds suites by mapping each fasl back to its source
+  file, which only works when the fasl is in ASDF's user cache; a translated build finds
+  none and reports success on zero tests. Naming them also makes an empty suite a failure.
+- Rove depends on dissect, and dissect 20231021's SBCL backend interns symbols from `SB-DI`,
+  which SBCL 2.6 locks. `tests/cl-wayland-tests.asd` unlocks that package before Rove is
+  loaded. It is a workaround, it is confined to the test system, and it should be deleted
+  when dissect catches up.
+- `signals` changes shape: Rove's takes a form and a quoted condition type and *returns*
+  whether it was signalled, so the idiom is `(ok (signals (f) 'type))` rather than
+  `(signals type (f))`. The old order is not preserved: one convention is better than a
+  wrapper that hides it.

@@ -14,7 +14,7 @@
 (in-package #:cl-user)
 
 (defpackage #:wayland.test.codegen
-  (:use #:cl #:wayland.test)
+  (:use #:cl #:rove)
   (:local-nicknames (#:wp #:wayland.protocol) (#:cg #:wayland.codegen))
   (:documentation "Tests for wayland.codegen and the :wayland-protocol component."))
 
@@ -42,12 +42,20 @@
 (defun parse-file (path)
   (wp:parse-protocol-file path :register nil))
 
+(defvar *loaded-generated-count* 0)
+
 (defun load-generated (protocol)
-  "Generate PROTOCOL's source and load it; return the path."
-  (uiop:with-temporary-file (:pathname path :type "lisp")
-    (cg:generate-protocol-file protocol path :export t)
-    (load path)
-    path))
+  "Generate PROTOCOL's source and load it into a throwaway package.
+
+Returns (values path package-name).  A fresh package per load keeps the live
+WAYLAND/XDG-SHELL generic functions untouched: loading a second copy of 200
+generic functions over them is 200 redefinition warnings, and what these tests
+are about is the generated code, not the package it usually lands in."
+  (let ((package (format nil "CODEGEN-LOAD-~D" (incf *loaded-generated-count*))))
+    (uiop:with-temporary-file (:pathname path :type "lisp")
+      (cg:generate-protocol-file protocol path :export t :package package)
+      (load path)
+      (values path package))))
 
 (defmacro with-temporary-registry (&body body)
   "Run BODY against empty registry bindings, leaving the real one intact."
@@ -137,34 +145,34 @@
                          :key #'wp:interface-name :test #'string=))
          (set-title (find "set_title" (wp:interface-requests toplevel)
                           :key #'wp:message-name :test #'string=)))
-    (is (string= "XDG-SHELL" package))
-    (is (search "(defpackage #:XDG-SHELL" text))
-    (is (search "#:define-request" text))
-    (is (search "(define-interface xdg-toplevel" text))
-    (is (search (format nil "(:version ~D)" (wp:interface-version toplevel)) text))
+    (ok (string= "XDG-SHELL" package))
+    (ok (search "(defpackage #:XDG-SHELL" text))
+    (ok (search "#:define-request" text))
+    (ok (search "(define-interface xdg-toplevel" text))
+    (ok (search (format nil "(:version ~D)" (wp:interface-version toplevel)) text))
     (let ((state (find "state" (wp:interface-enums toplevel)
                        :key #'wp:enum-name :test #'string=)))
-      (is (search (format nil "(define-enum xdg-toplevel.state ~A"
+      (ok (search (format nil "(define-enum xdg-toplevel.state ~A"
                           (if (wp:enum-bitfield-p state) "(:bitfield t)" "()"))
                   text)))
-    (is (find-if #'wp:enum-bitfield-p
+    (ok (find-if #'wp:enum-bitfield-p
                  (loop for interface in (wp:protocol-interfaces protocol)
                        append (wp:interface-enums interface)))
         "xdg-shell has bitfield enums, so the bitfield branch is exercised")
-    (is (search (format nil "(define-request (xdg-toplevel.set-title xdg-toplevel ~D)"
+    (ok (search (format nil "(define-request (xdg-toplevel.set-title xdg-toplevel ~D)"
                         (wp:message-opcode set-title))
                 text))
-    (is (search "(title :string" text))
-    (is (search "(define-event (xdg-toplevel.configure xdg-toplevel 0)" text))
-    (is (search ":allow-null t" text)
+    (ok (search "(title :string" text))
+    (ok (search "(define-event (xdg-toplevel.configure xdg-toplevel 0)" text))
+    (ok (search ":allow-null t" text)
         "a nullable object argument keeps its nullability")
-    (is (search "#:+xdg-toplevel-state-maximized+" text))
-    (is (search "#:xdg-toplevel.set-title" text))))
+    (ok (search "#:+xdg-toplevel-state-maximized+" text))
+    (ok (search "#:xdg-toplevel.set-title" text))))
 
 (deftest generation-is-deterministic
   (let* ((path (merge-pathnames "wayland/wayland.xml" (protocol-root)))
          (protocol (parse-file path)))
-    (is (string= (cg:generate-protocol-text protocol)
+    (ok (string= (cg:generate-protocol-text protocol)
                  (cg:generate-protocol-text protocol)))))
 
 (deftest numeric-enum-entries-are-escaped
@@ -172,65 +180,72 @@
   ;; read as numbers and the generated file dies in a confusing place.
   (let* ((protocol (parse-file (merge-pathnames "wayland/wayland.xml" (protocol-root))))
          (text (cg:generate-protocol-text protocol)))
-    (is (search "(|90| 1 :summary" text))
-    (is (search "(|180| 2 :summary" text))))
+    (ok (search "(|90| 1 :summary" text))
+    (ok (search "(|180| 2 :summary" text))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The roundtrip
 ;;; ---------------------------------------------------------------------------
 
 (deftest generated-code-reproduces-the-schema
-  "Load the generated source for a protocol and compare it with the XML."
-  (dolist (relative '("wayland/wayland.xml"
-                      "wayland-protocols/stable/xdg-shell/xdg-shell.xml"))
-    (let* ((path (merge-pathnames relative (protocol-root)))
-           (protocol (parse-file path))
-           (problems '()))
-      (load-generated protocol)
-      (dolist (interface (wp:protocol-interfaces protocol))
-        (let ((generated (wp:find-interface (wp:interface-name interface))))
-          (if (null generated)
-              (push (format nil "~A: not registered after loading"
-                            (wp:interface-name interface))
-                    problems)
-              (setf problems
-                    (append (interface-differences interface generated) problems)))))
-      (dolist (problem (nreverse problems))
-        (format *error-output* "~&  codegen: ~A: ~A~%" relative problem))
-      (is (null problems)
-          (format nil "generated code reproduces ~A" relative)))))
+  "Load the generated source for a protocol and compare it with the XML.
+
+The load happens under a throwaway registry: the point is to compare metadata,
+and letting a generated copy of wl_display replace the live one would leave this
+suite running against symbols that no longer exist in any real package."
+  (with-temporary-registry
+    (dolist (relative '("wayland/wayland.xml"
+                        "wayland-protocols/stable/xdg-shell/xdg-shell.xml"))
+      (let* ((path (merge-pathnames relative (protocol-root)))
+             (protocol (parse-file path))
+             (problems '()))
+        (load-generated protocol)
+        (dolist (interface (wp:protocol-interfaces protocol))
+          (let ((generated (wp:find-interface (wp:interface-name interface))))
+            (if (null generated)
+                (push (format nil "~A: not registered after loading"
+                              (wp:interface-name interface))
+                      problems)
+                (setf problems
+                      (append (interface-differences interface generated) problems)))))
+        (dolist (problem (nreverse problems))
+          (format *error-output* "~&  codegen: ~A: ~A~%" relative problem))
+        (ok (null problems)
+            (format nil "generated code reproduces ~A" relative))))))
 
 (deftest generated-code-defines-the-convenient-names
-  (let* ((protocol (parse-file (merge-pathnames "wayland/wayland.xml" (protocol-root))))
-         (package-name (cg:protocol-package-name protocol)))
-    (load-generated protocol)
-    (flet ((lookup (name) (find-symbol name package-name)))
-      (is (fboundp (lookup "WL-SURFACE.ATTACH"))
-          "every message is a generic function to specialise")
-      (is (= 7 (symbol-value (lookup "+WL-SURFACE-VERSION+"))))
-      (is (= 1 (symbol-value (lookup "+WL-SURFACE-ATTACH+"))))
-      (is (= 0 (symbol-value (lookup "+WL-SURFACE-ERROR-INVALID-SCALE+"))))
-      (is (= 1 (symbol-value (lookup "+WL-OUTPUT-TRANSFORM-90+"))))
-      (is (typep (fdefinition (lookup "WL-DISPLAY.SYNC")) 'generic-function)))))
+  (let ((protocol (parse-file (merge-pathnames "wayland/wayland.xml" (protocol-root)))))
+    (multiple-value-bind (path package-name)
+        (with-temporary-registry (load-generated protocol))
+      (declare (ignore path))
+      (flet ((lookup (name) (find-symbol name package-name)))
+        (ok (fboundp (lookup "WL-SURFACE.ATTACH"))
+            "every message is a generic function to specialise")
+        (ok (= 7 (symbol-value (lookup "+WL-SURFACE-VERSION+"))))
+        (ok (= 1 (symbol-value (lookup "+WL-SURFACE-ATTACH+"))))
+        (ok (= 0 (symbol-value (lookup "+WL-SURFACE-ERROR-INVALID-SCALE+"))))
+        (ok (= 1 (symbol-value (lookup "+WL-OUTPUT-TRANSFORM-90+"))))
+        (ok (typep (fdefinition (lookup "WL-DISPLAY.SYNC")) 'generic-function))))))
 
 (deftest generated-code-keeps-registry-bind-on-the-wire
-  (let* ((protocol (parse-file (merge-pathnames "wayland/wayland.xml" (protocol-root))))
-         (package-name (cg:protocol-package-name protocol)))
-    (load-generated protocol)
-    (let* ((registry (wp:find-interface "wl_registry"))
-           (bind (first (wp:interface-requests registry))))
-      (is (string= "usun" (wp:message-signature bind)))
-      (is (equal '("name" "interface" "version" "id")
-                 (mapcar #'wp:arg-name (wp:message-args bind))))
-      (is (fboundp (find-symbol "WL-REGISTRY.BIND" package-name))))))
+  (let ((protocol (parse-file (merge-pathnames "wayland/wayland.xml" (protocol-root)))))
+    (multiple-value-bind (path package-name)
+        (with-temporary-registry (load-generated protocol))
+      (declare (ignore path))
+      (let* ((registry (wp:find-interface "wl_registry"))
+             (bind (first (wp:interface-requests registry))))
+        (ok (string= "usun" (wp:message-signature bind)))
+        (ok (equal '("name" "interface" "version" "id")
+                   (mapcar #'wp:arg-name (wp:message-args bind))))
+        (ok (fboundp (find-symbol "WL-REGISTRY.BIND" package-name)))))))
 
 (deftest defining-one-interface-twice-at-different-versions-is-refused
   (with-temporary-registry
     (wp::%define-interface 'zz-test-interface 1 "zz_test_interface" "")
-    (is (wp:find-interface "zz_test_interface"))
-    (signals wp:conflicting-interface
-      (wp::%define-interface 'zz-test-interface 2 "zz_test_interface" ""))
-    (is (= 1 (wp:interface-version (wp:find-interface "zz_test_interface")))
+    (ok (wp:find-interface "zz_test_interface"))
+    (ok (signals (wp::%define-interface 'zz-test-interface 2 "zz_test_interface" "")
+                 'wp:conflicting-interface))
+    (ok (= 1 (wp:interface-version (wp:find-interface "zz_test_interface")))
         "the first definition survives a refused one")))
 
 ;;; ---------------------------------------------------------------------------
@@ -240,7 +255,7 @@
 (deftest every-vendored-protocol-generates-readable-lisp
   (let ((files (sort (collect-xml-files (protocol-root)) #'string< :key #'namestring))
         (failures '()))
-    (is (>= (length files) 60))
+    (ok (>= (length files) 60))
     (dolist (file files)
       (handler-case
           (let* ((protocol (parse-file file))
@@ -249,18 +264,18 @@
             (unwind-protect
                  (let ((*package* package)
                        (forms 0))
-                   (is (plusp (length text)))
+                   (ok (plusp (length text)))
                    (with-input-from-string (stream text)
                      (loop for form = (read stream nil :eof)
                            until (eq form :eof)
                            do (incf forms)))
-                   (is (plusp forms)))
+                   (ok (plusp forms)))
               (delete-package package)))
         (error (condition)
           (push (format nil "~A: ~A" (file-namestring file) condition) failures))))
     (dolist (failure (nreverse failures))
       (format *error-output* "~&  codegen: ~A~%" failure))
-    (is (null failures) "every vendored protocol generates readable Lisp")))
+    (ok (null failures) "every vendored protocol generates readable Lisp")))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The ASDF component did its job
@@ -269,6 +284,6 @@
 (deftest the-wayland-protocol-component-generated-and-loaded
   ;; cl-wayland-tests depends on cl-wayland-protocols, which uses the
   ;; :WAYLAND-PROTOCOL component for these two files.
-  (is (fboundp (find-symbol "WL-DISPLAY.SYNC" "WAYLAND")))
-  (is (fboundp (find-symbol "XDG-TOPLEVEL.SET-TITLE" "XDG-SHELL")))
-  (is (typep (wp:find-interface "xdg_toplevel") 'wp:wl-interface)))
+  (ok (fboundp (find-symbol "WL-DISPLAY.SYNC" "WAYLAND")))
+  (ok (fboundp (find-symbol "XDG-TOPLEVEL.SET-TITLE" "XDG-SHELL")))
+  (ok (typep (wp:find-interface "xdg_toplevel") 'wp:wl-interface)))

@@ -36,6 +36,35 @@ Installed for testing only (never linked by our binaries):
 Recorded traces are committed under `tests/fixtures/traces/` with the exact client version in
 a sidecar file, because traces are only comparable against known-good versions.
 
+### Running the suite
+
+Tests run on [Rove](https://github.com/fukamachi/rove) (D17). One test file is one package is
+one Rove suite:
+
+```
+./scripts/run-tests.sh                      # everything; exit status is the verdict
+TEST_VERBOSE=1 ./scripts/run-tests.sh       # every assertion and its form
+(wayland.test.runner:run-all)               # same from a REPL (:style :spec lists assertions)
+(rove:run-suite 'wayland.test.wire)         # one file
+(rove:run-test 'wayland.test.wire::header-only)
+```
+
+`asdf:test-system "cl-wayland-tests"` works too, for anyone who prefers to drive it from
+ASDF. Assertions are Rove's own: `(ok FORM "description")` for a predicate, and
+`(ok (signals FORM 'condition-type))` for an expected error; a failure prints the test name,
+the assertion, its source location and the arguments' values.
+
+The scripts go through `wayland.test.runner`, which names the six suites instead of letting
+Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
+holds when the fasl is in ASDF's user cache; a build with a different output translation (a
+cold-cache check, a packager) would otherwise run zero suites and report success. The runner
+also fails when a named suite is missing or empty, so "green" always means 112 tests ran.
+
+One workaround is load-bearing: `tests/cl-wayland-tests.asd` unlocks SBCL's `SB-DI` package
+before Rove loads, because dissect 20231021 (Rove's failure renderer) interns symbols from it
+and SBCL 2.6 locks it. The unlock lives in the test system only, so no shipped system is
+affected; remove it when dissect fixes its SBCL backend.
+
 ## 3. Wire codec
 
 - **Byte-exact vectors**: hand-written expected bytes for every argument type, including
