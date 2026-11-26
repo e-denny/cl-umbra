@@ -260,7 +260,7 @@ Phase 3e (the client library and a nested session) adds the fifteenth:
     output); a pointer motion injected into the parent reaches the client inside the nested
     session as a motion at the same coordinates; Shift+q injected into the parent arrives as
     keycode 16 with unicode 81 and modifier mask 0x1; the pointer, key and keymap counters on
-    the backend are non-zero and the parent's keymap descriptor (6978 octets) crossed the
+    the backend are non-zero and the parent's keymap descriptor (7065 octets) crossed the
     boundary; teardown removes the parent's toplevel, empties its client list, and leaves the
     descriptor count where it started. A PNG of the parent's frame is written and validated —
     it shows the inner client's window inside the inner session's output.

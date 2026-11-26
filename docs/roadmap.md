@@ -230,6 +230,10 @@ below.
 - [x] popup grabs: owner-events, dismissed by a press outside the stack or by Escape (phase 3f)
 - [x] grabs: `begin-move`/`begin-resize` from `move`/`resize`, serial validation (phase 3d, D33)
 - [ ] `wl_pointer.frame` and `wl_seat.release` (a version bump, not a rewrite)
+- [x] the key table covers the keys a session needs, and `tests/unit/input.lisp` asserts it: TLDE
+      (between Escape and 1) was missing, so `` ` `` and `~` could not be typed at all until 3h
+- [ ] F5–F12 and the numeric keypad are not in the table either (no terminal needs them, and a
+      key that is absent cannot be bound either)
 
 `cl-wayland-client` (phase 3e, D34)
 - [x] event classes for surfaces, regions, buffers, seats, devices and xdg-shell, chosen by

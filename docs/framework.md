@@ -284,9 +284,16 @@ focus stack, cursor shapes and touch are still ahead.*
   refused with `missing_capability`, which is what the protocol asks for.
 - **Keymap**: one keymap per seat, serialized into a memfd and sent via `wl_keyboard.keymap`,
   with `repeat_info` after it (D28). `cf.input` generates the text from a table of keys — evdev
-  code, keysyms, the modifier each key sets — so nothing links libxkbcommon yet. Phase 4
-  replaces the *generator* with libxkbcommon's keymaps from libinput devices; the protocol path
-  and the modifier bookkeeping do not change.
+  code, keysyms, the modifier each key sets — so nothing links libxkbcommon yet. The table covers
+  what a terminal session needs (Escape, F1–F4, the main block with its shifted keysyms,
+  modifiers, Return/BackSpace/Tab, the arrows and the editing keys), and a key that is *not* in
+  the table cannot be typed or bound at all: TLDE — the key between Escape and 1 — was missing
+  until it was found while looking for a binding, which is why `tests/unit/input.lisp` now
+  asserts every row's keycode, that the names are unique, and that the generated text declares
+  each key. A key is looked up by its base keysym (`"Escape"`, `"grave"`), its shifted keysym
+  (`"asciitilde"`) or its XKB name (`"ESC"`, `"TLDE"`). Phase 4 replaces the *generator* with
+  libxkbcommon's keymaps from libinput devices; the protocol path and the modifier bookkeeping do
+  not change.
 - **Input without a device**: `send-key-event` and `send-pointer-motion`/`-button`/`-axis` are
   the seam a backend calls; the headless backend wraps them as `cf:inject-*` so a test can type
   at a real client, and a libinput backend will call the same four functions.

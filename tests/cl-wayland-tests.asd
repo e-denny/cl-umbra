@@ -52,6 +52,7 @@
                              (:file "reactor")
                              (:file "schema")
                              (:file "codegen")
+                             (:file "input")
                              (:file "client")
                              (:file "server")
                              (:file "scene")

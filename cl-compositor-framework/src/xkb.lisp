@@ -42,6 +42,11 @@
     ("FK02"  60 "F2"                 nil                  nil        "F2")
     ("FK03"  61 "F3"                 nil                  nil        "F3")
     ("FK04"  62 "F4"                 nil                  nil        "F4")
+    ;; TLDE is the key between Escape and 1.  It was missing from this table, and a
+    ;; key that is not in the keymap is a key a client cannot type at all -- not a
+    ;; key that produces the wrong character, and not something a keybinding can
+    ;; use either (Alt+grave, for instance).
+    ("TLDE"  41 "grave"              "asciitilde"         nil        "grave")
     ("AE01"   2 "1"                  "exclam"             nil        "1")
     ("AE02"   3 "2"                  "at"                 nil        "2")
     ("AE03"   4 "3"                  "numbersign"         nil        "3")
@@ -123,10 +128,16 @@ both invites the classic off-by-eight bug.
 ;;; ---------------------------------------------------------------------------
 
 (defun key-entry (name)
-  "The row for NAME (a string, a symbol or an evdev keycode)."
+  "The row for NAME: a keysym (\"Escape\", \"grave\", \"asciitilde\"), an XKB key
+name (\"ESC\", \"TLDE\") or an evdev keycode.
+
+The keysym is what a binding is written with, so it is tried first; the XKB key name
+is what the generated keymap calls the key, and looking it up is how a test -- or a
+person reading the keymap -- finds the row it is in."
   (etypecase name
     (string (or (find name +keys+ :key #'third :test #'string-equal)
                 (find name +keys+ :key #'fourth :test #'string-equal)
+                (find name +keys+ :key #'first :test #'string-equal)
                 (error "no key named ~S in the keymap" name)))
     (symbol (key-entry (string name)))
     (integer (or (find name +keys+ :key #'second)

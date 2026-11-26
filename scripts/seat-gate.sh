@@ -64,9 +64,11 @@ cat "$log"
 [ -s "$keymap" ] || fail "no keymap was written"
 [ -s "$frame" ] || fail "no screenshot was written"
 
-# Keycode 1 is Escape; 16 is q (Shift -> Q); 42 is Shift_L; 103 is Up.  If the
-# keymap parses and these translate, a client could type on this seat.
-"$probe" "$keymap" 1 16 42 103 > "$runtime_dir/probe.log" 2>&1 \
+# Keycode 1 is Escape; 16 is q (Shift -> Q); 41 is the key between Escape and 1
+# (grave, shifted asciitilde -- it was missing from the table until 3h); 42 is
+# Shift_L; 103 is Up.  A key the keymap does not know translates as MISSING and
+# fails the probe, which is how a missing row is caught rather than typed around.
+"$probe" "$keymap" 1 16 41 42 103 > "$runtime_dir/probe.log" 2>&1 \
   || { cat "$runtime_dir/probe.log" >&2; fail "the keymap we sent does not parse or translate"; }
 cat "$runtime_dir/probe.log"
 

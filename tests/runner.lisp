@@ -36,6 +36,7 @@
     wayland.test.reactor
     wayland.test.schema
     wayland.test.codegen
+    wayland.test.input
     wayland.test.client
     wayland.test.server
     wayland.test.scene
