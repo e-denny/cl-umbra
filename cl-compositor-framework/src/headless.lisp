@@ -122,6 +122,10 @@ SLOT-VALUE shows a different one."))
    ;; Keys a binding consumed, so their releases are swallowed too: a client that
    ;; never saw the press must not see the release.
    (consumed-keys :initform nil :accessor compositor-consumed-keys)
+   ;; The overlay switcher's state, if one is installed and open (D51).  An object
+   ;; rather than a flag because it owns the nodes it added to the scene's overlay,
+   ;; and a compositor that never binds START-SWITCHER never allocates one.
+   (switcher :initform nil :accessor compositor-switcher)
    ;; Alt+Esc and Alt+F1 by default -- tinywl's two, and the smallest table that
    ;; proves the path; a compositor adds to it with CF:ADD-KEYBINDING (D33).
    (keybindings :initform nil :accessor compositor-keybindings)
@@ -676,6 +680,22 @@ surface -- a cursor image, a bare surface a client mapped for itself -- is nobod
        (srv:surface-mapped-p surface)
        (focus-stack-window surface)))
 
+(defun window-title (surface)
+  "SURFACE's window title: the client's title, else its app id, else NIL.
+
+The title is what a person reads, in a switcher or a bar.  The app id is what the
+client says it *is*, and it is the honest second choice: a client that sets no
+title -- every toy-toolkit example, and weston-simple-shm -- still has a name.
+NIL is `this surface has no window name': a popup, a roleless surface, or a
+surface whose role is not a toplevel.  Deciding what to draw for NIL is the
+caller's job, and the switcher's is a stand-in word (D51)."
+  (let* ((shell (and surface (srv:surface-shell-surface surface)))
+         (role (and shell (srv:xdg-surface-role shell))))
+    (when (typep role 'srv:xdg-toplevel)
+      (flet ((named (string) (and (stringp string) (plusp (length string)) string)))
+        (or (named (srv:xdg-toplevel-title role))
+            (named (srv:xdg-toplevel-app-id role)))))))
+
 (defun focus-surface (compositor surface)
   "Give keyboard focus to SURFACE; NIL clears it.
 
@@ -731,6 +751,42 @@ would be a type error at the worst possible moment (the click that focuses a men
 (defun stop-compositor (compositor)
   "Ask the main loop to stop at the end of this cycle (tinywl's Alt+Esc)."
   (reactor:request-stop (srv:display-reactor (compositor-display compositor))))
+
+;;; ---------------------------------------------------------------------------
+;;; The switcher's two seams (D51)
+;;; ---------------------------------------------------------------------------
+;;
+;; A switcher is modal while a key is *held*, which a binding table cannot express:
+;; a binding fires on a press, and a switcher has to see the release that commits it
+;; and every key in between.  So the key path asks the compositor's switcher first --
+;; in front of grabs and bindings, because a held Alt+Tab is the compositor's
+;; decision and no menu may take it away -- and the state behind the answer lives in
+;; CF.SWITCHER's object in COMPOSITOR-SWITCHER.
+;;
+;; Two generic functions with no-op defaults, so a compositor with no switcher pays
+;; one dispatch per key and keeps none of this code in its key path.
+
+(defgeneric switcher-key (compositor name state)
+  (:documentation
+   "COMPOSITOR's switcher takes the key called NAME (:pressed or :released)?
+
+Asked before grabs, bindings and the focused client.  True means the key was
+consumed -- by the switcher, or by the release that committed it -- so the client
+must not see it.  The default has no switcher and takes nothing.")
+  (:method (compositor name state)
+    (declare (ignore compositor name state))
+    nil))
+
+(defgeneric switcher-pointer-press (compositor)
+  (:documentation
+   "A pointer button went down over COMPOSITOR: an overlay it was showing is now the
+wrong thing to be showing.
+
+The default has no overlay, so it does nothing.  A switcher that ignored the press
+would leave two things believing they are choosing the window at once.")
+  (:method (compositor)
+    (declare (ignore compositor))
+    nil))
 
 (defun window-surface-p (surface)
   "Is SURFACE a window: a wl_surface with the *toplevel* role?
@@ -832,14 +888,26 @@ without a client behind it -- has no one to ask, so it asks nothing."
   "Press or release the key called NAME (:pressed or :released).
 
 The modifier mask is updated from the keymap's own table first, so a binding sees
-the mask the press produced; then a grab may take the key, then a binding, and
-only then the focused client."
+the mask the press produced; then a switcher, a grab, a binding, and only then the
+focused client."
   (let* ((seat (compositor-seat compositor))
          (modifiers (compositor-modifiers compositor))
          (pressed-p (eq state :pressed))
          (grab (compositor-grab compositor)))
     (input:update-modifiers modifiers name pressed-p)
     (cond
+      ;; A held-switcher key is compositor state, not a client's input: it is asked
+      ;; first, before any grab, because a menu that swallowed Alt+Tab would make
+      ;; the switcher unreachable exactly when a menu is up (D51).
+      ((switcher-key compositor name state)
+       ;; The same bookkeeping a binding does: a key the switcher consumed must not
+       ;; have its release delivered to a client that never saw its press.
+       (if pressed-p
+           (push name (compositor-consumed-keys compositor))
+           (setf (compositor-consumed-keys compositor)
+                 (remove name (compositor-consumed-keys compositor)
+                         :test #'string-equal)))
+       t)
       ((and grab (grab:grab-key grab name state))
        t)
       ((and pressed-p
@@ -1029,12 +1097,16 @@ grab instead of to the window."
 (defun inject-pointer-button (compositor button state)
   "SYNTHETIC pointer button (:left, :right, :middle), pressed or released.
 
-Two rules, in this order.  A grab owns the pointer while one is active: the grab
-decides, and the event is not also delivered as a click to the client under it.
-With no grab, the compositor's own policy decides (`on-pointer-button`), which by
-default means -- D32 -- a press focuses the window under the pointer (the click
-that makes clicking another window work at all) and the client then hears it.  A
-press on the bare output changes nothing: v0 has no click-to-dismiss policy."
+Three rules, in this order.  A press ends an overlay the compositor was showing --
+a click says the switcher was not what was wanted (D51).  A grab owns the pointer
+while one is active: the grab decides, and the event is not also delivered as a
+click to the client under it.  With no grab, the compositor's own policy decides
+(`on-pointer-button`), which by default means -- D32 -- a press focuses the window
+under the pointer (the click that makes clicking another window work at all) and
+the client then hears it.  A press on the bare output changes nothing: v0 has no
+click-to-dismiss policy."
+  (when (eq state :pressed)
+    (switcher-pointer-press compositor))
   (let ((grab (compositor-grab compositor)))
     (if grab
         (grab:grab-button grab (or (cdr (assoc button +pointer-buttons+)) button) state)

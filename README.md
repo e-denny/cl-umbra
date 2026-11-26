@@ -7,8 +7,8 @@ Everything that makes it possible is here too — the protocol implementation, t
 compositor framework, and a tinywl port — as the six systems below.
 
 **Status: phase 0, phase 1, phase 2a, phase 2b, phase 3a, phase 3b, phase 3c, phase 3d,
-phase 3e and phase 3's exit gate — `cl-tinywl` — passing.** `./scripts/gate.sh` checks
-nineteen clauses. Phase 0: the unit suite (282 tests, twelve suites), every vendored protocol compiling,
+phase 3e, phase 3f, phase 3g, phase 3i and phase 3's exit gate — `cl-tinywl` — passing.**
+`./scripts/gate.sh` checks twenty clauses. Phase 0: the unit suite (312 tests, thirteen suites), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections
@@ -42,7 +42,13 @@ mask. Phase 3's exit gate is the tinywl parity script, run **twice**: `cl-tinywl
 hand with two real clients — click to focus, typing to the focused window only, Alt+left to
 drag, Alt+right to resize from the edge under the pointer, Alt+F1 to cycle, Alt+Esc to close the
 clients and quit — once with its output in memory and once nested inside another compositor,
-with the client's own `WAYLAND_DEBUG` stream checked for an ordered, acked configure. Purity (no
+with the client's own `WAYLAND_DEBUG` stream checked for an ordered, acked configure. Phase 3f
+puts menus through it (positioners, flipping a menu back inside the output, Escape and a
+click-away that is swallowed). Phase 3g keeps a focus stack, so a closing window hands the keys
+to the window that was focused before it. Phase 3i draws that stack: `Alt+Tab` opens an overlay
+of window titles in a built-in 5x7 font, Tab walks it, releasing Alt focuses and raises the row
+that was showing, Escape and a click cancel it, and the frame it leaves is byte-identical to a
+full repaint (D51). Purity (no
 libwayland, no wlroots) runs over all of it. The gate exits 0.
 
 Three roadmap quality items are still open and are not gate clauses: fixed-size in/out
@@ -86,7 +92,9 @@ What exists:
   compositor as a client of another one: its frame goes into the parent's shm buffer, its input
   comes from the parent's seat). `xdg_popup` and `xdg_positioner` are implemented (menus,
   tooltips, their grabs and their dismissal), a focus stack decides who gets the keys when a
-  window closes, and the renderer tracks damage, applies buffer scale and the eight buffer
+  window closes, `cf.switcher` draws that stack as an `Alt+Tab` overlay (`cf.font` is a 5x7
+  bitmap font with a validated table of printable ASCII), and the renderer tracks damage, applies
+  buffer scale and the eight buffer
   transforms, and culls what an opaque window hides. The DRM/libinput backends are phases 4-5.
 
 ## What this is
@@ -306,9 +314,15 @@ changes.
 | `Alt+Shift+Return` | start a terminal (`tinywl:*terminal-command*`) |
 | `Alt+left` drag | move the window under the pointer |
 | `Alt+right` drag | resize it from the edge under the pointer |
-| `Alt+Tab` | focus the least recently focused window, and raise it |
+| `Alt+Tab` | open the switcher: the focus stack, one row per window, one selected |
+| `Alt+Shift+Tab` | the same, opened on the window that has the keys now |
 | `Alt+F1` | send the bottom window (in draw order) to the front and focus it |
 | `Alt+Esc` | ask every client to close, then quit |
+
+`Alt+Tab` is a *hold-and-release* switcher: Tab walks the list (Shift walks back), releasing
+Alt takes the row the bar is on and raises it, and Escape or a click cancels it. One tap and
+release still lands on the window it always did — the overlay changes what you see, not what
+the key means.
 
 From a REPL, the same session is three forms:
 

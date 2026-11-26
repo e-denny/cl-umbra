@@ -2182,3 +2182,108 @@ than two buffers, `wp_commit_timing`/explicit sync, or presenting a frame that i
 being read by the parent (the one-frame-in-flight rule from phase 3e still holds). The
 lesson: **incremental drawing is only sound against a buffer whose age you know, so count
 the frames a buffer missed and stop pretending after two.**
+
+## D51 — The switcher is an overlay, and nothing is decided until the key comes up
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** the visible Alt+Tab switcher
+
+D45 gave the compositor a focus stack and a rotating cycle, and said what it could not do:
+"a real hold-Tab-release switcher needs an overlay to show what is selected (a scene node,
+phase 6)". The stack was right and the *view* was missing. One tap of Alt+Tab changed the
+world with nothing on screen to say what had been chosen, and with three or more windows a
+person had to look at the screen afterwards to find out. This slice adds the view, and the
+five decisions that keep it small are about where it lives, what it is made of, and what it
+is allowed to touch.
+
+**Decision.**
+
+1. **An overlay is a second root, not a window.** `scene` grows an `overlay` tree node: drawn
+   after the tree, before the cursor, and reachable by no hit test, no raise, no cycle and no
+   clamp, because those all walk `scene-root` and the overlay is not in it. That is the same
+   rule the cursor already followed (D31), applied to the second thing that must be visible
+   and unclickable. It is deliberately *not* a layer: layers are layer-shell's stack of
+   namespaces owned by other clients, and a layer has a place in a protocol (phase 6). An
+   overlay has no owner and no protocol; it is the compositor drawing on its own screen.
+2. **Text is a node kind and a table of 95 glyphs.** A switcher that cannot say which window
+   is which is not worth a font engine, so `cf.font` is a 5x7 bitmap font with printable ASCII
+   in a table, parsed and *validated* at load (a glyph that is not seven rows of five is a
+   load-time error, not a strange picture), and `text-node` rasterises a string into
+   premultiplied ARGB8888 at the output's scale. One cell is one layout pixel, so a glyph at
+   scale 2 is 10x14 device pixels *drawn*, not a 5x7 picture upscaled -- the same choice the
+   cursor made (D49), and the reason titles are crisp. The raster is cached on the text, the
+   colour and the scale, so a switcher that draws the same title every frame allocates nothing
+   for it. No shaping, no kerning, no BiDi, one size; a character outside ASCII draws as `?`.
+3. **The list is the cycle, drawn.** Rows are the focus stack read backwards -- from its tail,
+   which is what one tap of `focus-stack-cycle` chooses, to its front. Row 0 is where one tap
+   lands, row 1 where two land, and so on, so holding Tab walks exactly the sequence tapping
+   walks and the key means the same thing whether the overlay is seen or not. Wrapping is the
+   property D45 chose the rotation for, and it survives: after a full turn the person is back
+   where they started. Alt+Shift+Tab opens one row back (on the window that has the keys now);
+   it is a second binding in the port's table, not a second rule in the switcher.
+4. **Nothing is decided until the key comes up.** While it is open the switcher reads the stack
+   and paints it: it does not touch the stack, the keyboard, the stacking order or the focus.
+   Releasing Alt makes *one* call -- focus and raise the row it was showing -- which is the same
+   call the cycle makes, so the visible and invisible cycles agree by construction. A window
+   that closed while the overlay was up is not chosen: the overlay showed what was there when it
+   opened, and focusing a tombstone is worse than doing nothing. The mode is a generic function
+   asked before grabs and bindings rather than a binding table, because a binding fires on a
+   press and a switcher has to see the release that commits it: `switcher-key` and
+   `switcher-pointer-press` have no-op defaults, so a compositor with no switcher pays one
+   dispatch per key and keeps none of this in its key path.
+5. **The key rules are about not stealing the keyboard.** Tab walks (forwards, or backwards with
+   Shift -- read from the modifier state, since a switcher is one key held down and a table
+   matches pairs). A *modifier* press neither cancels nor is consumed: Shift picks the direction
+   of the next Tab, and a modifier whose press was swallowed but whose partner's was not is a key
+   the client believes is stuck. Escape cancels *and* is consumed, because Alt is still down and
+   Alt+Escape is "quit" here (D45): a cancel that also ended the session would be a spectacular
+   way to lose a click. Any other press cancels and is *not* consumed, so typing still reaches
+   the window. A release commits when Alt is no longer down -- the moment the person stopped
+   choosing -- and is not consumed either: the client saw Alt go down, so it must see it come up.
+   A pointer press cancels the overlay and is then delivered as the click it was.
+
+**Evidence.** Gate clause 20 (`scripts/switcher-gate.sh`, `scripts/switcher-gate.lisp`) drives
+three independent `weston-eventdemo` clients titled ALPHA, BETA and GAMMA on an 800x600 output
+at scale 2, through *cl-tinywl's own keymap*: the stack reads (GAMMA BETA ALPHA); Alt+Tab opens
+an overlay whose rows are (ALPHA BETA GAMMA) with row 0 selected, and the frame that holds it
+repaints the whole output; the panel, the one-pixel outline and the selection bar are read back
+at the coordinates `switcher-layout` gives, in the colours the switcher names; each row's text is
+measured to the last device pixel of the last glyph -- 58, 46 and 58 device pixels for ALPHA,
+BETA and GAMMA, ending at 827, 815 and 827 -- which is a width only that title produces, in the
+row only the focus stack puts it in; a Tab moves the bar and damages `(754 552 90 64)`, two rows
+rather than the output; releasing Alt focuses and raises ALPHA as the frontmost scene child,
+rotates the history to (ALPHA GAMMA BETA) exactly as one tap always did, and the frame it leaves
+is **byte-identical to a full repaint** (`cf:frame-octets` on both sides); Escape and a click
+cancel without moving the keyboard; Alt+Shift+Tab opens on the last row, the window that has the
+keys; and a point inside the panel hit-tests to the window under it, never to the overlay. The
+last section puts the whole thing one compositor deeper: a nested tinywl session at scale 2
+inside a scale-1 headless parent, two clients inside it, Alt+Tab injected into the *inner*
+compositor -- the panel is in the inner frame and in the parent's own frame at the coordinate the
+scale mapping implies, which is the only claim that means anything when the two compositors
+disagree about scale on purpose. 58 checks. Thirty new unit tests (suite 13, `tests/unit/switcher.lisp`) pin what a gate
+cannot isolate: the font's 95 glyphs and their shape, text width as `6n-1`, a raster's
+premultiplication and its 2x2 blocks at scale 2, the gap column between glyphs, the fallback
+glyph, `truncate-text`'s ellipsis, a text node's layout size against its device raster, the
+overlay's place between the windows and the cursor, the overlay never being hit-tested or
+adopted by the tree, `window-title`'s title → app-id → nothing order, the listing order, that
+walking the list touches neither the stack nor the stacking order, forwards and backwards
+wrapping, the bar following the selection, a 60-character title being cut rather than widening
+the panel past the output, a nameless client getting a stand-in row, one window opening nothing,
+Alt+Tab through the real key path (consumed press, consumed release, nothing left in
+`consumed-keys`, focus untouched), a modifier press that cancels nothing, the release that
+commits and raises, Escape cancelling and being consumed, a click cancelling, idempotent
+cancel/commit, a window that vanished while the overlay was up, and a compositor with no
+switcher binding still cycling the stack as D45 says. The suite went from 282 to 312 tests; the
+gate is 20/20.
+
+**Consequences.** Alt+Tab now shows what it is choosing, the switcher works in a nested session
+for free (it is the same scene, key path and stack), and any compositor can bind `start-switcher`
+or drive `advance-switcher` from its own policy -- the state machine does not care who moves the
+selection. What this does not do: thumbnails (a window's picture is not drawn; a row is a title),
+animations, a search box, per-output stacks, text outside printable ASCII, more than one font
+size, or window lists from anything but the focus stack. The framework's *default* Alt+Tab is
+still `focus-stack-cycle`: an overlay is a compositor's statement about its own screen, and a
+framework default that paints one would be policy (cl-tinywl binds `start-switcher`, and the
+gate drives that). The lesson: **a modal key is not a binding -- it is a state machine with a
+beginning and an end, and the end is where the decision belongs.**

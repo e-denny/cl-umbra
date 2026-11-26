@@ -3,13 +3,21 @@
 ;;;;
 ;;;; cf.scene v0: a retained node tree per output (docs/framework.md §4).
 ;;;;
-;;;; Four node kinds are enough for a tinywl-shaped compositor and for the
-;;;; compositing that phase 2a already did:
+;;;; Five node kinds cover everything this compositor draws -- the compositing
+;;;; phase 2a already did, and the text the switcher needs:
 ;;;;
 ;;;;   TREE-NODE    a group with children, drawn in order: the root is one
 ;;;;   BUFFER-NODE  a mapped wl_surface, drawn from its current buffer
 ;;;;   RECT-NODE    a solid rectangle: backgrounds, borders, letterboxing
 ;;;;   IMAGE-NODE   premultiplied ARGB8888 pixels: the software cursor
+;;;;   TEXT-NODE    a string in the built-in 5x7 font: the switcher's titles
+;;;;
+;;;; One tree is what the compositor arranges; one overlay is what it draws on top
+;;;; of everything without arranging it.  The overlay is a second root -- above the
+;;;; windows, below the cursor, never hit-tested -- so the Alt+Tab switcher can
+;;;; cover the screen without becoming part of the desktop (D51).  A layer
+;;;; (layer-shell) is a different thing and arrives with the shell that needs it
+;;;; (phase 6).
 ;;;;
 ;;;; Positions are in the parent's space; the root's parent is the output, so a
 ;;;; root child's position is output-local, which is the space the renderer and
@@ -34,7 +42,6 @@
 ;;;; Deliberately *not* here yet: layers (layer-shell arrives with the shell that
 ;;;; needs them, phase 6), fractional scaling (wp-fractional-scale, phase 5), and
 ;;;; the effects passes (phase 7).
-
 (in-package #:cl-user)
 
 (in-package #:cf.scene)
@@ -96,14 +103,33 @@ software cursor, because a cursor is composited last and must not be a client
 surface (a client may set a cursor *surface*, which is a different object --
 phase 5)."))
 
+(defclass text-node (scene-node)
+  ((text :initarg :text :initform "" :accessor text-node-text)
+   (colour :initarg :colour :initform #xFFFFFFFF :accessor text-node-colour)
+   ;; One raster, kept until the text, the colour or the scale changes.  A
+   ;; switcher draws the same titles for as long as it is open; a raster per
+   ;; frame per row is a bitmap allocation per frame per row
+   ;; (docs/memory-and-rendering.md §11).
+   (cache-key :initform nil :accessor text-node-cache-key)
+   (cache :initform nil :accessor text-node-cache))
+  (:documentation
+   "A string in the built-in 5x7 font, measured in layout pixels and drawn at the
+output's scale (D51).
+
+Measured, not sized by the caller: NODE-WIDTH is the font's own answer, so a
+layout that places a title places it where its pixels end.  The colour is
+premultiplied 0xAARRGGBB like a rectangle's, and an empty string has no size and
+draws nothing -- which is what lets a row with no title still have a row."))
+
 ;;; ---------------------------------------------------------------------------
 ;;; DEFCLASS defines no type predicates (that is DEFSTRUCT), and the walk below
 ;;; reads better with names than with TYPEP forms in every branch.
-(declaim (inline tree-node-p buffer-node-p rect-node-p image-node-p))
+(declaim (inline tree-node-p buffer-node-p rect-node-p image-node-p text-node-p))
 (defun tree-node-p (node) (typep node 'tree-node))
 (defun buffer-node-p (node) (typep node 'buffer-node))
 (defun rect-node-p (node) (typep node 'rect-node))
 (defun image-node-p (node) (typep node 'image-node))
+(defun text-node-p (node) (typep node 'text-node))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Constructors
@@ -120,6 +146,27 @@ phase 5)."))
 (defun make-image-node (octets width height)
   "A node drawing premultiplied ARGB8888 OCTETS, WIDTH x HEIGHT pixels."
   (make-instance 'image-node :octets octets :width width :height height))
+
+(defun make-text-node (text &key (colour #xFFFFFFFF))
+  "A node drawing TEXT in the built-in font, in premultiplied ARGB8888 COLOUR."
+  (make-instance 'text-node :text text :colour colour))
+
+(defun text-node-raster (node &optional (scale 1))
+  "NODE's text as premultiplied ARGB8888 at SCALE; three values.
+
+(values OCTETS WIDTH HEIGHT), WIDTH and HEIGHT in device pixels, and WIDTH zero
+for empty text.  Cached on the text, the colour and the scale, so a frame that
+draws the same title twice allocates nothing for it (D51)."
+  (let* ((scale (max 1 (round scale)))
+         (key (list (text-node-text node) (text-node-colour node) scale)))
+    (unless (equal key (text-node-cache-key node))
+      (multiple-value-bind (octets width height)
+          (font:rasterize-text (text-node-text node) (text-node-colour node) scale)
+        (setf (text-node-cache node) (list octets width height)
+              (text-node-cache-key node) key)))
+    (values (first (text-node-cache node))
+            (second (text-node-cache node))
+            (third (text-node-cache node)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Layout size: what a surface occupies
@@ -167,6 +214,14 @@ covering a pixel too many is the failure a person does not see."
 (defmethod node-height ((node scene-node))
   0)
 
+;; A text node is laid out in layout pixels whatever scale it is drawn at, so a
+;; switcher's arithmetic is the same at scale 1 and scale 2 (D49).
+(defmethod node-width ((node text-node))
+  (font:text-width (text-node-text node)))
+
+(defmethod node-height ((node text-node))
+  (if (plusp (font:text-width (text-node-text node))) (font:text-height) 0))
+
 ;;; ---------------------------------------------------------------------------
 ;;; The scene
 ;;; ---------------------------------------------------------------------------
@@ -175,6 +230,13 @@ covering a pixel too many is the failure a person does not see."
   ((width :initarg :width :accessor scene-width)
    (height :initarg :height :accessor scene-height)
    (root :initarg :root :reader scene-root)
+   ;; What the compositor draws *over* the desktop without arranging it: the
+   ;; Alt+Tab switcher today (D51).  A second root, drawn after the tree and
+   ;; before the cursor, and deliberately not part of the tree: an overlay is not
+   ;; a window, so it must not be hit-tested, raised, cycled or clamped, and the
+   ;; surest way to guarantee that is not to let it be found (D31's rule for the
+   ;; cursor, applied to a second thing).
+   (overlay :initarg :overlay :reader scene-overlay)
    ;; Drawn after everything else, at the pointer's position.  It is a node so
    ;; that it has a position and a drawing rule like every other node, but it is
    ;; deliberately *not* a child of the root: it must never be hit-tested, or it
@@ -201,7 +263,7 @@ covering a pixel too many is the failure a person does not see."
    ;; frame (docs/memory-and-rendering.md §11).
    (regions :initform nil :accessor scene-regions))
   (:documentation
-   "One output's tree plus its cursor.
+   "One output's tree, plus its overlay and its cursor.
 
 The output size is here because the scene is the thing that knows what fits;
 SCALE is the device pixels per layout coordinate; the compositor still owns the
@@ -210,12 +272,13 @@ target, the background fill and the frame clock."))
 (defun make-scene (width height &key (cursor-image (make-cursor-image)) (scale 1))
   "A scene for a WIDTH x HEIGHT output at SCALE device pixels per coordinate."
   (let* ((root (make-instance 'tree-node))
+         (overlay (make-instance 'tree-node))
          (cursor (make-instance 'image-node
                                 :octets cursor-image
                                 :width +cursor-width+
                                 :height +cursor-height+)))
     (make-instance 'scene :width width :height height :scale scale
-                          :root root :cursor cursor)))
+                          :root root :overlay overlay :cursor cursor)))
 
 (defun scene-region (scene index)
   "Scratch region number INDEX for SCENE, created on first use and reused after.
@@ -266,6 +329,34 @@ still what a client that commits again is asking for: its window came forward."
 (defun node-position (node)
   "NODE's position in its parent's space, as two values."
   (values (node-x node) (node-y node)))
+
+(defun scene-add-overlay-node (scene node &key (x 0) (y 0))
+  "Put NODE in SCENE's overlay at (X, Y), above every window and below the cursor.
+
+The overlay is how a compositor draws something that is not part of the desktop --
+the Alt+Tab switcher's panel and titles (D51).  Note what it is not: a child of
+SCENE-ROOT.  Nothing that hit-tests, cycles, raises or re-clamps walks the
+overlay, so an overlay node cannot be clicked, focused or moved by accident."
+  (let ((overlay (scene-overlay scene)))
+    (setf (node-parent node) overlay
+          (node-x node) x
+          (node-y node) y)
+    ;; Appending is "on top", as in SCENE-ADD-NODE.
+    (setf (node-children overlay)
+          (append (node-children overlay) (list node))))
+  node)
+
+(defun scene-clear-overlay (scene)
+  "Take everything out of SCENE's overlay; returns how many nodes there were.
+
+Idempotent, and the one call a compositor makes when its overlay goes away: the
+next frame's draw list no longer contains those nodes, so the damage diff repaints
+what they were covering."
+  (let ((overlay (scene-overlay scene)))
+    (prog1 (length (node-children overlay))
+      (dolist (child (node-children overlay))
+        (setf (node-parent child) nil))
+      (setf (node-children overlay) nil))))
 
 (defun set-node-position (node x y)
   "Move NODE; returns it."
@@ -566,25 +657,43 @@ some other size (nearest-neighbour, so it stays an arrow)."
                                 :source-width (node-width node)
                                 :source-height (node-height node)
                                 :cursor-p nil)
-               items))))
+               items))
+        ((text-node-p node)
+         ;; Rasterised at the output's scale and drawn 1:1: a glyph cell is
+         ;; SCALE x SCALE device pixels, so text is crisp at scale 2 rather than
+         ;; an upscaled 5x7 picture (D51).  Empty text has no item at all.
+         (multiple-value-bind (octets width height) (text-node-raster node scale)
+           (when (and (plusp width) (plusp height))
+             (push (%make-draw-item :node node
+                                    :kind :image
+                                    :x (scale-coordinate x scale)
+                                    :y (scale-coordinate y scale)
+                                    :width width :height height
+                                    :octets octets
+                                    :source-width width
+                                    :source-height height
+                                    :cursor-p nil)
+                   items))))))
     items))
 
 (defun scene-draw-list (scene &key (scale nil))
   "Everything the scene would draw this frame, back to front, in device pixels.
 
-The cursor comes last, after everything in the tree, and it is the only item that
-is not in the tree: a pointer is above every window and must never be hit-tested
-(D31).  The list is what the damage diff and the draw both read, so they cannot
-disagree about what a frame contains (D48)."
+Three lists in one order, and the order is the whole point: the tree (the
+desktop), then the overlay (what is drawn over it, D51), then the cursor.  The
+cursor and the overlay are the two things outside the tree, and neither is ever
+hit-tested (D31).  This one list is what the damage diff and the draw both read,
+so they cannot disagree about what a frame contains (D48)."
   (let* ((scale (or scale (scene-scale scene)))
          ;; SETF, not a bare call: PUSH extends a *local* head, so the returned
          ;; list is the only one that has the tree's items in it (the same trap
          ;; RENDER-NODE documented before this list existed).
          (items (nreverse (collect-draw-items (scene-root scene) 0 0 scale nil)))
+         (overlay (nreverse (collect-draw-items (scene-overlay scene) 0 0 scale nil)))
          (cursor (make-cursor-item scene scale)))
     ;; Appended, not pushed: the cursor is drawn *after* everything in the tree,
     ;; and a pointer that is drawn under a window is a pointer nobody can see.
-    (if cursor (append items (list cursor)) items)))
+    (append items overlay (if cursor (list cursor) nil))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Damage: what changed since the last frame

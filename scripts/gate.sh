@@ -96,6 +96,14 @@
 #      raising it, and a closed window handing the keyboard to the window that was
 #      focused before it while leaving the stack
 #
+#  20. the visible switcher: Alt+Tab opened over three real clients, the panel, the
+#      outline and the selection bar read back at the coordinates the layout gives,
+#      each row's text measured to the width of that client's own title at scale 2,
+#      Tab damaging two rows rather than the output, the release focusing and raising
+#      the row that was showing, the frame afterwards byte-identical to a full
+#      repaint, Escape and a click cancelling without moving the focus, and an
+#      overlay that is never hit-tested
+#
 #  15. our compositor runs as a client of another compositor, in one image and two
 #      sockets: the parent sees a mapped, titled, activated xdg_toplevel; the
 #      parent's pixels equal the nested compositor's own target; a pointer motion
@@ -309,6 +317,15 @@ else
   fail 'rendering' 'a scaled, transformed or incrementally painted frame was wrong' "$log_dir/render.log"
 fi
 
+# 20. The visible switcher ------------------------------------------------------
+printf '\nphase 3i gate: the visible switcher\n\n'
+
+if gb "$log_dir/switcher.log" "$repo_root/scripts/switcher-gate.sh"; then
+  pass 'switcher' "$(grep -a '^switcher-gate: ' "$log_dir/switcher.log" | tail -n 1 | sed 's/^switcher-gate: //')"
+else
+  fail 'switcher' 'the overlay was not drawn, walked, committed or cleaned up' "$log_dir/switcher.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -328,7 +345,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups and the focus stack)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack and the switcher)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

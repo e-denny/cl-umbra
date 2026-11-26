@@ -393,11 +393,19 @@ output's border and the opposite edge anchored, and when the output shrinks (a n
 following its parent) every window is re-clamped inside it. Gate clause 14 drives a real client's
 resize into the corner; clause 16's nested run shrinks the output under two live windows.
 
-Not in these slices: a visible Alt+Tab switcher, edge-anchored resizing, `reposition` and reactive
-positioning (v3, so the global stays v1), layer-shell, client cursor surfaces (a client's
-`set_cursor` surface is now kept out of the scene rather than drawn as a window), and a nested
-window on a *foreign* compositor (which needs a window on a live session, and therefore its own
-authorization).
+The visible switcher landed as its own slice (3i, D51): the scene grew an *overlay* root -- above
+every window, below the cursor, found by no hit test -- and a `text-node` in a built-in 5x7 font,
+and `cf.switcher` lists the focus stack from its tail, walks it with Tab, and decides nothing until
+Alt comes up. One tap and release still lands on the window the cycle always chose, so the overlay
+changed what you see and not what the key means. Gate clause 20 drives three titled clients through
+it and reads the panel, the bar and every title back out of the frame
+(`scripts/switcher-gate.sh`).
+
+Not in these slices: edge-anchored resizing, `reposition` and reactive positioning (v3, so the
+global stays v1), layer-shell, client cursor surfaces (a client's `set_cursor` surface is now kept
+out of the scene rather than drawn as a window), a themed or fractional-scaled cursor (phase 5),
+and a nested window on a *foreign* compositor (which needs a window on a live session, and
+therefore its own authorization).
 
 ### Phase 4 — Real hardware: DRM dumb buffers + libinput (6-8 weeks)
 

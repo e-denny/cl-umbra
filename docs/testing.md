@@ -27,6 +27,9 @@ class of bug the others cannot.
 Installed for testing only (never linked by our binaries):
 
 - `weston` + `weston-simple-shm` — the canonical shm client.
+- `weston-eventdemo` — a client that prints the keys and pointer events it receives, and takes
+  `--title=`; the seat, focus and switcher gates name it (a switcher row is only identifiable
+  if the client gave its window a title).
 - `wayland-utils` (`wayland-info`) — global dump and protocol inventory.
 - `kitty`, `foot` — real terminal clients.
 - A GTK4 app and a Qt app — toolkit conformance.
@@ -54,11 +57,11 @@ ASDF. Assertions are Rove's own: `(ok FORM "description")` for a predicate, and
 `(ok (signals FORM 'condition-type))` for an expected error; a failure prints the test name,
 the assertion, its source location and the arguments' values.
 
-The scripts go through `wayland.test.runner`, which names the twelve suites instead of letting
+The scripts go through `wayland.test.runner`, which names the thirteen suites instead of letting
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 282 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 312 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -406,7 +409,50 @@ Phase 2b (rendering) adds the nineteenth:
     missing frame was never recorded, and a history that keeps two frames and reuses two
     regions).
 
-All nineteen clauses pass. Two details worth knowing: the protocol clause
+The visible switcher (phase 3i) adds the twentieth:
+
+20. **Alt+Tab, drawn** (`scripts/switcher-gate.sh`, `scripts/switcher-gate.lisp`). Three
+    independent `weston-eventdemo` clients -- separate processes, separate connections, their own
+    libwayland -- are started with `--title=ALPHA`, `--title=BETA` and `--title=GAMMA` against
+    *cl-tinywl* at scale 2, so the gate drives the port's own keymap rather than a function. The
+    stack after three maps reads (GAMMA BETA ALPHA). Alt+Tab opens the overlay and the frame that
+    holds it repaints the whole output (the draw list's order changed); the panel's colour is
+    read three pixels inside its top-left corner and the outline's one pixel outside it, both at
+    the coordinates `cf.switcher:switcher-layout` gives; the selection bar is found on row 0 and
+    the panel colour on rows 1 and 2, at a point inside the panel's right edge. Each row's text is
+    measured inside the panel only -- so a window that happens to contain the text colour cannot
+    vote -- and must end on the last device pixel of the last glyph: 58, 46 and 58 device pixels
+    for ALPHA, BETA and GAMMA, ending at 827, 815 and 827. That is a width only that title
+    produces, in the row only the focus stack puts it in, at the scale the output advertised. A
+    Tab then moves the bar and the frame damages `(754 552 90 64)` -- two rows, not the output --
+    and two more steps wrap back to the first row. Releasing Alt closes the overlay, leaves no
+    overlay nodes, focuses and raises ALPHA as the frontmost scene child, rotates the history to
+    (ALPHA GAMMA BETA) exactly as one tap of the cycle always did, and the frame it leaves is
+    **byte-identical to a full repaint** (`cf:frame-octets` on both sides), so nothing stale hid
+    under the overlay. Escape cancels and is consumed (Alt is down, and Alt+Escape quits) without
+    moving the keyboard; a pointer press cancels the overlay and is then delivered as the click
+    it was; a point inside the panel hit-tests to the window under it and never to the overlay;
+    Alt+Shift+Tab opens on the last row -- the window that has the keys -- and committing that
+    row leaves the focus where it was; and all three clients are still connected at the end. A
+    final section puts the overlay one compositor deeper: a nested tinywl at scale 2 inside a
+    scale-1 headless parent, two clients inside it, Alt+Tab injected into the *inner* compositor --
+    the panel is in the inner frame and in the parent's own frame at the coordinate the scale
+    mapping implies, and the release closes it inside and leaves no overlay nodes.
+    Thirty unit tests (`tests/unit/switcher.lisp`, suite 13) pin what a gate cannot isolate: the
+    font's 95 glyphs and their shape (a malformed glyph is a load-time error), text width as
+    `6n-1`, a raster's premultiplication, its 2x2 blocks at scale 2 and the gap column between
+    glyphs, the fallback glyph, `truncate-text`'s ellipsis, a text node's layout size against its
+    device raster, the overlay between the windows and the cursor, the overlay never hit-tested
+    and never adopted by the tree, `window-title`'s title → app-id → nothing order, the listing
+    order, walking without touching the stack or the stacking order, wrapping both ways, the bar
+    following the selection, a 60-character title cut rather than widening the panel, a nameless
+    client getting a stand-in row, one window opening nothing, Alt+Tab through the real key path
+    (press and release consumed, `consumed-keys` left empty, focus untouched), a modifier press
+    that cancels nothing, the release that commits and raises, Escape, a click, idempotent
+    cancel/commit, a window that vanished while the overlay was up, and a compositor with no
+    switcher binding still cycling the stack as D45 says.
+
+All twenty clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs

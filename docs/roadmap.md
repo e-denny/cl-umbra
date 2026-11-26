@@ -230,8 +230,10 @@ compositor is open below.
 - [x] focus stack (phase 3g, D45): `cf:compositor-focus-stack` is history in
       most-recently-focused order, Alt+Tab rotates it (and raises), a closing window hands the
       keys to the next in it, and popups push the window they belong to rather than entering
-- [ ] a *visible* switcher (Alt+Tab overlay): needs a scene node and a surface, phase 6;
-      `xdg_activation`-style "demands attention" is also open
+- [x] a *visible* switcher (phase 3i, D51): the scene's overlay root plus a text node in a
+      built-in 5x7 font (`cf.font`), `cf.switcher` listing the focus stack from its tail, Tab
+      walking it, and the release making the one focus-and-raise call the cycle makes
+- [ ] `xdg_activation`-style "demands attention", and a thumbnail in a switcher row
 - [x] clamping: a resize stops with the dragged edge at the output's border and the opposite
       edge anchored, and every window is re-clamped when the output shrinks (D46)
 - [ ] edge-anchored resizing: still open -- the node is placed from the client's answer on every

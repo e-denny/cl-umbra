@@ -392,6 +392,12 @@ The renderer and the input path are the two places where a GC pause is visible. 
   scene's clip arithmetic (a pooled set of scratch regions, one index per draw item); what still
   conses is the draw list itself, one item per node per frame, which is the honest remaining cost
   until there is a frame-budget test to hold it to (§10's first rung).
+- **A text node's raster is cached, not rebuilt.** The one thing that would allocate a bitmap per
+  frame is text: `text-node-raster` keeps the octets and regenerates them only when the text, the
+  colour or the scale changes, so a switcher redrawing its titles every frame allocates nothing
+  for them (D51). Rasterising is at the *output's* scale, one font cell per scale-by-scale block,
+  so the picture is never resampled either — the difference between 10x14 device pixels per glyph
+  and a 5x7 glyph stretched.
 - Hot-path functions are compiled with `(optimize (speed 3) (safety 1))` and are periodically
   checked for new consing with `sb-ext:get-bytes-consed` around a scripted interaction.
 - Benchmarks in `tests/perf/` assert: bytes consed per frame, per pointer motion, and per

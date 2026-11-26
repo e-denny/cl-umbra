@@ -354,8 +354,8 @@ and exits by itself."
     count))
 
 (defun install-keybindings (tinywl)
-  "tinywl's bindings: Alt+Esc quits, Alt+Tab cycles the focus stack, Alt+F1 cycles
-the windows, Alt+Shift+Return starts a terminal.
+  "tinywl's bindings: Alt+Esc quits, Alt+Tab opens the switcher, Alt+F1 cycles the
+windows, Alt+Shift+Return starts a terminal.
 
 The framework installs Alt+Esc, Alt+Tab and Alt+F1 on a headless compositor as its
 defaults, and this replaces the table rather than adding to it -- deliberately.  A
@@ -364,9 +364,13 @@ binding it did not choose is one whose behaviour cannot be read off its own sour
 
 Alt+Tab is an addition to tinywl.c, not a port of it: tinywl.c has no focus stack at
 all (it raises the window it is told to focus and forgets the rest), and the stack is
-the framework's (D45).  Alt+F1 stays tinywl's own rule -- the bottom window *in draw
-order* comes to the top -- because a port that quietly replaced it would make the
-parity script meaningless."
+the framework's (D45).  The binding opens the *visible* switcher (D51) rather than
+calling FOCUS-STACK-CYCLE directly: one tap and release still lands on the same
+window, because the overlay's first row is what the cycle would have chosen -- what
+changes is that a person can see it.  Alt+Shift+Tab opens it one row back, on the
+window that has the keys now.  Alt+F1 stays tinywl's own rule -- the bottom window
+*in draw order* comes to the top -- because a port that quietly replaced it would
+make the parity script meaningless."
   (setf (cf:compositor-keybindings tinywl) (kb:make-keybinding-table))
   (cf:add-keybinding tinywl "Escape"
                      (lambda ()
@@ -375,9 +379,13 @@ parity script meaningless."
                      :modifiers input:+modifier-mod1+
                      :description "quit")
   (cf:add-keybinding tinywl "Tab"
-                     (lambda () (cf:focus-stack-cycle tinywl))
+                     (lambda () (cf:start-switcher tinywl))
                      :modifiers input:+modifier-mod1+
-                     :description "cycle focus")
+                     :description "switcher")
+  (cf:add-keybinding tinywl "Tab"
+                     (lambda () (cf:start-switcher tinywl :step -1))
+                     :modifiers (logior input:+modifier-mod1+ input:+modifier-shift+)
+                     :description "switcher backwards")
   (cf:add-keybinding tinywl "F1"
                      (lambda () (cf:cycle-views tinywl))
                      :modifiers input:+modifier-mod1+

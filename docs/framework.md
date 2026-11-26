@@ -29,6 +29,8 @@ decomposition is the part worth copying.
 | `cf.render.damage` | `wlr_damage_ring` | 2 | damage regions, buffer age — landed inside `cf.scene` and `cf.backend.*` (D48, D50) rather than as a module of its own: a region wrapper in the renderer, the diff in the scene, the buffer ring in the backend |
 | `cf.render.allocator`, `cf.render.swapchain`, `cf.render.dmabuf` | same names | 5 | GPU buffer lifecycle |
 | `cf.scene` | `wlr_scene` | 2, 5, 7 | retained node tree, output layers, hit testing, damage |
+| `cf.font` | (none) | 3i | a 5x7 bitmap font and its rasteriser: wlroots draws no text, so every compositor brings its own (D51) |
+| `cf.switcher` | (none) | 3i | the visible Alt+Tab overlay over the focus stack (D51) |
 | `cf.output` | `wlr_output` | 2 | mode/scale/transform state, commit, frame scheduling |
 | `cf.util.output-layout` | `wlr_output_layout` | 2 | arrangement in layout coordinates |
 | `cf.types.compositor`, `.surface`, `.region` | `wlr_compositor`, `wlr_surface` | 2 | core protocol objects + surface state machine |
@@ -176,8 +178,8 @@ better than magic, so the default is a flag, and autocreate is a convenience wra
 
 *Phase 3c implemented v0, in `cl-compositor-framework/src/scene.lisp` (D31): nodes, positions,
 stacking, hit testing and the cursor. Phase 2b added damage, clipping, opaque culling and the
-scale between layout coordinates and device pixels (D48, D49). Layers and per-output layout are
-still ahead.*
+scale between layout coordinates and device pixels (D48, D49). The Alt+Tab switcher added the
+overlay root and a text node (`cf.font`, D51). Layers and per-output layout are still ahead.*
 
 *One frame is one list.* `scene-draw-list` turns the tree into draw items in device pixels, back
 to front, with the cursor last; `scene-render-items` draws them, each through a clip that is its
@@ -191,13 +193,16 @@ scene
 ├── root (tree-node)
 │   ├── buffer-node   ← a mapped toplevel, placed by the compositor
 │   └── rect-node     ← background, border, letterboxing
+├── overlay (tree-node)        ← the switcher: above every window, never hit-tested
+│   ├── rect-node              ← the panel, the outline, the selection bar
+│   └── text-node              ← one row per window, in the built-in font
 └── cursor (image-node)   ← drawn after the root, never hit-tested
 ```
 
-Node types: `tree` (a group; the root is one), `buffer` (a mapped surface, sized by its
-buffer), `rect` (solid premultiplied colour) and `image` (pixels we own — today the cursor),
-with `offscreen` arriving with phase 7's effects. Every node has a position in its parent's
-space, a visibility flag and a parent.
+Node types: `tree` (a group; the root and the overlay are two), `buffer` (a mapped surface, sized
+by its buffer), `rect` (solid premultiplied colour), `image` (pixels we own — today the cursor)
+and `text` (a string in the 5x7 font, D51), with `offscreen` arriving with phase 7's effects.
+Every node has a position in its parent's space, a visibility flag and a parent.
 
 - **Coordinates**: a node's position is in its parent's space; a root child's is therefore
   output-local, which is the space every policy, the renderer and hit testing use. That space is
@@ -260,9 +265,25 @@ space, a visibility flag and a parent.
 - **Damage, clipping and culling** are per frame and per item: the diff of two draw lists plus
   the damage clients reported, painted through a pixman region; an item that is opaque hides
   what is under it; a translucent one hides nothing (D48).
+- **The overlay is a second root** (D51): `scene-overlay` is drawn after the tree and before the
+  cursor, and `scene-add-overlay-node` puts a node in it. Nothing that hit-tests, raises, cycles
+  or clamps walks it, so an overlay node cannot be clicked, focused or moved by accident — the
+  rule the cursor already followed (D31), applied to the second thing that must be visible and
+  untouchable. It is not a layer: a layer is layer-shell's namespace owned by another client
+  (phase 6); an overlay has no owner and no protocol. Opening or closing one changes the draw
+  list's *order*, which the damage diff rightly reads as a full repaint; moving one selection
+  bar damages two rectangles.
+- **Text is a node kind, and the font is a table** (D51): `cf.font` holds printable ASCII as 95
+  glyphs of seven rows of five, validated at load; `text-node` measures itself in layout pixels
+  (five cells per glyph plus one of gap) and is rasterised at the output's scale, so a glyph at
+  scale 2 is 10x14 device pixels *drawn* rather than a small picture upscaled. The raster is
+  cached on the text, the colour and the scale, so a frame that redraws the same title allocates
+  nothing for it. No shaping, no kerning, no BiDi, one size, and a character outside ASCII draws
+  as `?`; a real font arrives when something needs one.
 
-`cl-tinywl` uses three node types. `cl-umbra` uses all of them plus per-workspace subtrees and
-animated transforms (phase 7).
+`cl-tinywl` uses four node types (a buffer, the rectangles of the switcher's panel and bar, the
+switcher's titles and the cursor's image). `cl-umbra` uses all of them plus per-workspace
+subtrees and animated transforms (phase 7).
 
 ## 5. Seat, focus and grabs
 
@@ -318,16 +339,30 @@ focus stack, cursor shapes and touch are still ahead.*
   window that is left — "the window that mapped last" cannot answer that.
 - **Alt+Tab rotates the stack** (D45): `cf:focus-stack-cycle` takes the least recently focused
   window, focuses it, rotates it to the front and raises it, so a full cycle visits every window
-  once and two windows toggle. A hold-Tab-release switcher needs an overlay to show the selection
-  (a scene node, phase 6); the same list will serve it. Focus and raise stay separate calls: the
-  framework's click-to-focus does not raise, because a framework cannot know whether its
-  compositor wants click-to-raise.
+  once and two windows toggle. Focus and raise stay separate calls: the framework's
+  click-to-focus does not raise, because a framework cannot know whether its compositor wants
+  click-to-raise.
+- **The switcher is that cycle, drawn** (D51, `cf.switcher`). `cf:start-switcher` opens an
+  overlay listing the focus stack from its *tail* -- so row 0 is what one tap of the cycle would
+  choose -- and `cf:advance-switcher` walks it, wrapping; releasing Alt calls the same
+  focus-and-raise the cycle calls, and `cf:cancel-switcher` takes the overlay down without
+  touching anything. Nothing is decided while it is open: not the stack, not the keyboard, not
+  the stacking order. A window that closed while it was up is not chosen. The modal part is two
+  generic functions with no-op defaults -- `switcher-key`, asked before grabs and bindings, and
+  `switcher-pointer-press` -- so a compositor with no switcher pays one dispatch per key. The
+  *rules* are the key list below: Tab walks (Shift walks backwards), a modifier press cancels
+  nothing, Escape cancels and is consumed (Alt is down and Alt+Escape quits), any other press
+  cancels and is not consumed, and the release that commits is not consumed either -- a client
+  that saw Alt go down must see it come up.
 - **Keybindings** come before the client (D33): the key path is grab, then table, then focused
   window. `(add-keybinding compositor key function :modifiers mask)` — exact mask match, so
   Alt+Escape does not fire with Alt+Shift held. A consumed press never reaches the client and its
   release is swallowed; an unbound modifier is still forwarded, which is a v0 simplification
-  (there is no device to suppress it from). The defaults are Alt+Esc (stop the loop), Alt+Tab
-  (cycle the focus stack) and Alt+F1 (the bottom window in draw order to the top, and focus it).
+  (there is no device to suppress it from). The framework's defaults are Alt+Esc (stop the loop),
+  Alt+Tab (cycle the focus stack) and Alt+F1 (the bottom window in draw order to the top, and
+  focus it); the default Alt+Tab deliberately keeps the invisible cycle, because an overlay is a
+  compositor's statement about its own screen (D51). cl-tinywl binds five: Alt+Esc, Alt+Tab
+  (`start-switcher`), Alt+Shift+Tab (`start-switcher :step -1`), Alt+F1 and Alt+Shift+Return.
 - **Capabilities** are recomputed from actual devices and re-advertised on change. Today the
   headless backend advertises `pointer|keyboard`; touch is not advertised and `get_touch` is
   refused with `missing_capability`, which is what the protocol asks for.
@@ -493,7 +528,16 @@ Keys are a table, not a method:
 ```lisp
 (cf:add-keybinding tinywl "Escape" (lambda () (quit tinywl))
                    :modifiers cf.input:+modifier-mod1+ :description "quit")
+
+;; The visible switcher is one binding and no code: the overlay, the keys held down
+;; and the decision on release are the framework's (D51).
+(cf:add-keybinding tinywl "Tab" (lambda () (cf:start-switcher tinywl))
+                   :modifiers cf.input:+modifier-mod1+ :description "switcher")
 ```
+
+A compositor that wants a switcher of its own shape calls `cf:advance-switcher` from its own
+policy instead of binding `start-switcher`: the state machine does not care who moves the
+selection, and the overlay is drawn from the state, not from the keys.
 
 And a session — a display of its own, in memory or as a window in another compositor:
 

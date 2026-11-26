@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render tinywl soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher tinywl soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render tinywl
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher tinywl
 
 test:
 	./scripts/run-tests.sh
@@ -68,6 +68,11 @@ popup:
 # Three real windows: Alt+Tab in focus order, a click, and a window closing.
 focus:
 	./scripts/focus-gate.sh
+
+# Three real windows and the visible Alt+Tab overlay: pixels, damage, Escape, a click,
+# and the frame after the commit compared with a full repaint.
+switcher:
+	./scripts/switcher-gate.sh
 
 # Run tinywl itself (a manual test; --nested puts it in the current session).
 tinywl-run:

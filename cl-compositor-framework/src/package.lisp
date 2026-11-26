@@ -84,9 +84,34 @@ already speak in keycodes and masks, so that change stays inside this package.")
    #:+modifier-mod1+
    #:+modifier-mod4+))
 
+(defpackage #:cf.font
+  (:use #:cl)
+  (:documentation
+   "A 5x7 bitmap font and its rasteriser (docs/framework.md §4, D51).
+
+The only text the framework draws, and the smallest thing that can: 95 glyphs,
+one size, printable ASCII, no library.  A raster is premultiplied ARGB8888 with
+one font cell per SCALE x SCALE device pixels, so text is drawn bigger at scale 2
+rather than upscaled.")
+  (:export
+   #:+glyph-width+
+   #:+glyph-height+
+   #:+glyph-advance+
+   #:+first-char-code+
+   #:+last-char-code+
+   #:+fallback-character+
+   #:glyph-count
+   #:glyph-cell-p
+   #:glyph-row-mask
+   #:text-width
+   #:text-height
+   #:truncate-text
+   #:rasterize-text))
+
 (defpackage #:cf.scene
   (:use #:cl)
-  (:local-nicknames (#:render #:cf.render.pixman))
+  (:local-nicknames (#:render #:cf.render.pixman)
+                    (#:font #:cf.font))
   (:import-from #:wayland.server
                 #:surface-current-buffer
                 #:surface-current-x
@@ -112,6 +137,9 @@ nothing about seats, toplevels or focus.")
    #:scene-width
    #:scene-height
    #:scene-root
+   #:scene-overlay
+   #:scene-add-overlay-node
+   #:scene-clear-overlay
    #:scene-cursor
    #:scene-cursor-visible-p
    #:scene-cursor-surface
@@ -158,6 +186,11 @@ nothing about seats, toplevels or focus.")
    #:image-node
    #:make-image-node
    #:image-node-octets
+   #:text-node
+   #:make-text-node
+   #:text-node-text
+   #:text-node-colour
+   #:text-node-raster
    ;; the built-in cursor
    #:+cursor-width+
    #:+cursor-height+
@@ -317,6 +350,11 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:compositor-focus-stack
    #:compositor-keybindings
    #:compositor-consumed-keys
+   #:compositor-switcher
+   #:window-title
+   #:switcher-key
+   #:switcher-pointer-press
+   #:focusable-window-p
    #:start-grab
    #:end-active-grab
    #:add-keybinding
@@ -386,6 +424,41 @@ owns, and the presentation step is attach + damage + commit.")
    #:nested-key-count
    #:nested-parent-keymap-size))
 
+(defpackage #:cf.switcher
+  (:use #:cl)
+  (:local-nicknames (#:scene #:cf.scene)
+                    (#:font #:cf.font)
+                    (#:headless #:cf.backend.headless)
+                    (#:input #:cf.input)
+                    (#:srv #:wayland.server))
+  (:documentation
+   "A visible Alt+Tab switcher: an overlay listing the focus stack, one row
+highlighted, driven by keys held down (docs/framework.md §5, D51).
+
+The switcher is a *view* of the focus stack and a *decision made at the end*: it
+touches neither the stack nor the stacking order while it is open, and then makes
+one call -- focus and raise the row it was showing.  It owns no policy beyond
+that, so a compositor chooses it by binding START-SWITCHER.")
+  (:export
+   #:switcher
+   #:start-switcher
+   #:advance-switcher
+   #:commit-switcher
+   #:cancel-switcher
+   #:switcher-open-p
+   #:switcher-entries
+   #:switcher-index
+   #:switcher-selected
+   #:switcher-titles
+   #:switcher-layout
+   #:switcher-highlight
+   #:switcher-modifier
+   #:+switcher-panel-colour+
+   #:+switcher-border-colour+
+   #:+switcher-highlight-colour+
+   #:+switcher-text-colour+
+   #:+switcher-fallback-title+))
+
 (defpackage #:cf
   (:nicknames #:cl-compositor-framework)
   (:import-from #:cf.backend.headless
@@ -435,6 +508,11 @@ owns, and the presentation step is attach + damage + commit.")
                 #:compositor-focus-stack
                 #:compositor-keybindings
                 #:compositor-consumed-keys
+                #:compositor-switcher
+                #:window-title
+                #:focusable-window-p
+                #:switcher-key
+                #:switcher-pointer-press
                 #:start-grab
                 #:end-active-grab
                 #:add-keybinding
@@ -479,6 +557,20 @@ owns, and the presentation step is attach + damage + commit.")
                 #:pixman-format-for-shm)
   (:import-from #:cf.backend.headless.png
                 #:write-png)
+  (:import-from #:cf.font
+                #:rasterize-text
+                #:text-width
+                #:text-height
+                #:truncate-text)
+  (:import-from #:cf.switcher
+                #:start-switcher
+                #:advance-switcher
+                #:commit-switcher
+                #:cancel-switcher
+                #:switcher-open-p
+                #:switcher-entries
+                #:switcher-index
+                #:switcher-selected)
   (:documentation
    "The compositor framework: everything wlroots provides, in Lisp.
 
@@ -552,6 +644,21 @@ docs/framework.md §1 follow.")
    #:compositor-frame-count
    #:write-png
    #:write-frame-png
+   ;; the font and the switcher (D51)
+   #:rasterize-text
+   #:text-width
+   #:text-height
+   #:truncate-text
+   #:window-title
+   #:compositor-switcher
+   #:start-switcher
+   #:advance-switcher
+   #:commit-switcher
+   #:cancel-switcher
+   #:switcher-open-p
+   #:switcher-entries
+   #:switcher-index
+   #:switcher-selected
    ;; the nested backend
    #:start-nested
    #:stop-nested

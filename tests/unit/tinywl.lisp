@@ -279,8 +279,8 @@ connection would make this a gate rather than a test."
   (with-tinywl (tinywl)
     (let* ((table (cf:compositor-keybindings tinywl))
            (bindings (kb:keybinding-table-bindings table)))
-      (ok (= 4 (length bindings)) "exactly four bindings")
-      (ok (equal '("cycle focus" "cycle windows" "quit" "terminal")
+      (ok (= 5 (length bindings)) "exactly five bindings")
+      (ok (equal '("cycle windows" "quit" "switcher" "switcher backwards" "terminal")
                  (sort (mapcar #'kb:keybinding-description bindings) #'string<))
           "with tinywl's descriptions")
       (ok (every #'identity
