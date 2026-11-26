@@ -283,6 +283,10 @@ it. The consequences worth knowing:
   parent.
 - **The parent's frame callback is the clock.** At most one frame is in flight, so a nested
   session cannot outrun the parent, and no timer is needed.
+- **The target is drawn before it is announced.** The parent composites our shm buffer at a
+  moment of its own choosing, so the presenter (attach + damage + commit) runs after
+  `scene:scene-render`, never before it: committing a cleared target announces an empty frame and
+  the window in the parent flickers or stays half-drawn (D38).
 - **Damage is still "everything".** The nested path damages the whole buffer because the
   renderer still repaints the whole target (2b adds real damage to both).
 - **No scale, no transform.** The nested output is 1:1 with the parent surface; buffer

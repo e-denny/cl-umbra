@@ -38,7 +38,13 @@
 ;;;;   7. Alt+Esc asks every client to close (xdg_toplevel.close) and stops the loop,
 ;;;;      and no client ever sees a protocol error;
 ;;;;   8. WAYLAND_DEBUG=1 on B is an ordered, valid event stream: a configure was
-;;;;      acked after it arrived and no error was sent either way.
+;;;;      acked after it arrived and no error was sent either way;
+;;;;   9. the frame the nested presenter commits has already been painted.  Nested
+;;;;      only, because the presenter exists only there: it attaches our target
+;;;;      into the parent, which composites that shared memory whenever it likes.
+;;;;      A presenter that runs before the draw commits the background paint alone,
+;;;;      and the window in the parent is black or half-drawn -- the flicker the
+;;;;      manual test found (D38).
 ;;;;
 ;;;; The nested run's parent is a harness, not the thing under test, so its two
 ;;;; keybindings (Alt+Esc, Alt+F1 -- the framework's defaults) are cleared: a parent
@@ -169,6 +175,18 @@ worth knowing: the nested input path is a real protocol round trip."
 (defun mapped-surfaces (compositor)
   (remove-if-not (lambda (surface) (cf:surface-scene-node surface))
                  (cf:compositor-surfaces compositor)))
+
+(defun lit-pixel-count (compositor)
+  "Sampled pixels of COMPOSITOR's current target that are not the black background.
+
+A target that has been drawn into has some; a target holding only the background
+paint has none.  That is the whole distinction clause 9 needs, in one number:
+"presented before the draw" and "presented after it" cannot be confused."
+  (let ((width (cf:compositor-width compositor))
+        (height (cf:compositor-height compositor)))
+    (loop for y from 0 below height by 4
+          sum (loop for x from 0 below width by 4
+                    count (plusp (logand #x00FFFFFF (cf:frame-pixel compositor x y)))))))
 
 (defun surface-of-process (compositor process)
   "The window PROCESS mapped: the surface whose client has that pid (SO_PEERCRED).
@@ -504,7 +522,37 @@ of lines of protocol."
                     (length (wayland.server:display-clients
                              (cf:compositor-display *inner*))))))
 
-         ;; 9. Alt+Esc asks the clients to close and stops the loop.
+         ;; 9. The frame the presenter commits has already been painted (D38).
+         ;;
+         ;;    Nested only: the presenter is the seam that attaches our target into
+         ;;    the parent, and the parent reads that memory at a moment of its own
+         ;;    choosing -- so "the frame was drawn before it was committed" is not
+         ;;    a detail, it is the difference between a window and a black
+         ;;    rectangle.  Measured by wrapping the presenter, which is exactly how
+         ;;    the bug was found.
+         (when *parent*
+           (let* ((compositor *inner*)
+                  (presenter (cf.backend.headless:compositor-frame-presenter compositor))
+                  (lit '()))
+             (setf (cf.backend.headless:compositor-frame-presenter compositor)
+                   (lambda (inner target)
+                     (declare (ignore target))
+                     (push (lit-pixel-count inner) lit)
+                     (funcall presenter inner target)))
+             (unwind-protect
+                  (progn
+                    ;; The clients have settled, so nothing is dirty: ask for the
+                    ;; frames rather than waiting for a client to produce them.
+                    (dotimes (frame 3)
+                      (cf:request-frame *inner*)
+                      (pump 5 :until (lambda () (>= (length lit) (1+ frame)))))
+                    (check (and (>= (length lit) 3) (every #'plusp lit))
+                           "the frame handed to the presenter was already painted ~S"
+                           (reverse (subseq lit 0 (min 3 (length lit))))))
+               (setf (cf.backend.headless:compositor-frame-presenter compositor)
+                     presenter))))
+
+         ;; 10. Alt+Esc asks the clients to close and stops the loop.
          ;;
          ;; Every client is connected *before* the quit: nothing before this point
          ;; cut one off, which is what makes "no protocol error" mean something.
@@ -531,7 +579,7 @@ of lines of protocol."
                        (append *lines-a* *lines-b*)))
                 "no client saw a protocol error")
 
-         ;; 10. B ran with WAYLAND_DEBUG=1: an ordered, valid event stream.
+         ;; 11. B ran with WAYLAND_DEBUG=1: an ordered, valid event stream.
          ;;
          ;; libwayland writes `-> interface#id.request(args)' for what the client
          ;; sent and a bare `interface#id.event(args)' for what arrived, so "did it

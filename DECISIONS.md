@@ -1301,3 +1301,65 @@ it still cannot do is what a *terminal* needs to be pleasant — clipboard (no d
 `--launch` is the reliable path on a live session. `wl_pointer.enter`/`wl_keyboard.enter` to a
 *new* device while another client is focused is now silent until the focus changes, which is
 correct but worth knowing when reading a trace.
+
+## D38 — A frame is presented after it is drawn, and a presenter is handed pixels, not a promise
+
+**Status:** accepted
+
+**Context.** The second manual test of the delivered tinywl slice reported two symptoms that
+looked unrelated: the nested window flickered severely whenever the pointer moved, and a
+terminal that mapped second was only partly visible — the window above it black below its first
+line, its own body a title bar and one line of prompt. Both are one bug. `render-frame` called
+the backend's presenter — attach, damage, commit, flush — *before* `scene:scene-render` painted
+the scene into the target.
+
+D34.5 already said the presenter is "called after the scene is rendered and before the nested
+clients' frame callbacks fire", and `docs/framework.md` §2 said the same, so this was a
+phase-3e regression against a decision rather than a missing one. The gate could not see it: the
+nested run's parent lives in the same image, so it composites only after we have finished
+drawing, by which time the buffer we committed *has* been painted. A real parent composites
+whenever it likes. A probe made the difference visible in numbers: with one `weston-simple-shm`
+window, every presented frame carried **0** sampled non-background pixels while the drawn target
+held 7384, and a PNG of the parent's composited output taken inside the commit window was black
+apart from the parent's own cursor. After the ordering fix the same probe reads 7384 at commit,
+and the parent's output is the client's frame.
+
+The mechanism is worth stating because it is a property of the seam, not of tinywl: a nested
+target *is* the parent's `wl_shm` mapping. Committing it hands the parent a buffer to read at a
+moment of its own choosing, so pixels written after the commit are pixels the parent may or may
+not see. A motion that produces one frame per event then shows the parent an alternating mix of
+background and half-painted frames — the flicker — and the frame a client stops at (its last one,
+with nothing further dirty) can be the one the parent never sees — the half-drawn window.
+
+**Decision.** The frame order in `render-frame` is fixed and is the whole of this decision:
+
+1. **fill** the target with the background;
+2. **prune** surfaces that are gone or unmapped;
+3. **draw** the scene (`scene:scene-render`);
+4. **present** — the backend's presenter, given a target that already contains the frame it is
+   asked to present;
+5. **release** each drawn surface's buffer and fire its frame callbacks.
+
+Presentation stays before the release loop, not after the callbacks: a client whose buffer is
+back may redraw at once, and D25's rule is that the release happens at presentation. What is
+forbidden is presenting a target that has been cleared but not drawn, because "committed" then
+means nothing about the pixels. A presenter is therefore handed *pixels*, and a backend that
+wants them earlier has the wrong contract.
+
+**Evidence.** Gate clause 16 grew by one check, nested only, because the presenter exists only
+there: it wraps the presenter, asks for three frames, and requires the target to hold
+non-background pixels at every one of them (`lit-pixel-count`). Run against the old order it
+fails with `(0 0 0)`; against the new one it passes. Clause 16 is now 32 checks headless and 39
+nested — 71 in two runs — and the gate is 16/16. 214 tests in 10 suites are unchanged: the
+ordering is a property the gate can observe with a real client and a real parent, and a unit
+test with a stub presenter would only restate the source.
+
+**Consequences.** A nested session's frames are now what the parent shows, so the manual test's
+flicker and its half-drawn window are the same fix. Two things it does not change: v0 still
+repaints the whole target and damages all of it every frame (2b), so a moving pointer produces a
+full-window frame per motion event — correct now, but more work per event than a damaged frame
+would be; and the parent still upscales our 1x buffer on a 2x output, which is the blur D29
+records. The general lesson is recorded here rather than in the code alone: **a shared-memory
+target must be announced only after it is final, and the gate for a cross-process seam has to
+composite on the far side of that seam.** An in-image parent is a test double for the *protocol*,
+not for the *timing*.

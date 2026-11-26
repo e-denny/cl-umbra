@@ -81,6 +81,12 @@ everything except *where the frame goes* and *what presenting it means*:
       (lambda (compositor target) ...))  ; after the draw, before frame callbacks
 ```
 
+The presenter is handed a target that already holds the frame it is presenting: fill, prune,
+draw, present, then release the clients' buffers and fire their callbacks. A nested target is
+the parent's `wl_shm` mapping and the parent reads it when it likes, so presenting before the
+draw commits the background paint and nothing else — a flickering, half-drawn window in the
+parent (D38).
+
 `cf.backend.nested` is a `nested-backend` object that *owns* a headless compositor and sets
 those two slots:
 

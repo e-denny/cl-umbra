@@ -731,7 +731,14 @@ frame when a buffer comes free.
 Frame callbacks fire here, after the draw and the presentation, which is the only
 moment the protocol allows (docs/framework.md §3).  Buffers are released after
 compositing and before the callbacks, for the clients whose surfaces were actually
-drawn (D25)."
+drawn (D25).
+
+The presenter runs after the scene is drawn, never before: it attaches and commits
+the target, and a target can be shared memory another process is compositing from
+(the nested backend's parent).  Committing a target that holds only the background
+paint makes every frame arrive blank, and the parent shows a window that is black
+or half-drawn depending on when it happens to read -- the flicker the manual test
+found (D38)."
   (let* ((preparer (compositor-frame-preparer compositor))
          (target (if preparer
                      (funcall preparer compositor)
@@ -742,17 +749,21 @@ drawn (D25)."
     (let ((scene (compositor-scene compositor)))
       (render:fill-target target (compositor-background compositor))
       (prune-surfaces compositor)
-      (let ((presenter (compositor-frame-presenter compositor)))
-        (when presenter
-          (funcall presenter compositor target)))
-      (dolist (surface (scene:scene-render scene target))
-        (enter-surface compositor surface)
-        ;; The pixels are in the target now, so the client may have its buffer
-        ;; back -- before the frame callback, so a client that redraws on the
-        ;; callback already knows which buffer is free.  A double-buffered client
-        ;; deadlocks without this (D25).
-        (srv:release-surface-buffer surface)
-        (srv:surface-presented surface))
+      (let ((drawn (scene:scene-render scene target)))
+        ;; The pixels are in the target now, so this is the first moment at which
+        ;; presenting them is truthful.  Presenting first was a real bug, not a
+        ;; style choice: see this function's docstring.
+        (let ((presenter (compositor-frame-presenter compositor)))
+          (when presenter
+            (funcall presenter compositor target)))
+        (dolist (surface drawn)
+          (enter-surface compositor surface)
+          ;; The pixels are in the target now, so the client may have its buffer
+          ;; back -- before the frame callback, so a client that redraws on the
+          ;; callback already knows which buffer is free.  A double-buffered client
+          ;; deadlocks without this (D25).
+          (srv:release-surface-buffer surface)
+          (srv:surface-presented surface)))
       (incf (compositor-frame-count compositor))
       (setf (compositor-dirty-p compositor) nil)
       (setf (compositor-surfaces compositor)

@@ -291,7 +291,10 @@ twice*:
     (`weston-terminal`, which is what a launcher has to get right), and the nested run configures
     the nested toplevel from the parent side (`request-toplevel-size 800x600`) and requires the
     inner output, the scene and a fresh presented frame to follow it with the window inside still
-    drawn (D37).
+    drawn (D37). The nested run also asks for three frames and requires the target a presenter is
+    handed to hold non-background pixels at each of them — the frame is drawn before it is
+    committed, which is what a parent compositing that shared buffer at its own moment needs
+    (D38).
 
 All sixteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
