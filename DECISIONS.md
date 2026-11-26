@@ -1766,3 +1766,73 @@ layer-shell yet), multiple outputs (the constraint box is *the* output, singular
 server-side placement of a menu that its client positions badly (the compositor adjusts only
 what the client asked it to adjust). The lesson: **a surface the compositor places must be
 placed from the parent's frame of reference, and asked for again whenever the parent moves.**
+
+## D45 — Focus is history, not draw order; a menu belongs to the window it drops from
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** focus stack
+
+Until this slice the compositor had two facts and no way to tell them apart: the scene's children
+said what covered what, and "the window that mapped last" said who had the keyboard. Neither
+answers the question a person asks by closing a window — *who has the keys now* — and neither
+answers what Alt+Tab should visit. A third fact was missing: the order in which windows were
+focused.
+
+**Decision.**
+
+1. **The focus stack is its own list: windows, most recently focused first.** The scene's
+   children stay *draw* order, which is the compositor's statement about covering (D31/D36), and
+   `compositor-focus-stack` is *history*. They coincide in cl-tinywl only because tinywl raises
+   whatever it focuses; a compositor that does not raise on focus still has a stack. Every focus
+   goes through `focus-surface`, which is where the stack is updated — so keyboard `enter`/`leave`,
+   the toplevel's `activated` configure and the history cannot drift apart.
+2. **Windows only, never popups.** A popup takes the keyboard while it is up (the spec says the
+   topmost grabbing popup always has focus), but a menu in the history would be something Alt+Tab
+   could return to after it had gone. Focusing a popup therefore pushes *the window it belongs
+   to*: that window is the active window, and the menu is a temporary extension of it. A roleless
+   surface — a cursor image, a surface a client mapped for itself — is nobody's window and never
+   enters.
+3. **A closing window hands the keys on.** When the focused surface is destroyed or unmapped it
+   leaves the scene *and* the stack, and the keys go to the most recently focused window that is
+   still there; when none is left the focus is cleared. This is the whole point of keeping the
+   history: "the one that mapped last" is an answer that survives only until there are two
+   windows.
+4. **Alt+Tab rotates; it does not toggle.** `focus-stack-cycle` takes the *tail* of the stack
+   (the least recently focused window), focuses it, rotates it to the front, and raises it. A
+   rotating cycle visits every window exactly once and wraps, and with two windows it *is* a
+   toggle — where an MRU toggle with three windows could never reach the third. A real
+   hold-Tab-release switcher needs an overlay to show what is selected (a scene node, phase 6);
+   the same list will serve it. The raise is part of the cycle's contract and not of
+   `focus-surface`'s: a cycle that does not show the window it chose is invisible, and stacking
+   stays the compositor's decision, so the policy function raises and the primitive does not.
+5. **Focus and raise are separate calls in the framework, one call in tinywl.** The framework's
+   click-to-focus moves the keyboard and the stack; it does not raise (D31: a framework cannot
+   know whether its compositor wants click-to-raise). cl-tinywl raises on focus and on press,
+   which is tinywl.c's rule, so in that compositor draw order follows focus. Alt+F1 keeps
+   tinywl.c's own cycle (bottom window *in draw order* comes to the top) and Alt+Tab is the new
+   focus cycle — the port gains a binding, it does not replace one.
+
+**Evidence.** Gate clause 18 (`scripts/focus-gate.sh`, `scripts/focus-gate.lisp`) with three
+independent `weston-simple-shm` clients on an 800x600 output, moved to (0,0), (150,0) and
+(300,0): the last one to map has the keyboard and the stack is (C B A); Alt+Tab focuses A, raises
+it (checked as the frontmost scene child), configures A `activated` and C not, and rotates the
+stack to (A C B); three more presses visit B, C and A and wrap; a click at (280,10) focuses B and
+moves it to the front *without* raising it; closing B hands the keys to A, removes B from the
+stack and from the scene, and configures A `activated`; with two windows Alt+Tab toggles; with
+one it focuses that window and is otherwise a no-op. 33 checks. Seven new unit tests: the push
+order and no-duplicates rule, a popup pushing its window, a roleless surface never entering,
+cycling through three windows and wrapping (and raising), two windows toggling, a closed window
+handing the keys on down to the last one (and the stack emptying), and an empty cycle. The suite
+went from 238 to 245 tests; the gate is 18/18. `tinywl-installs-its-own-bindings` moved from
+three bindings to four, which is the test doing its job: the port's keymap is its own statement.
+
+**Consequences.** Closing a window now leaves the keyboard somewhere sensible, and Alt+Tab is
+usable in a session with more than two windows. What this does not do: a visible switcher (needs
+an overlay), a focus-follows-mouse policy (the hook is `update-pointer` from a compositor's motion
+handling), per-output stacks (there is one output), "urgent" or "demands attention" (a client
+asking for focus without taking it — `xdg_activation` is not implemented), and the decision this
+slice deliberately did not take: **clamping a resize to the output, and re-clamping windows when
+the output shrinks** (D43's open question, D37's). The lesson: **draw order and focus order are
+two different claims, and a compositor that keeps only one of them cannot answer who gets the
+keys next.**

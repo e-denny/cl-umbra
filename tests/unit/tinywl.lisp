@@ -273,14 +273,14 @@ connection would make this a gate rather than a test."
 ;;; ---------------------------------------------------------------------------
 
 (deftest tinywl-installs-its-own-bindings
-  ;; The framework's headless compositor installs Alt+Esc and Alt+F1 as defaults.
-  ;; A compositor whose behaviour cannot be read off its own source is one whose
-  ;; bindings are somebody else's, so INSTALL-KEYBINDINGS replaces the table.
+  ;; The framework's headless compositor installs Alt+Esc, Alt+Tab and Alt+F1 as
+  ;; defaults.  A compositor whose behaviour cannot be read off its own source is one
+  ;; whose bindings are somebody else's, so INSTALL-KEYBINDINGS replaces the table.
   (with-tinywl (tinywl)
     (let* ((table (cf:compositor-keybindings tinywl))
            (bindings (kb:keybinding-table-bindings table)))
-      (ok (= 3 (length bindings)) "exactly three bindings")
-      (ok (equal '("cycle windows" "quit" "terminal")
+      (ok (= 4 (length bindings)) "exactly four bindings")
+      (ok (equal '("cycle focus" "cycle windows" "quit" "terminal")
                  (sort (mapcar #'kb:keybinding-description bindings) #'string<))
           "with tinywl's descriptions")
       (ok (every #'identity

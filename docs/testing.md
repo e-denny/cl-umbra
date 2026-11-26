@@ -342,7 +342,26 @@ Popups and positioners add the seventeenth:
     framework tests pin the placement rules: a menu is not a window to cycle, and a menu follows
     the window it belongs to and stays above it.
 
-All seventeen clauses pass. Two details worth knowing: the protocol clause
+Phase 3g (the focus stack) adds the eighteenth:
+
+18. **Three windows, Alt+Tab, and a window closing** (`scripts/focus-gate.sh`,
+    `scripts/focus-gate.lisp`). Three *independent* `weston-simple-shm` clients — separate
+    processes, separate connections, their own libwayland — map a window each on an 800x600
+    output and are moved to (0,0), (150,0) and (300,0), so a click can name one unambiguously
+    while the overlaps are there to raise into. The gate asserts: the last window to map has the
+    keyboard and the stack reads (C B A), with only C configured `activated`; Alt+Tab focuses the
+    *least* recently focused window (A), raises it (checked as the frontmost scene child),
+    configures A `activated` and C not, and rotates the stack to (A C B); three more presses visit
+    B and C and wrap to A; a click at (280,10) focuses B and moves it to the front of the stack
+    *without* raising it, because raising is the compositor's policy and not the framework's; and
+    closing B (`xdg_toplevel.close`) hands the keys to A, configures A `activated`, drops B's node
+    and takes B out of the stack; two windows toggle, and one window makes Alt+Tab a no-op.
+    Seven unit tests pin the rules the gate cannot isolate: the push order with no duplicates, a
+    popup pushing the window it belongs to (and never entering itself), a roleless surface never
+    entering, a rotating cycle that wraps and raises, two windows toggling, a closed window handing
+    the keys on down to the last one, and an empty cycle.
+
+All eighteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs

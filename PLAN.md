@@ -374,7 +374,13 @@ positioner rule, placement by pure arithmetic against a constraint box the compo
 outside or by Escape. Gate clause 17 is a compiled client that opens two menus, one of which the
 compositor must flip back inside the output (`scripts/popup-gate.sh`).
 
-Not in these slices: the focus stack, edge-anchored resizing, `reposition` and reactive
+The focus stack landed as its own slice (3g, D45): `cf:compositor-focus-stack` keeps the windows
+in most-recently-focused order, Alt+Tab rotates and raises, a closing window hands the keyboard to
+the next in the history, and popups push the window they belong to instead of entering the stack.
+Gate clause 18 drives three independent clients through it (`scripts/focus-gate.sh`).
+
+Not in these slices: a visible Alt+Tab switcher, edge-anchored resizing, clamping a resize to the
+output and re-clamping windows when it shrinks (D43/D37's open decision), `reposition` and reactive
 positioning (v3, so the global stays v1), layer-shell, client cursor surfaces (a client's
 `set_cursor` surface is now kept out of the scene rather than drawn as a window), and a nested
 window on a *foreign* compositor (which needs a window on a live session, and therefore its own

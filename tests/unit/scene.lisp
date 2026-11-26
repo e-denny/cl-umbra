@@ -621,3 +621,145 @@ which is a question about nodes and the numbers the configure left behind.  Retu
                 "...and RAISE-WINDOW-WITH-POPUPS puts the menu back on top")
             (ok (eq window-node (car (last (butlast (scene:node-children root)))))
                 "directly above the window it belongs to")))))))
+
+;;; ---------------------------------------------------------------------------
+;;; The focus stack (D45)
+;;;
+;;; History, not draw order.  These tests use the same fake surfaces as the rest of
+;;; the file, so what is under test is the stack's own rules: what goes in, what
+;;; leaves, what happens to the keys when the focused window goes away, and what
+;;; Alt+Tab visits.
+;;; ---------------------------------------------------------------------------
+
+(defun window-at (compositor x y)
+  "A mapped window surface and its node at (X, Y); returns (values surface node)."
+  (window-node compositor x y))
+
+(deftest focusing-a-window-puts-it-at-the-front-of-the-stack
+  (with-compositor (compositor :width 300 :height 300)
+    (multiple-value-bind (a node-a) (window-at compositor 0 0)
+      (declare (ignore node-a))
+      (multiple-value-bind (b node-b) (window-at compositor 10 10)
+        (declare (ignore node-b))
+        (multiple-value-bind (c node-c) (window-at compositor 20 20)
+          (declare (ignore node-c))
+          (cf:focus-surface compositor a)
+          (ok (equal (list a) (cf:compositor-focus-stack compositor)))
+          (cf:focus-surface compositor b)
+          (cf:focus-surface compositor c)
+          (ok (equal (list c b a) (cf:compositor-focus-stack compositor))
+              "most recently focused first")
+          (cf:focus-surface compositor a)
+          (ok (equal (list a c b) (cf:compositor-focus-stack compositor))
+              "focusing a window again moves it, it does not duplicate it")
+          (ok (= 3 (length (cf:compositor-focus-stack compositor)))
+              "and the stack has one entry per window"))))))
+
+(deftest a-menu-pushes-the-window-it-belongs-to
+  ;; A popup takes the keyboard while it is up, but it is not a window: the stack
+  ;; must name the window the menu belongs to, or Alt+Tab could return to a menu
+  ;; that has already gone.
+  (with-compositor (compositor :width 320 :height 240)
+    (multiple-value-bind (window-surface window-node) (window-at compositor 0 0)
+      (declare (ignore window-node))
+      (multiple-value-bind (other other-node) (window-at compositor 40 40)
+        (declare (ignore other-node))
+        (multiple-value-bind (popup-node popup toplevel)
+            (popup-under-window compositor window-surface)
+          (declare (ignore popup toplevel))
+          (let ((popup-surface (scene:buffer-node-surface popup-node)))
+            (cf:focus-surface compositor other)
+            (cf:focus-surface compositor popup-surface)
+            (ok (eq popup-surface (srv:seat-keyboard-focus (cf:compositor-seat compositor)))
+                "the popup has the keyboard")
+            (ok (equal (list window-surface other)
+                       (cf:compositor-focus-stack compositor))
+                "but the stack holds the window the menu belongs to")
+            (ok (not (member popup-surface (cf:compositor-focus-stack compositor)))
+                "never the popup itself")))))))
+
+(deftest a-roleless-surface-never-enters-the-stack
+  (with-compositor (compositor :width 100 :height 100)
+    (let ((bare (make-instance 'cf:cf-surface :client nil :id 31 :interface nil :version 1)))
+      (setf (srv:surface-current-buffer bare)
+            (make-instance 'srv:shm-buffer :pool nil :offset 0 :width 8 :height 8
+                                           :stride 32 :format 0)
+            (srv:surface-mapped-p bare) t)
+      (cf:focus-surface compositor bare)
+      (ok (null (cf:compositor-focus-stack compositor))
+          "a surface with no shell role is nobody's window"))))
+
+(deftest alt-tab-visits-every-window-once-and-wraps
+  (with-compositor (compositor :width 300 :height 300)
+    (multiple-value-bind (a node-a) (window-at compositor 0 0)
+      (multiple-value-bind (b node-b) (window-at compositor 10 10)
+        (multiple-value-bind (c node-c) (window-at compositor 20 20)
+          (cf:focus-surface compositor a)
+          (cf:focus-surface compositor b)
+          (cf:focus-surface compositor c)
+          (ok (eq a (cf:focus-stack-cycle compositor))
+              "the first Alt+Tab takes the least recently focused window")
+          (ok (eq a (srv:seat-keyboard-focus (cf:compositor-seat compositor))))
+          (ok (eq node-a (car (last (scene:node-children
+                                     (scene:scene-root (cf:compositor-scene compositor))))))
+              "and raises it: a cycle you cannot see is not a cycle")
+          (ok (equal (list a c b) (cf:compositor-focus-stack compositor))
+              "the stack rotated rather than reordered by draw order")
+          (cf:focus-stack-cycle compositor)   ; b
+          (cf:focus-stack-cycle compositor)   ; c
+          (ok (eq c (srv:seat-keyboard-focus (cf:compositor-seat compositor)))
+              "three presses visit three windows")
+          (ok (equal (list c b a) (cf:compositor-focus-stack compositor))
+              "and come back to where they started")
+          (ok (eq a (cf:focus-stack-cycle compositor))
+              "a fourth press starts the cycle again"))))))
+
+(deftest alt-tab-with-two-windows-is-a-toggle
+  (with-compositor (compositor :width 200 :height 200)
+    (multiple-value-bind (a node-a) (window-at compositor 0 0)
+      (declare (ignore node-a))
+      (multiple-value-bind (b node-b) (window-at compositor 10 10)
+        (declare (ignore node-b))
+        (cf:focus-surface compositor a)
+        (cf:focus-surface compositor b)
+        (ok (eq a (cf:focus-stack-cycle compositor)))
+        (ok (eq b (cf:focus-stack-cycle compositor)))))))
+
+(deftest a-closed-window-hands-the-keys-on
+  ;; The stack's whole point: "the window that mapped last" cannot answer who gets
+  ;; the keyboard when the focused window goes away.
+  (with-compositor (compositor :width 300 :height 300)
+    (multiple-value-bind (a node-a) (window-at compositor 0 0)
+      (declare (ignore node-a))
+      (multiple-value-bind (b node-b) (window-at compositor 10 10)
+        (declare (ignore node-b))
+        (multiple-value-bind (c node-c) (window-at compositor 20 20)
+          (declare (ignore node-c))
+          (cf:focus-surface compositor a)
+          (cf:focus-surface compositor b)
+          (cf:focus-surface compositor c)
+          ;; The compositor's surface list is what the render loop prunes; the
+          ;; framework's own list is what a real commit would have filled.
+          (setf (cf:compositor-surfaces compositor) (list a b c))
+          (ok (eq c (srv:seat-keyboard-focus (cf:compositor-seat compositor))))
+          ;; C's window closes: it leaves both the scene and the history.
+          (setf (srv:surface-mapped-p c) nil)
+          (cf.backend.headless::prune-surfaces compositor)
+          (ok (eq b (srv:seat-keyboard-focus (cf:compositor-seat compositor)))
+              "the keys go to the most recently focused window that is still there")
+          (ok (equal (list b a) (cf:compositor-focus-stack compositor))
+              "and the closed window is out of the stack")
+          ;; Closing the new front passes them on again, to the last one.
+          (setf (srv:surface-mapped-p b) nil)
+          (cf.backend.headless::prune-surfaces compositor)
+          (ok (eq a (srv:seat-keyboard-focus (cf:compositor-seat compositor))))
+          ;; The last window leaving clears the focus rather than keeping a ghost.
+          (setf (srv:surface-mapped-p a) nil)
+          (cf.backend.headless::prune-surfaces compositor)
+          (ok (null (srv:seat-keyboard-focus (cf:compositor-seat compositor))))
+          (ok (null (cf:compositor-focus-stack compositor))))))))
+
+(deftest alt-tab-with-nothing-to-cycle-is-a-no-op
+  (with-compositor (compositor :width 100 :height 100)
+    (ok (null (cf:focus-stack-cycle compositor))
+        "no windows, no focus, no error")))

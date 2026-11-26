@@ -258,6 +258,7 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:surface-scene-node
    #:surface-pointer-image-p
    #:compositor-grab
+   #:compositor-focus-stack
    #:compositor-keybindings
    #:compositor-consumed-keys
    #:start-grab
@@ -268,6 +269,8 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:stop-compositor
    #:cycle-views
    #:focus-surface
+   #:focus-stack-cycle
+   #:focus-stack-window
    #:inject-key
    #:inject-pointer-motion
    #:inject-pointer-button
@@ -364,6 +367,7 @@ owns, and the presentation step is attach + damage + commit.")
                 #:window-node-p
                 #:surface-scene-node
                 #:compositor-grab
+                #:compositor-focus-stack
                 #:compositor-keybindings
                 #:compositor-consumed-keys
                 #:start-grab
@@ -374,6 +378,8 @@ owns, and the presentation step is attach + damage + commit.")
                 #:stop-compositor
                 #:cycle-views
                 #:focus-surface
+                #:focus-stack-cycle
+                #:focus-stack-window
                 #:inject-key
                 #:inject-pointer-motion
                 #:inject-pointer-button
@@ -452,6 +458,7 @@ docs/framework.md §1 follow.")
    #:window-node-p
    #:surface-scene-node
    #:compositor-grab
+   #:compositor-focus-stack
    #:compositor-keybindings
    #:compositor-consumed-keys
    #:start-grab
@@ -462,6 +469,8 @@ docs/framework.md §1 follow.")
    #:stop-compositor
    #:cycle-views
    #:focus-surface
+   #:focus-stack-cycle
+   #:focus-stack-window
    #:inject-key
    #:inject-pointer-motion
    #:inject-pointer-button

@@ -294,7 +294,8 @@ changes.
 | `Alt+Shift+Return` | start a terminal (`tinywl:*terminal-command*`) |
 | `Alt+left` drag | move the window under the pointer |
 | `Alt+right` drag | resize it from the edge under the pointer |
-| `Alt+F1` | send the bottom window to the front and focus it |
+| `Alt+Tab` | focus the least recently focused window, and raise it |
+| `Alt+F1` | send the bottom window (in draw order) to the front and focus it |
 | `Alt+Esc` | ask every client to close, then quit |
 
 From a REPL, the same session is three forms:

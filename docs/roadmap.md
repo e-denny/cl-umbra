@@ -195,8 +195,8 @@ and nested).** The v1 state machine is in
 clause 11 `./scripts/xdg-shell-gate.sh`, clause 12 `./scripts/seat-gate.sh`, clause 13
 `./scripts/scene-gate.sh`, clause 14 `./scripts/grab-gate.sh`, clause 15
 `./scripts/nested-gate.sh`, clause 16 `./scripts/tinywl-parity.sh`, clause 17
-`./scripts/popup-gate.sh`. The focus stack and a nested window on a foreign compositor are open
-below.
+`./scripts/popup-gate.sh`, clause 18 `./scripts/focus-gate.sh`. A nested window on a foreign
+compositor is open below.
 
 `cf.types.xdg-shell` (core)
 - [x] `xdg_wm_base` ping/pong; error conditions (`role`, `defunct_surfaces`)
@@ -224,7 +224,11 @@ below.
 - [x] click-to-focus, and pointer focus that follows the pointer (phase 3c, D32)
 - [x] interactive move and resize grabs, started from a validated serial (phase 3d, D33)
 - [x] a keybinding table consulted before the client; Alt+Esc and Alt+F1 as defaults (D33)
-- [ ] focus stack (alt-tab order); v0 has "the window that mapped last" and nothing more
+- [x] focus stack (phase 3g, D45): `cf:compositor-focus-stack` is history in
+      most-recently-focused order, Alt+Tab rotates it (and raises), a closing window hands the
+      keys to the next in it, and popups push the window they belong to rather than entering
+- [ ] a *visible* switcher (Alt+Tab overlay): needs a scene node and a surface, phase 6;
+      `xdg_activation`-style "demands attention" is also open
 - [ ] edge-anchored resizing (a top/left drag resizes without moving the node until the client
       comes back with a buffer); Escape-to-cancel bound by default
 - [x] popup grabs: owner-events, dismissed by a press outside the stack or by Escape (phase 3f)

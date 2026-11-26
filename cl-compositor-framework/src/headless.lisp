@@ -69,6 +69,10 @@ SLOT-VALUE shows a different one."))
    ;; have reported, which is why the seat is reachable from the compositor.
    (seat :initarg :seat :initform nil :accessor compositor-seat)
    (modifiers :initform (input:make-modifiers) :accessor compositor-modifiers)
+   ;; The windows, most recently focused first (D45).  *History*, not draw order:
+   ;; it answers who gets the keys when the focused window goes away, and what
+   ;; Alt+Tab visits.  Popups are never in it; a cursor surface never is.
+   (focus-stack :initform nil :accessor compositor-focus-stack)
    ;; The scene: one root, one cursor, and a node per mapped surface (D31).
    ;; Positions live in the nodes, not in the surface: moving a window is the
    ;; compositor's statement, and the client's attach offset is its own.
@@ -193,6 +197,9 @@ the framework without a hook table (D7: classes, not vtables)."
     (add-keybinding compositor "F1" (lambda () (cycle-views compositor))
                     :modifiers input:+modifier-mod1+
                     :description "cycle views")
+    (add-keybinding compositor "Tab" (lambda () (focus-stack-cycle compositor))
+                    :modifiers input:+modifier-mod1+
+                    :description "cycle focus")
     (render:fill-target (compositor-target compositor) background)
     compositor))
 
@@ -565,6 +572,59 @@ the wrong picture (D41)."
               (scene:scene-cursor-hotspot-y scene) (or hotspot-y 0))
         (setf (compositor-dirty-p compositor) t)))))
 
+;;; ---------------------------------------------------------------------------
+;;; The focus stack (D45)
+;;;
+;;; Two orders that are not the same order.  The scene's children are *draw* order:
+;;; what covers what.  The focus stack is *history*: who had the keyboard, most
+;;; recently first.  A compositor needs both, and conflating them leaves it without
+;;; an answer to "who gets the keys when this window closes" -- "the one that
+;;; mapped last" is not an answer once a second window exists.
+;;;
+;;; What goes in it: windows (the toplevel role).  Never popups: a popup is
+;;; transient and takes the keyboard while it is up (the spec says the topmost
+;;; grabbing popup always has focus), but a menu in the stack would be something
+;;; Alt+Tab could return to after it had gone.  Focusing a popup therefore pushes
+;;; the window it belongs to, because that window is the active window.
+;;; ---------------------------------------------------------------------------
+
+(defun focus-stack-window (surface)
+  "The window a focus event about SURFACE is really about, or NIL.
+
+A window is itself; a popup is the window its toplevel belongs to; a roleless
+surface -- a cursor image, a bare surface a client mapped for itself -- is nobody's."
+  (let* ((shell (and surface (srv:surface-shell-surface surface)))
+         (role (and shell (srv:xdg-surface-role shell))))
+    (cond
+      ((null shell) nil)
+      ((eq :toplevel (srv:xdg-surface-role-name shell)) surface)
+      ((typep role 'srv:xdg-popup)
+       (let* ((toplevel (srv:xdg-popup-toplevel role))
+              (toplevel-shell (and toplevel (srv:xdg-toplevel-shell-surface toplevel))))
+         (and toplevel-shell (srv:xdg-surface-surface toplevel-shell))))
+      (t nil))))
+
+(defun focus-stack-note (compositor surface)
+  "SURFACE was just focused: move its window to the front of the stack."
+  (let ((window (focus-stack-window surface)))
+    (when window
+      (setf (compositor-focus-stack compositor)
+            (cons window (remove window (compositor-focus-stack compositor) :test #'eq))))
+    window))
+
+(defun focus-stack-forget (compositor surface)
+  "Drop SURFACE from the stack; returns the stack's remaining front, or NIL."
+  (setf (compositor-focus-stack compositor)
+        (remove surface (compositor-focus-stack compositor) :test #'eq))
+  (first (compositor-focus-stack compositor)))
+
+(defun focusable-window-p (surface)
+  "Can SURFACE take the keyboard right now: alive, mapped, and a window?"
+  (and surface
+       (not (srv:resource-destroyed-p surface))
+       (srv:surface-mapped-p surface)
+       (focus-stack-window surface)))
+
 (defun focus-surface (compositor surface)
   "Give keyboard focus to SURFACE; NIL clears it.
 
@@ -576,6 +636,9 @@ questions, and a window that maps under a resting pointer must not teleport it
 motion handling instead."
   (let ((seat (compositor-seat compositor)))
     (srv:set-keyboard-focus seat surface)
+    ;; Whatever the focus was *about* -- a window, or the window a menu belongs to
+    ;; -- is now the most recently focused one (D45).
+    (focus-stack-note compositor surface)
     (multiple-value-bind (under x y) (surface-under-cursor compositor)
       (cond ((null surface)
              (srv:set-pointer-focus seat nil 0 0))
@@ -644,6 +707,31 @@ with it, or a menu would be left behind over whatever is now on top."
         (focus-surface compositor (scene:buffer-node-surface node))
         (mark-dirty compositor)
         node))))
+
+(defun focus-stack-cycle (compositor)
+  "Focus and raise the *least* recently focused window (Alt+Tab's job).
+
+The tail of the stack, rotated to the front, so a full cycle visits every window
+exactly once and two windows toggle.  A rotating cycle rather than an MRU toggle:
+with three windows a toggle can never reach the third, and a hold-Tab-release
+switcher needs an overlay to show what is selected -- a scene node, which is phase
+6's business.  The same list will serve it.
+
+The raise is part of this function's contract, not of FOCUS-SURFACE's: a focus cycle
+that does not show the window it chose is invisible, and stacking is policy (D31) --
+so the policy function raises and the primitive does not.  Returns the window it
+focused, or NIL when there is nothing to cycle to."
+  (let* ((live (remove-if-not #'focusable-window-p (compositor-focus-stack compositor)))
+         (next (car (last live))))
+    ;; A window can be in the stack and no longer mapped for one frame (a commit and
+    ;; a key in the same batch); drop those rather than focus something invisible.
+    (setf (compositor-focus-stack compositor) live)
+    (when next
+      (focus-surface compositor next)
+      (let ((node (surface-scene-node next)))
+        (when node (raise-window-with-popups compositor node)))
+      (mark-dirty compositor)
+      next)))
 
 (defun end-active-grab (compositor &key reason)
   "End COMPOSITOR's grab, if it has one; idempotent."
@@ -905,10 +993,20 @@ would be a message about an object it no longer has."
       (scene:scene-remove-node node)
       (setf (surface-scene-node surface) nil))
     (let ((seat (compositor-seat compositor)))
-      (when (eq surface (srv:seat-keyboard-focus seat))
-        (if (srv:resource-destroyed-p surface)
-            (setf (srv:seat-keyboard-focus seat) nil)
-            (srv:set-keyboard-focus seat nil)))
+      (let ((had-focus (eq surface (srv:seat-keyboard-focus seat))))
+        ;; The window leaves the history whether or not it had the keys: an unmapped
+        ;; window is not something Alt+Tab may return to (D45).
+        (focus-stack-forget compositor surface)
+        (when had-focus
+          ;; Clear the seat's claim first, without events when the surface is gone
+          ;; ("a destroyed surface's client is on its way out"), and then hand the
+          ;; keys to the most recently focused window that is still there -- which
+          ;; is the whole reason the stack exists.
+          (if (srv:resource-destroyed-p surface)
+              (setf (srv:seat-keyboard-focus seat) nil)
+              (srv:set-keyboard-focus seat nil))
+          (let ((next (find-if #'focusable-window-p (compositor-focus-stack compositor))))
+            (when next (focus-surface compositor next)))))
       (when (eq surface (srv:seat-pointer-focus seat))
         (if (srv:resource-destroyed-p surface)
             ;; The pointers that pointed here died with the client; dropping the

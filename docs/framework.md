@@ -273,12 +273,26 @@ focus stack, cursor shapes and touch are still ahead.*
   not who hears it). A grab holds the button that was physically down when it started, and the
   compositor learns about frames and configures through two hooks, `grab-changed` and
   `grab-resize`. DnD arrives with its protocol.
+- **Focus is history, not draw order** (D45). `cf:compositor-focus-stack` is the list of windows
+  in most-recently-focused order; the scene's children stay *draw* order, which is a different
+  claim (D31). Every focus goes through `cf:focus-surface`, which is where the stack is updated,
+  so keyboard `enter`/`leave`, the toplevel's `activated` configure and the history cannot drift
+  apart. Windows only: a popup takes the keyboard while it is up but pushes the window it belongs
+  to, and a roleless surface is nobody's window. When the focused window is destroyed or
+  unmapped it leaves both the scene and the stack, and the keys go to the most recently focused
+  window that is left — "the window that mapped last" cannot answer that.
+- **Alt+Tab rotates the stack** (D45): `cf:focus-stack-cycle` takes the least recently focused
+  window, focuses it, rotates it to the front and raises it, so a full cycle visits every window
+  once and two windows toggle. A hold-Tab-release switcher needs an overlay to show the selection
+  (a scene node, phase 6); the same list will serve it. Focus and raise stay separate calls: the
+  framework's click-to-focus does not raise, because a framework cannot know whether its
+  compositor wants click-to-raise.
 - **Keybindings** come before the client (D33): the key path is grab, then table, then focused
   window. `(add-keybinding compositor key function :modifiers mask)` — exact mask match, so
   Alt+Escape does not fire with Alt+Shift held. A consumed press never reaches the client and its
   release is swallowed; an unbound modifier is still forwarded, which is a v0 simplification
-  (there is no device to suppress it from). The defaults are tinywl's: Alt+Esc stops the loop,
-  Alt+F1 cycles the bottom window to the top and focuses it.
+  (there is no device to suppress it from). The defaults are Alt+Esc (stop the loop), Alt+Tab
+  (cycle the focus stack) and Alt+F1 (the bottom window in draw order to the top, and focus it).
 - **Capabilities** are recomputed from actual devices and re-advertised on change. Today the
   headless backend advertises `pointer|keyboard`; touch is not advertised and `get_touch` is
   refused with `missing_capability`, which is what the protocol asks for.

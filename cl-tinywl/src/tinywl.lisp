@@ -349,12 +349,19 @@ and exits by itself."
     count))
 
 (defun install-keybindings (tinywl)
-  "tinywl's two bindings: Alt+Esc quits, Alt+F1 cycles the windows.
+  "tinywl's bindings: Alt+Esc quits, Alt+Tab cycles the focus stack, Alt+F1 cycles
+the windows, Alt+Shift+Return starts a terminal.
 
-The framework installs the same two on a headless compositor as its default, and
-this replaces the table rather than adding to it -- deliberately.  A compositor's
-keymap is a statement about that compositor, and one that inherits a binding it did
-not choose is one whose behaviour cannot be read off its own source."
+The framework installs Alt+Esc, Alt+Tab and Alt+F1 on a headless compositor as its
+defaults, and this replaces the table rather than adding to it -- deliberately.  A
+compositor's keymap is a statement about that compositor, and one that inherits a
+binding it did not choose is one whose behaviour cannot be read off its own source.
+
+Alt+Tab is an addition to tinywl.c, not a port of it: tinywl.c has no focus stack at
+all (it raises the window it is told to focus and forgets the rest), and the stack is
+the framework's (D45).  Alt+F1 stays tinywl's own rule -- the bottom window *in draw
+order* comes to the top -- because a port that quietly replaced it would make the
+parity script meaningless."
   (setf (cf:compositor-keybindings tinywl) (kb:make-keybinding-table))
   (cf:add-keybinding tinywl "Escape"
                      (lambda ()
@@ -362,6 +369,10 @@ not choose is one whose behaviour cannot be read off its own source."
                        (cf:stop-compositor tinywl))
                      :modifiers input:+modifier-mod1+
                      :description "quit")
+  (cf:add-keybinding tinywl "Tab"
+                     (lambda () (cf:focus-stack-cycle tinywl))
+                     :modifiers input:+modifier-mod1+
+                     :description "cycle focus")
   (cf:add-keybinding tinywl "F1"
                      (lambda () (cf:cycle-views tinywl))
                      :modifiers input:+modifier-mod1+

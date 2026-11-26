@@ -82,6 +82,11 @@
 #      gets it flipped back inside, and a click outside the menu dismisses it without
 #      the click reaching the client
 #
+#  18. the focus stack: three real windows, Alt+Tab cycling in most-recently-focused
+#      order and wrapping, a click focusing and moving a window to the front without
+#      raising it, and a closed window handing the keyboard to the window that was
+#      focused before it while leaving the stack
+#
 #  15. our compositor runs as a client of another compositor, in one image and two
 #      sockets: the parent sees a mapped, titled, activated xdg_toplevel; the
 #      parent's pixels equal the nested compositor's own target; a pointer motion
@@ -277,6 +282,15 @@ else
   fail 'popups' 'a menu was not placed, drawn, or dismissed' "$log_dir/popup.log"
 fi
 
+# 18. The focus stack ---------------------------------------------------------
+printf '\nphase 3g gate: the focus stack\n\n'
+
+if gb "$log_dir/focus.log" "$repo_root/scripts/focus-gate.sh"; then
+  pass 'focus stack' "$(grep -a '^focus-gate: ' "$log_dir/focus.log" | tail -n 1 | sed 's/^focus-gate: //')"
+else
+  fail 'focus stack' 'a window was not focused, cycled or handed on' "$log_dir/focus.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -296,7 +310,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 3a, 3b, 3c, 3d, 3e, tinywl parity and popups)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups and the focus stack)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi
