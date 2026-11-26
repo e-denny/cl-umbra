@@ -204,6 +204,11 @@ space, a visibility flag and a parent.
   buffer, and inside its committed **input region** (an empty region makes it click-through).
   `cf:surface-under-cursor` is the framework's `desktop_view_at`: it turns the node into a
   surface. Popups and their own coordinates arrive with `xdg_popup`.
+- **The cursor is drawn last, and it is whoever's picture it is**: the client's cursor image
+  (`wl_pointer.set_cursor`) at pointer minus hotspot when the client has installed one, otherwise
+  the session's own arrow. A client's image is never a scene node (D40) but is drawn from the
+  recording the seat keeps, and a nested session lends its pointer accordingly — it draws the
+  client's image and tells its parent to draw none while it does (D41).
 - **Retained, not immediate**: the tree survives frames, which is what makes rules,
   workspaces, animations and overview possible without a rewrite (D10).
 - **Damage propagation**, clip rectangles and **culling** are open (2b): v0 repaints the whole

@@ -143,7 +143,17 @@ phase 5)."))
    ;; deliberately *not* a child of the root: it must never be hit-tested, or it
    ;; would be the one thing the pointer can never leave.
    (cursor :initarg :cursor :reader scene-cursor)
-   (cursor-visible-p :initform t :accessor scene-cursor-visible-p))
+   (cursor-visible-p :initform t :accessor scene-cursor-visible-p)
+   ;; The pointer image a *client* has installed (wl_pointer.set_cursor), if any,
+   ;; and where its hotspot is inside the image.  Drawn at the pointer instead of
+   ;; the built-in arrow: the image is the client's statement about what the
+   ;; pointer means where it happens to be (an I-beam over text, a resize arrow on
+   ;; a border), and a compositor that always draws its own arrow throws that away
+   ;; (D41).  NIL means "no client image": the built-in arrow is drawn, so a
+   ;; pointer never disappears over the bare output.
+   (cursor-surface :initform nil :accessor scene-cursor-surface)
+   (cursor-hotspot-x :initform 0 :accessor scene-cursor-hotspot-x)
+   (cursor-hotspot-y :initform 0 :accessor scene-cursor-hotspot-y))
   (:documentation
    "One output's tree plus its cursor.
 
@@ -315,16 +325,38 @@ client stopped after one frame, waiting for a wl_buffer.release)."
                                     :x x :y y)))))
     drawn))
 
+(defun client-cursor-usable-p (surface)
+  "Is SURFACE a pointer image that can be drawn right now?
+
+A cursor surface is a wl_surface like any other: it needs a current buffer, and it
+must not have been destroyed.  It is deliberately *not* held to SURFACE-MAPPED-P:
+that predicate is about a surface's role being mapped, and a cursor image is not a
+window -- it is drawn whenever the client has put pixels in it."
+  (and surface
+       (not (resource-destroyed-p surface))
+       (surface-current-buffer surface)))
+
 (defun scene-render (scene target)
   "Draw the scene onto TARGET; returns the list of surfaces that were drawn.
 
-The cursor is drawn last from its own node position and only when
-SCENE-CURSOR-VISIBLE-P, so the frame the compositor presents is exactly
-\"everything, then the pointer on top\"."
+The cursor is drawn last, from its own node position: the client's image if the client
+installed one, otherwise the built-in arrow and only when SCENE-CURSOR-VISIBLE-P.  A
+client's image is drawn at (pointer - hotspot), which is what makes the hotspot mean
+what the protocol says it means.  It is not returned as *drawn*: the compositor holds
+a cursor image until the client replaces it rather than releasing it per frame, which
+is what cursor images expect (D41)."
   (let ((drawn (render-node target (scene-root scene) 0 0)))
-    (when (and (scene-cursor-visible-p scene)
-               (node-visible-p (scene-cursor scene)))
-      (setf drawn (append drawn (render-node target (scene-cursor scene) 0 0))))
+    (let ((surface (scene-cursor-surface scene)))
+      (cond
+        ((client-cursor-usable-p surface)
+         (render:composite-buffer target (surface-current-buffer surface)
+                                  :x (- (node-x (scene-cursor scene))
+                                        (scene-cursor-hotspot-x scene))
+                                  :y (- (node-y (scene-cursor scene))
+                                        (scene-cursor-hotspot-y scene))))
+        ((and (scene-cursor-visible-p scene)
+              (node-visible-p (scene-cursor scene)))
+         (setf drawn (append drawn (render-node target (scene-cursor scene) 0 0))))))
     drawn))
 
 ;;; ---------------------------------------------------------------------------

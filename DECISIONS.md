@@ -1488,3 +1488,66 @@ client's cursor image (phase 5 — it needs the hotspot the seat already records
 session able to change the parent's cursor shape. The lesson, recorded because it took four manual
 tests to surface: **a role object whose state is only ever added is a state machine missing its
 exit, and a guard that asks "is it X now" cannot defend a surface that will become X later.**
+
+## D41 — The pointer's picture follows the client, and a nested session lends its pointer out
+
+**Status:** accepted
+
+**Context.** D39 stopped a nested session drawing a cursor of its own, because the parent draws
+one over the same spot. That was right about the *doubling* and wrong about the *shapes*: the
+fifth manual test found that a terminal's I-beam over its text, its arrow over its title bar and
+whatever a client says its frame edge means never appeared at all. What a person saw was one
+arrow everywhere. The client's contribution to the cursor — "the pointer *means* this here" — was
+being recorded by the seat (`wl_pointer.set_cursor`, since the first slice) and then thrown away,
+because D40 kept that surface out of the scene and nothing else drew it.
+
+**Decision.**
+
+1. **A client's cursor image is drawn, at pointer minus hotspot.** `SCENE-RENDER` draws
+   `SCENE-CURSOR-SURFACE` when that surface has a current buffer (and has not been destroyed),
+   at `(pointer - hotspot)`, and falls back to the built-in arrow otherwise. This is the one place
+   the hotspot means anything, so it is where it is applied. The image is *not* released per
+   frame: a cursor image is held until the client replaces it, which is what cursor images expect
+   (`wl_buffer.release` for a picture that is redrawn every frame would let a client rewrite the
+   pixels under the pointer).
+2. **The frame path asks, rather than being told.** There is no event that says "the pointer's
+   picture changed and a frame is due": a client may name an image and commit nothing, and a
+   client that hides its cursor sends no commit at all. So `render-frame` compares the scene's
+   image with `SEAT-POINTER-CURSOR-IMAGE` — the cursor image of the pointer whose client has
+   *pointer focus* — and marks the frame dirty when they differ. One comparison per frame, and it
+   cannot go stale the way a missed event would.
+3. **The division is by picture, not by session.** A nested session draws the client's image and
+   tells the parent to draw nothing while it does — `wl_pointer.set_cursor` on the *parent*
+   connection with a 1x1 fully transparent shm image of our own — and gives the parent its cursor
+   back (`set_cursor` with no surface) when there is no client image to draw. Over the bare
+   output, and over windows whose clients set none, the parent's cursor is what a person sees,
+   which is the "the outer cursor becomes the background cursor" half of the expectation.
+   `COMPOSITOR-CURSOR-VISIBLE-P` (D39) keeps its narrow meaning: whether *this session's own*
+   arrow is drawn. A client's image is the client's, and is drawn when it exists.
+4. **`WL_POINTER.SET_CURSOR`'s serial is now kept** on the nested backend's parent pointer, because
+   set_cursor requires the serial of a recent enter and the session is now a client that sets one.
+
+**Evidence.** A finer probe over a real `weston-terminal` (headless and nested) shows the client's image
+arriving and changing with position: hotspot (11, 12) over the text area (its I-beam), (6, 13)
+over the frame's left band and (13, 6) over the title bar (its resize and move cursors), and no
+image at all over the frame's shadow or the bare output -- which is exactly the sequence a person
+crosses the window with.  The first coarse sweep missed the frame band by two pixels and reported
+"one image everywhere"; that is worth recording as a caution about sampling a 12-pixel border. A frame dump
+of the headless session with the pointer over the text area shows an I-beam drawn from the
+client's own buffer, centred on the hotspot — the picture the manual test asked for. In nested
+mode the same probe shows the parent's pointer holding our 1x1 blank while the client's image is
+drawn and nothing of the sort at a bare-output spot. Gate clause 16 grew by these checks in both
+runs — "the client's cursor image became the pointer's picture", "...is the focused pointer's,
+hotspot (11, 12)", and nested-only "the parent is told to draw no pointer", "with a 1x1
+transparent image", "over the bare output there is no client image", "nothing of ours is drawn
+there", "the parent has its own pointer back" — 36 checks headless, 48 nested, 84 in two runs,
+gate 16/16, 216 tests in 10 suites.
+
+**Consequences.** Cursor shapes now change the way a client means them to, in a nested session and
+in a headless one, and the nested window shows exactly one pointer at a time. What this does not
+do: scale the cursor (a 24x24 image on a 2x parent is still upscaled and soft — phase 2b), animate
+it (several images per `set_cursor` is `wl_cursor` frame timing, phase 5), or honour a parent that
+ignores `set_cursor` from its own clients (a compositor that does would leave its cursor under
+ours; ours takes the serial and asks, and that is all a client can do). The lesson, which is D39's
+from the other side: **hiding your own cursor is only half a decision — the other half is drawing
+somebody else's.**

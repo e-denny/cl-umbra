@@ -296,6 +296,23 @@ different states, and only the first is acceptable for a cursor image."
       (ok (cf.backend.headless:surface-pointer-image-p committed-first)
           "because the surface is recorded as a pointer image for good"))))
 
+(deftest a-client-cursor-image-needs-pixels-to-be-drawn
+  ;; The rule SCENE-RENDER applies before it draws a client's pointer image: a
+  ;; surface with no current buffer (or a destroyed one) is not a picture, and the
+  ;; session falls back to its own cursor.  Getting this wrong is not a hang -- it is
+  ;; a compositor that draws a stale or absent cursor (D41).
+  (let ((surface (fake-surface :width 16 :height 16)))
+    (ok (null (scene:client-cursor-usable-p surface))
+        "a cursor surface with no buffer is not a picture")
+    (setf (srv:surface-current-buffer surface)
+          (make-instance 'srv:shm-buffer :pool nil :offset 0
+                                         :width 16 :height 16 :stride 64 :format 0))
+    (ok (scene:client-cursor-usable-p surface)
+        "one with a buffer is")
+    (setf (srv:resource-destroyed-p surface) t)
+    (ok (null (scene:client-cursor-usable-p surface))
+        "and a destroyed one is not, whatever it still holds")))
+
 (deftest the-scene-draws-over-the-background-in-stacking-order
   (with-compositor (compositor :width 32 :height 32)
     (let* ((scene (cf:compositor-scene compositor))

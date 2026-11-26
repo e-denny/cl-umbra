@@ -45,11 +45,11 @@
 ;;;;      A presenter that runs before the draw commits the background paint alone,
 ;;;;      and the window in the parent is black or half-drawn -- the flicker the
 ;;;;      manual test found (D38).
-;;;;  10. the pointer's image is the *backend's* business: a session whose output is
-;;;;      a window in another compositor draws no cursor of its own, because that
-;;;;      compositor already draws one over the same spot.  The headless run draws
-;;;;      its own, so the check is the same pixel with the expected answer per mode
-;;;;      (D39).
+;;;;  10. the pointer's picture follows the *client*: over the terminal's text area the
+;;;;      scene draws the image that client installed, with that client's hotspot, and
+;;;;      a nested session tells the parent to draw no pointer while it does -- then
+;;;;      gives the pointer back at a bare-output spot, with nothing of its own drawn
+;;;;      there (D39, D41).
 ;;;;
 ;;;; The nested run's parent is a harness, not the thing under test, so its two
 ;;;; keybindings (Alt+Esc, Alt+F1 -- the framework's defaults) are cleared: a parent
@@ -557,28 +557,75 @@ of lines of protocol."
                (setf (cf.backend.headless:compositor-frame-presenter compositor)
                      presenter))))
 
-         ;; 10. The pointer's image is the backend's business (D39).
+         ;; 10. The pointer's picture follows the client (D41).
          ;;
-         ;;     A nested session's output *is* a window in another compositor, and
-         ;;     that compositor draws its cursor over it -- at its own scale, from
-         ;;     its own theme.  A cursor of our own would be a second arrow at the
-         ;;     same spot.  The pixel at the parked pointer is therefore the
-         ;;     background nested and the cursor nested... headless, where nobody
-         ;;     else draws one.  Offset (+3, +6) is inside the arrow's white body.
-         (park-pointer)
+         ;;     Over the terminal's text area the scene draws the image that client
+         ;;     installed -- the I-beam, hotspot and all -- and then forgets it again
+         ;;     when the pointer leaves.  This is the half that was missing while a
+         ;;     session relied on somebody else's pointer: a client saying "the
+         ;;     pointer means *this* here" is the client's whole contribution to the
+         ;;     cursor.
+         (moves 400 300)
+         (settle)
          (cf:request-frame *inner*)
-         (let ((expected (if *parent* *background* #xFFFFFFFF))
-               (x (+ *pointer-park-x* 3))
-               (y (+ *pointer-park-y* 6)))
-           (pump 5 :until (lambda () (eql expected (cf:frame-pixel *inner* x y))))
-           (check (eql expected (cf:frame-pixel *inner* x y))
-                  "the pointer image at (~D, ~D) is #x~8,'0X: ~:[drawn by this session~;left to the parent~]"
-                  x y (cf:frame-pixel *inner* x y) (and *parent* t)))
+         (pump 5 :until (lambda ()
+                          (cf.scene:scene-cursor-surface (cf:compositor-scene *inner*))))
+         (let* ((scene (cf:compositor-scene *inner*))
+                (image (cf.scene:scene-cursor-surface scene)))
+           (check image "the client's cursor image became the pointer's picture")
+           (multiple-value-bind (focused hotspot-x hotspot-y)
+               (cf:seat-pointer-cursor-image (cf:compositor-seat *inner*))
+             (check (and (eq focused image)
+                         (eql hotspot-x (cf.scene:scene-cursor-hotspot-x scene))
+                         (eql hotspot-y (cf.scene:scene-cursor-hotspot-y scene)))
+                    "and it is the focused pointer's, hotspot (~D, ~D)"
+                    (cf.scene:scene-cursor-hotspot-x scene)
+                    (cf.scene:scene-cursor-hotspot-y scene))))
 
-         ;; 10b. A client's cursor image is a surface the client names, and naming it
-         ;;      keeps it out of the scene for good (D40).  The terminal started in
-         ;;      clause 8 sets one as soon as the pointer is over it, which the park
-         ;;      above arranged -- so this is about a real client, not a stub.
+         ;; 11. ... and the parent's pointer is put down and picked back up (D39, D41).
+         ;;
+         ;;     Nested only, and the pixel is the point: a parent compositor draws its
+         ;;     cursor over *our* surface, so while we draw the client's image the
+         ;;     parent must be told to draw none -- with a 1x1 transparent image of our
+         ;;     own -- and at a bare-output spot it must get its pointer back, with
+         ;;     nothing of ours drawn there.  (That a session with no parent draws its
+         ;;     own arrow is the scene gate's check: "cursor: white body at (38,40)".)
+         (when *parent*
+           (let ((parent-pointer (find-if (lambda (resource)
+                                            (typep resource 'wayland.server:pointer))
+                                          (resources-of-type *parent*
+                                                             'wayland.server:pointer))))
+             (check (and parent-pointer
+                         (wayland.server:pointer-cursor-surface parent-pointer))
+                    "while a client image is drawn, the parent is told to draw no pointer")
+             (check (let ((blank (and parent-pointer
+                                      (wayland.server:pointer-cursor-surface
+                                       parent-pointer))))
+                      (and blank
+                           (eql 1 (wayland.server:shm-buffer-width
+                                   (wayland.server:surface-current-buffer blank)))
+                           (eql 1 (wayland.server:shm-buffer-height
+                                   (wayland.server:surface-current-buffer blank)))))
+                    "with a 1x1 transparent image, so only the client's is visible")
+             ;; Below the terminal (806x563 at the origin) is bare output in an
+             ;; 800x600 output: no client image, so the parent's cursor comes back.
+             (moves 790 590)
+             (settle)
+             (cf:request-frame *inner*)
+             (pump 5 :until (lambda ()
+                              (null (cf.scene:scene-cursor-surface
+                                     (cf:compositor-scene *inner*)))))
+             (check (null (cf.scene:scene-cursor-surface (cf:compositor-scene *inner*)))
+                    "over the bare output there is no client image")
+             (check (= *background* (cf:frame-pixel *inner* 793 596))
+                    "and nothing of ours is drawn there (#x~8,'0X)"
+                    (cf:frame-pixel *inner* 793 596))
+             (check (null (wayland.server:pointer-cursor-surface parent-pointer))
+                    "and the parent has its own pointer back")))
+
+         ;; 12. A client's cursor image is a surface the client names, and naming it
+         ;;     keeps it out of the scene for good (D40).  The terminal started in
+         ;;     clause 8 sets one as soon as the pointer is over it.
          (let* ((surfaces (cf:compositor-surfaces *inner*))
                 (images (remove-if-not #'cf.backend.headless:surface-pointer-image-p
                                        surfaces))
@@ -588,7 +635,7 @@ of lines of protocol."
            (check (null drawn) "and none of it is drawn (~D with a scene node)"
                   (length drawn)))
 
-         ;; 11. Alt+Esc asks the clients to close and stops the loop.
+         ;; 13. Alt+Esc asks the clients to close and stops the loop.
          ;;
          ;; Every client is connected *before* the quit: nothing before this point
          ;; cut one off, which is what makes "no protocol error" mean something.
@@ -615,7 +662,7 @@ of lines of protocol."
                        (append *lines-a* *lines-b*)))
                 "no client saw a protocol error")
 
-         ;; 12. B ran with WAYLAND_DEBUG=1: an ordered, valid event stream.
+         ;; 14. B ran with WAYLAND_DEBUG=1: an ordered, valid event stream.
          ;;
          ;; libwayland writes `-> interface#id.request(args)' for what the client
          ;; sent and a bare `interface#id.event(args)' for what arrived, so "did it

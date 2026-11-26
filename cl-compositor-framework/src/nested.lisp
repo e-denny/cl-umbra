@@ -75,6 +75,14 @@
    (configured-p :initform nil :accessor nested-configured-p)
    (mapped-p :initform nil :accessor nested-mapped-p)
    (awaiting-frame-p :initform nil :accessor nested-awaiting-frame-p)
+   ;; The parent's pointer: the serial of its last enter (set_cursor requires one)
+   ;; and what our session has told it about the pointer's picture.  See
+   ;; SYNC-PARENT-CURSOR (D41).
+   (parent-pointer-serial :initform nil :accessor nested-parent-pointer-serial)
+   (parent-cursor-state :initform :default :accessor nested-parent-cursor-state)
+   (blank-cursor-surface :initform nil :accessor nested-blank-cursor-surface)
+   (blank-cursor-pool :initform nil :accessor nested-blank-cursor-pool)
+   (blank-cursor-buffer :initform nil :accessor nested-blank-cursor-buffer)
    (closing-p :initform nil :accessor nested-closing-p)
    ;; An optional hook that lets the *parent's own* reactor run: it takes a timeout
    ;; in seconds.  It is NIL in the ordinary case (the parent is another process, so
@@ -463,6 +471,68 @@ pixels are in the parent's buffer now, so the frame that contains them exists."
   nil)
 
 ;;; ---------------------------------------------------------------------------
+;;; The pointer's picture, again
+;;; ---------------------------------------------------------------------------
+;;
+;; D39 stopped this session drawing a cursor of its own, because the parent draws one
+;; over our surface.  That left the client's cursor image with nowhere to appear: a
+;; terminal's I-beam over its text and its resize arrow on its frame are the client
+;; saying what the pointer *means* there, and a session that shows one arrow
+;; everywhere throws that away (D41).
+;;
+;; So the division is by picture, not by session: this compositor draws the client's
+;; image, and the parent is told to draw nothing while it is being drawn.  The way to
+;; say "nothing" to another compositor as its client is wl_pointer.set_cursor with a
+;; fully transparent image, and to give the parent its own cursor back, set_cursor
+;; with no surface at all.  When there is no client image (over the bare output, or
+;; over a window whose client sets none) this session stays out of it and the parent's
+;; cursor is what a person sees.
+
+(defun ensure-blank-cursor-surface (backend)
+  "A 1x1 fully transparent cursor surface, made once."
+  (or (nested-blank-cursor-surface backend)
+      (let* ((surface (wc:wl-compositor.create-surface (nested-parent-compositor backend)))
+             (pool (wc:make-client-pool (nested-shm backend) 4))
+             ;; A fresh pool is a fresh memfd: the pixel is already #x00000000, which
+             ;; is premultiplied transparent.  Nothing to write.
+             (buffer (wc:allocate-client-buffer pool :offset 0 :width 1 :height 1
+                                                :stride 4 :format 0)))
+        (setf (nested-blank-cursor-pool backend) pool
+              (nested-blank-cursor-buffer backend) buffer
+              (nested-blank-cursor-surface backend) surface))))
+
+(defun sync-parent-cursor (backend)
+  "Tell the parent to draw nothing while we draw the client's pointer image.
+
+Called once per dispatched cycle, after the inner frame has decided what the scene's
+cursor is.  Three cases, and the middle one is the point: a client image is being drawn
+-- hide the parent's; no client image -- give the parent the pointer back; nothing
+changed --- say nothing, because a set_cursor per cycle would be a request per frame for
+a picture nobody is looking at."
+  (let* ((pointer (nested-pointer backend))
+         (serial (nested-parent-pointer-serial backend))
+         (image (and (not (nested-closing-p backend))
+                     (cf.scene:scene-cursor-surface
+                      (headless:compositor-scene (nested-compositor backend)))))
+         (desired (if image :blank :default)))
+    (when (and pointer serial (not (eq desired (nested-parent-cursor-state backend))))
+      (handler-case
+          (let ((surface (when (eq desired :blank)
+                           (ensure-blank-cursor-surface backend))))
+            (when surface
+              (wc:wl-surface.attach surface (nested-blank-cursor-buffer backend) 0 0)
+              (wc:wl-surface.damage surface 0 0 1 1))
+            ;; set_cursor first, then the commit that carries the image into effect:
+            ;; the protocol applies the image at the surface's *next* commit.
+            (wc:wl-pointer.set-cursor pointer serial surface 0 0)
+            (when surface
+              (wc:wl-surface.commit surface))
+            (wc:flush (nested-display backend))
+            (setf (nested-parent-cursor-state backend) desired))
+        (wc:client-error () nil))))
+  nil)
+
+;;; ---------------------------------------------------------------------------
 ;;; Input from the parent
 ;;; ---------------------------------------------------------------------------
 ;;
@@ -480,7 +550,10 @@ pixels are in the parent's buffer now, so the frame that contains them exists."
     (ecase event
       (:enter
        (destructuring-bind (serial surface x y) arguments
-         (declare (ignore serial surface))
+         (declare (ignore surface))
+         ;; Kept: wl_pointer.set_cursor takes the serial of a recent enter, and a
+         ;; nested session sets the parent's cursor (SYNC-PARENT-CURSOR).
+         (setf (nested-parent-pointer-serial backend) serial)
          (cf:inject-pointer-motion compositor (round x) (round y))))
       (:leave
        ;; Off the output: the scene's hit test finds nothing and the seat's pointer
@@ -561,7 +634,10 @@ session is a debugging and test backend, and merging waits is phase-4 work."
   ;; an error rather than a no-op: the caller may still pump the parent.
   (unless (nested-closing-p backend)
     (srv:run-once (headless:compositor-display (nested-compositor backend))
-                  :timeout 0))
+                  :timeout 0)
+    ;; After the inner frame, because the scene learns which client image to draw
+    ;; during it (D41).
+    (sync-parent-cursor backend))
   backend)
 
 (defun run-nested (backend &key (timeout 0.01))
@@ -600,6 +676,10 @@ of them."
         (ignore-errors (wc:destroy-client-buffer (buffer-slot-buffer slot))))
       (when (nested-pool backend)
         (ignore-errors (wc:destroy-client-pool (nested-pool backend))))
+      (when (nested-blank-cursor-buffer backend)
+        (ignore-errors (wc:destroy-client-buffer (nested-blank-cursor-buffer backend))))
+      (when (nested-blank-cursor-pool backend)
+        (ignore-errors (wc:destroy-client-pool (nested-blank-cursor-pool backend))))
       (ignore-errors (wc:disconnect display)))
     (let ((compositor (nested-compositor backend)))
       (headless:stop-compositor compositor)

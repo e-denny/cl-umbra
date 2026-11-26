@@ -70,6 +70,7 @@ already speak in keycodes and masks, so that change stays inside this package.")
                 #:surface-current-y
                 #:surface-input-region
                 #:surface-mapped-p
+                #:resource-destroyed-p
                 #:shm-buffer-width
                 #:shm-buffer-height)
   (:documentation
@@ -85,6 +86,10 @@ nothing about seats, toplevels or focus.")
    #:scene-root
    #:scene-cursor
    #:scene-cursor-visible-p
+   #:scene-cursor-surface
+   #:scene-cursor-hotspot-x
+   #:scene-cursor-hotspot-y
+   #:client-cursor-usable-p
    #:scene-add-node
    #:scene-remove-node
    #:scene-hit-test
@@ -223,6 +228,8 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:compositor-scene
    #:compositor-cursor-x
    #:compositor-cursor-y
+   #:seat-pointer-cursor-image
+   #:sync-cursor-image
    #:compositor-cursor-visible-p
    #:compositor-placement-x
    #:compositor-placement-y
@@ -323,6 +330,8 @@ owns, and the presentation step is attach + damage + commit.")
                 #:compositor-scene
                 #:compositor-cursor-x
                 #:compositor-cursor-y
+                #:seat-pointer-cursor-image
+                #:sync-cursor-image
                 #:compositor-cursor-visible-p
                 #:compositor-placement-x
                 #:compositor-placement-y
@@ -404,6 +413,8 @@ docs/framework.md §1 follow.")
    #:compositor-scene
    #:compositor-cursor-x
    #:compositor-cursor-y
+   #:seat-pointer-cursor-image
+   #:sync-cursor-image
    #:compositor-cursor-visible-p
    #:compositor-placement-x
    #:compositor-placement-y

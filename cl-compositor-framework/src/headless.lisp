@@ -414,6 +414,46 @@ focus and a click must not require one (D32)."
         (t
          (srv:set-pointer-focus seat surface x y))))))
 
+(defun seat-pointer-cursor-image (seat)
+  "The cursor image of the pointer whose client has pointer focus.
+
+Returns (values surface hotspot-x hotspot-y), or NIL.  Focus, not "any pointer with an
+image": every client installs a cursor when the pointer enters it and may keep it, so
+the only image that means anything is the one belonging to the client the pointer is
+over (D41)."
+  (let ((focus (srv:seat-pointer-focus seat)))
+    (when focus
+      (let ((client (srv:resource-client focus)))
+        (loop for binding in (srv:seat-bindings seat)
+              do (loop for pointer in (srv:seat-resource-pointers binding)
+                       when (and (eq client (srv:resource-client pointer))
+                                 (srv:pointer-cursor-surface pointer))
+                         do (return-from seat-pointer-cursor-image
+                              (values (srv:pointer-cursor-surface pointer)
+                                      (srv:pointer-cursor-hotspot-x pointer)
+                                      (srv:pointer-cursor-hotspot-y pointer))))))))
+  nil)
+
+(defun sync-cursor-image (compositor)
+  "Point the scene's cursor at the image the focused client has installed.
+
+There is no event that says \"the pointer's picture changed and a frame is due\" -- a
+client may name an image and never commit anything, and a client that hides its cursor
+sends nothing at all -- so the frame path asks instead of being told.  That is one
+comparison per frame, and it cannot go stale the way a missed event would: a motion
+always produces the next frame, and the next frame is the one that would have shown
+the wrong picture (D41)."
+  (let ((scene (compositor-scene compositor)))
+    (multiple-value-bind (surface hotspot-x hotspot-y)
+        (seat-pointer-cursor-image (compositor-seat compositor))
+      (unless (and (eq surface (scene:scene-cursor-surface scene))
+                   (eql (or hotspot-x 0) (scene:scene-cursor-hotspot-x scene))
+                   (eql (or hotspot-y 0) (scene:scene-cursor-hotspot-y scene)))
+        (setf (scene:scene-cursor-surface scene) surface
+              (scene:scene-cursor-hotspot-x scene) (or hotspot-x 0)
+              (scene:scene-cursor-hotspot-y scene) (or hotspot-y 0))
+        (setf (compositor-dirty-p compositor) t)))))
+
 (defun focus-surface (compositor surface)
   "Give keyboard focus to SURFACE; NIL clears it.
 
@@ -790,6 +830,10 @@ found (D38)."
       ;; a nested session is a compositor whose pointer is drawn by its parent, and
       ;; it says so with COMPOSITOR-CURSOR-VISIBLE-P (D39).
       (setf (scene:scene-cursor-visible-p scene) (compositor-cursor-visible-p compositor))
+      ;; The client's pointer image is not a thing a frame is told about; it is a
+      ;; thing a frame asks for (D41).  Before the draw, so the frame that is about
+      ;; to be presented already has the right picture.
+      (sync-cursor-image compositor)
       (render:fill-target target (compositor-background compositor))
       (prune-surfaces compositor)
       (let ((drawn (scene:scene-render scene target)))

@@ -299,7 +299,11 @@ twice*:
     (the parent draws the pointer, and a second arrow at the same spot is a wrong picture, D39).
     The same point also asks the scene about the *client's* cursor image: a real `weston-terminal`
     names two cursor surfaces, and neither may have a scene node — a roleless surface given one is
-    a stray cursor stuck at the output's origin (D40).
+    a stray cursor stuck at the output's origin (D40). And the pointer's picture follows the
+    client: over the terminal's text area the scene's cursor image is the one that client
+    installed, with its hotspot, and the nested run requires the parent to be told to draw no
+    pointer while we draw the client's (a 1x1 transparent image), then to get its own back at a
+    bare-output spot where nothing of ours is drawn (D41).
 
 All sixteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
