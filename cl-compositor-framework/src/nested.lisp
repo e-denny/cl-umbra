@@ -278,7 +278,7 @@ parent stopped offering one -- it will not be sent events either way."
 
 The parent's `xdg_toplevel.configure' is the only way a nested session learns how much
 space it was given, and v0 used to ignore it: a tiling parent then drew a 1024x640
-window inside a much larger slot and the manual test looked "too small" (D37).  The
+window inside a much larger slot and the manual test looked 'too small' (D37).  The
 buffers belong to the old size, so they are destroyed first and made again; inner
 clients are not resized, and the scene keeps every node where it was.
 

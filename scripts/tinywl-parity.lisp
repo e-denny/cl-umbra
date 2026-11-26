@@ -186,7 +186,7 @@ worth knowing: the nested input path is a real protocol round trip."
 
 A target that has been drawn into has some; a target holding only the background
 paint has none.  That is the whole distinction clause 9 needs, in one number:
-"presented before the draw" and "presented after it" cannot be confused."
+"presented before the draw" and 'presented after it' cannot be confused."
   (let ((width (cf:compositor-width compositor))
         (height (cf:compositor-height compositor)))
     (loop for y from 0 below height by 4

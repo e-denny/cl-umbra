@@ -316,7 +316,7 @@ Returns the serial, or NIL when nothing has keyboard focus."
   "A pointer button press or release.  Returns the serial (for grabs and clicks).
 
 The seat remembers which buttons are down: a grab started from a middle-button
-drag must end on the middle button, and "which button is down" is state the seat
+drag must end on the middle button, and 'which button is down' is state the seat
 owns, not something a grab can infer from the event that started it."
   (let ((surface (seat-pointer-focus seat)))
     (unless surface
