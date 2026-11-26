@@ -294,7 +294,9 @@ twice*:
     drawn (D37). The nested run also asks for three frames and requires the target a presenter is
     handed to hold non-background pixels at each of them — the frame is drawn before it is
     committed, which is what a parent compositing that shared buffer at its own moment needs
-    (D38).
+    (D38). Finally, the pixel at the parked pointer has one expected answer per mode: the white
+    cursor body in the headless run (this session draws it) and the background in the nested one
+    (the parent draws the pointer, and a second arrow at the same spot is a wrong picture, D39).
 
 All sixteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface

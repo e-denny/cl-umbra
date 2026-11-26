@@ -114,6 +114,12 @@ its scene and its shm buffers become the size the parent offers, and a configure
 at all) leaves the size we chose (D37). Inner clients are not resized -- a client's size is its
 own statement -- so a window can be larger than the output, exactly as on a small screen.
 
+The pointer's *image* is the parent's: it already draws its cursor over our surface, so the
+nested session sets `compositor-cursor-visible-p` to NIL rather than drawing a second arrow in
+the same place (D39). `render-frame` projects that flag onto the scene immediately before
+drawing, so a compositor states the fact once and the renderer obeys it. A client's own cursor
+surface (`wl_pointer.set_cursor`) is recorded by the seat and still not drawn — phase 5.
+
 Contracts:
 
 - A backend only ever *reports*; it never calls into the scene, seat or shell. A compositor

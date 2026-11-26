@@ -747,6 +747,11 @@ found (D38)."
       (return-from render-frame nil))
     (setf (compositor-target compositor) target)
     (let ((scene (compositor-scene compositor)))
+      ;; The compositor decides whether this output draws a pointer image; the scene
+      ;; draws what it is told.  One flag, projected here rather than duplicated:
+      ;; a nested session is a compositor whose pointer is drawn by its parent, and
+      ;; it says so with COMPOSITOR-CURSOR-VISIBLE-P (D39).
+      (setf (scene:scene-cursor-visible-p scene) (compositor-cursor-visible-p compositor))
       (render:fill-target target (compositor-background compositor))
       (prune-surfaces compositor)
       (let ((drawn (scene:scene-render scene target)))

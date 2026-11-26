@@ -1363,3 +1363,61 @@ records. The general lesson is recorded here rather than in the code alone: **a 
 target must be announced only after it is final, and the gate for a cross-process seam has to
 composite on the far side of that seam.** An in-image parent is a test double for the *protocol*,
 not for the *timing*.
+
+## D39 — The pointer's image is the backend's business, and a nested session draws none
+
+**Status:** accepted
+
+**Context.** The third manual test, of the build with D38 in it, showed two pointer images
+stacked at the same place inside the nested window: a small plain white arrow, and a themed
+arrow with an outline at a larger size. The small one was ours — `cf.scene`'s 16x16 built-in
+cursor, drawn into the output and then upscaled by a parent running at scale 2. The larger one
+was the parent's own cursor, which that compositor draws over *every* surface it displays,
+including ours. Two cursors at one pointer position is not a rendering detail: it is a wrong
+picture, and it is what "some pointer image handling bugs" looked like.
+
+The code had made this likely in two ways. `render-frame` never looked at
+`compositor-cursor-visible-p` — the slot existed, was exported, and was read by nothing, so a
+backend that wanted no cursor had no working way to say so. And nothing about the nested
+backend said whose image the pointer is.
+
+Related, and worth recording while it is in view: the client-set cursor
+(`wl_pointer.set_cursor`) is still ignored by design (phase 5, `cursor-surface-p`), which is why
+weston-terminal's own I-beam and arrow never appear inside the window. The
+`could not load cursor 'dnd-copy'` / `'dnd-none'` lines in a session log are that client's own
+cursor-theme lookups failing — no installed theme ships those names — and are not ours to fix;
+they are also the clearest evidence that clients are asking for cursors we do not honour.
+
+**Decision.**
+
+1. **One flag, projected where it is used.** `COMPOSITOR-CURSOR-VISIBLE-P` is the compositor's
+   statement about whether its output draws a pointer image; `render-frame` copies it onto the
+   scene's `SCENE-CURSOR-VISIBLE-P` immediately before drawing. The scene keeps its own flag
+   because `SCENE-RENDER` must stay usable on a bare scene (the unit tests do), but a session
+   sets the compositor's. The previously dead accessor now means what its name says.
+2. **A nested session draws no cursor.** `start-nested` sets the flag to NIL: the parent draws
+   the pointer over our surface, from its own theme, at its own scale and size. Ours would be a
+   second arrow, blurrier, and the wrong size wherever the parent is scaled. This is what other
+   nested compositors do (weston's X11/Wayland backends, wlroots' embedded backends), and it is
+   the honest division: the compositor that owns the seat owns the pointer's picture.
+3. **A client's cursor surface still does not appear** (phase 5). Hiding our own cursor makes
+   the parent's themed pointer the one a person sees, which is right for a nested session and
+   wrong for a bare one — in a headless or a finished compositor, phase 5 is where a client's
+   cursor image gets drawn, from the surface and hotspot the seat already records.
+
+**Evidence.** Gate clause 16 grew by one check, in both runs, asserting the pixel at the parked
+pointer with a per-mode answer: headless it is the cursor's white body (`#xFFFFFFFF`, drawn by
+this session), nested it is the background (`#xFF000000`, left to the parent). Run against the
+old behaviour the nested run fails it with `#xFFFFFFFF` — the doubled arrow, in a number. 33
+checks headless, 40 nested, 73 in two runs; the gate is 16/16 and the suite is 214 tests in 10
+suites, with `a-hidden-cursor-is-not-drawn` now setting the compositor's flag rather than the
+scene's.
+
+**Consequences.** The nested window shows one pointer, the parent's. What this does *not* fix:
+the inner output is still 1x and upscaled by a scaled parent, so text is soft (D29, phase 2b);
+a client's own cursor image is still not drawn anywhere (phase 5); and a nested session cannot
+change the parent's cursor shape (that needs `wp_cursor_shape_v1`, or `wl_pointer` constraints
+for pointer lock — neither is in the plan's phase 3). The general lesson: **a flag with no
+reader is a bug report waiting to be written.** This one was exported, documented in the package
+and read by nobody, which is exactly how a backend ends up drawing a second cursor because there
+was no supported way not to.

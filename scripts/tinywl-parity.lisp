@@ -45,6 +45,11 @@
 ;;;;      A presenter that runs before the draw commits the background paint alone,
 ;;;;      and the window in the parent is black or half-drawn -- the flicker the
 ;;;;      manual test found (D38).
+;;;;  10. the pointer's image is the *backend's* business: a session whose output is
+;;;;      a window in another compositor draws no cursor of its own, because that
+;;;;      compositor already draws one over the same spot.  The headless run draws
+;;;;      its own, so the check is the same pixel with the expected answer per mode
+;;;;      (D39).
 ;;;;
 ;;;; The nested run's parent is a harness, not the thing under test, so its two
 ;;;; keybindings (Alt+Esc, Alt+F1 -- the framework's defaults) are cleared: a parent
@@ -552,7 +557,25 @@ of lines of protocol."
                (setf (cf.backend.headless:compositor-frame-presenter compositor)
                      presenter))))
 
-         ;; 10. Alt+Esc asks the clients to close and stops the loop.
+         ;; 10. The pointer's image is the backend's business (D39).
+         ;;
+         ;;     A nested session's output *is* a window in another compositor, and
+         ;;     that compositor draws its cursor over it -- at its own scale, from
+         ;;     its own theme.  A cursor of our own would be a second arrow at the
+         ;;     same spot.  The pixel at the parked pointer is therefore the
+         ;;     background nested and the cursor nested... headless, where nobody
+         ;;     else draws one.  Offset (+3, +6) is inside the arrow's white body.
+         (park-pointer)
+         (cf:request-frame *inner*)
+         (let ((expected (if *parent* *background* #xFFFFFFFF))
+               (x (+ *pointer-park-x* 3))
+               (y (+ *pointer-park-y* 6)))
+           (pump 5 :until (lambda () (eql expected (cf:frame-pixel *inner* x y))))
+           (check (eql expected (cf:frame-pixel *inner* x y))
+                  "the pointer image at (~D, ~D) is #x~8,'0X: ~:[drawn by this session~;left to the parent~]"
+                  x y (cf:frame-pixel *inner* x y) (and *parent* t)))
+
+         ;; 11. Alt+Esc asks the clients to close and stops the loop.
          ;;
          ;; Every client is connected *before* the quit: nothing before this point
          ;; cut one off, which is what makes "no protocol error" mean something.
@@ -579,7 +602,7 @@ of lines of protocol."
                        (append *lines-a* *lines-b*)))
                 "no client saw a protocol error")
 
-         ;; 11. B ran with WAYLAND_DEBUG=1: an ordered, valid event stream.
+         ;; 12. B ran with WAYLAND_DEBUG=1: an ordered, valid event stream.
          ;;
          ;; libwayland writes `-> interface#id.request(args)' for what the client
          ;; sent and a bare `interface#id.event(args)' for what arrived, so "did it

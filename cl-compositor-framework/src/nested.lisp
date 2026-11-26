@@ -34,6 +34,11 @@
 ;;;;     than the output, exactly as on a tiny screen
 ;;;;   * two shm buffers, no more: a frame that finds no free buffer is deferred
 ;;;;     until the parent releases one
+;;;;   * the pointer's *image* is the parent's: the parent already draws its cursor
+;;;;     over our surface, from its own theme at its own scale, so this session does
+;;;;     not draw a second one inside the output (D39).  A client that installs a
+;;;;     cursor surface (wl_pointer.set_cursor) is still ignored -- cursor surfaces
+;;;;     are phase 5 -- and what a person sees is the parent's pointer
 ;;;;   * the two reactors are polled, not merged into one epoll set
 ;;;;   * only the toplevel role is created; no popups, no decoration negotiation
 
@@ -369,6 +374,13 @@ when the input device is a parent pointer instead of a test's injection."
                                        :width width
                                        :height height
                                        :pump pump))
+          ;; The pointer's image belongs to the parent (D39).  It draws its cursor
+          ;; over our surface already; ours would be a second arrow at the same
+          ;; spot -- a 16x16 stub, upscaled by a parent whose output is at scale 2,
+          ;; on top of a themed cursor that is the right size and shape.  Two
+          ;; cursors is not a style question: it is a wrong picture, and the manual
+          ;; test saw it on the first frame it looked at.
+          (setf (headless:compositor-cursor-visible-p compositor) nil)
           (let ((registry (wc:wl-display.get-registry display)))
             ;; BIND-PARENT-GLOBALS fills in the slots of what the parent offers.
             (unless (bind-parent-globals backend registry)
