@@ -21,7 +21,7 @@
 ;;; ---------------------------------------------------------------------------
 
 (defclass grab ()
-  ((node :initarg :node :reader grab-node)
+  ((node :initarg :node :initform nil :reader grab-node)
    ;; The compositor that adopted this grab, set when it becomes active; the
    ;; compositor drops its own reference here rather than tracking a second list.
    (owner :initform nil :accessor grab-owner)
@@ -89,6 +89,34 @@ it to drop its own reference and release the pointer.")
     (setf (grab-active-p grab) nil)
     (grab-ended grab reason)
     t))
+
+;;; ---------------------------------------------------------------------------
+;;; Popup grabs
+;;;
+;;; An explicit grab (xdg_popup.grab) is an *owner-events* grab: the popup's client
+;;; hears the pointer as usual, and a press outside the popup's stack dismisses it
+;;; instead of reaching the window underneath.  The class lives here because it is
+;;; an interaction with a lifetime; its methods live in the compositor, because they
+;;; need a seat, a scene and a dismissal -- this package has none of those.
+
+(defclass popup-grab (grab)
+  ((popup :initarg :popup :reader popup-grab-popup)
+   ;; Buttons whose press this grab swallowed -- the press that dismissed the popup.
+   ;; Its release must be swallowed too: a client that never saw a press must not
+   ;; see a release, and the client that *did* see the press has been dismissed.
+   (swallowed :initform nil :accessor popup-grab-swallowed))
+  (:documentation
+   "The interaction a client's xdg_popup.grab owns the pointer with.
+
+It does not move or resize anything: it decides who hears each event, and it ends
+when the popup is dismissed.  GRAB-MOTION, GRAB-BUTTON and GRAB-KEY are specialised
+by the compositor (cf.backend.headless), which is where the pointer, the scene and
+the popup's stack are."))
+
+(defun begin-popup-grab (popup &key (button #x110))
+  "A grab for POPUP.  The button is what the client's user action used; it is only a
+record, because the popup's grab ends by dismissal, not by release."
+  (make-instance 'popup-grab :popup popup :button button))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Move

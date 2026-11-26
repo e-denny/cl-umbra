@@ -194,8 +194,9 @@ and nested).** The v1 state machine is in
 `cl-wayland-server/src/xdg-shell.lisp` and the policy seam is `cf:on-new-toplevel`. Gates:
 clause 11 `./scripts/xdg-shell-gate.sh`, clause 12 `./scripts/seat-gate.sh`, clause 13
 `./scripts/scene-gate.sh`, clause 14 `./scripts/grab-gate.sh`, clause 15
-`./scripts/nested-gate.sh`, clause 16 `./scripts/tinywl-parity.sh`. The focus stack, popups and
-a nested window on a foreign compositor are open below.
+`./scripts/nested-gate.sh`, clause 16 `./scripts/tinywl-parity.sh`, clause 17
+`./scripts/popup-gate.sh`. The focus stack and a nested window on a foreign compositor are open
+below.
 
 `cf.types.xdg-shell` (core)
 - [x] `xdg_wm_base` ping/pong; error conditions (`role`, `defunct_surfaces`)
@@ -207,7 +208,10 @@ a nested window on a foreign compositor are open below.
 - [x] `move`/`resize` requests with serial validation, and grabs behind them (phase 3d, D33)
 - [x] `set_activated` driving a configure with the `activated` state (focus and click-to-focus
       call `set-toplevel-activated`, and the gate asserts the state array either way)
-- [ ] basic `xdg_popup` + `xdg_positioner` (needed by menus; polish in phase 6)
+- [x] `xdg_popup` + `xdg_positioner` at v1 (phase 3f, D44): placement by the positioner's
+      rules against a compositor-supplied box, `popup_done`, topmost-popup ordering, and an
+      explicit grab dismissed by a click outside or by Escape. `reposition`/reactive positioning
+      and v3+ wait for a version bump (phase 6)
 - [ ] `cf.types.xdg-shell`: map/unmap events, layout placement, activation policy
 
 `cf.types.seat`
@@ -222,7 +226,8 @@ a nested window on a foreign compositor are open below.
 - [x] a keybinding table consulted before the client; Alt+Esc and Alt+F1 as defaults (D33)
 - [ ] focus stack (alt-tab order); v0 has "the window that mapped last" and nothing more
 - [ ] edge-anchored resizing (a top/left drag resizes without moving the node until the client
-      comes back with a buffer); Escape-to-cancel bound by default; popup grabs
+      comes back with a buffer); Escape-to-cancel bound by default
+- [x] popup grabs: owner-events, dismissed by a press outside the stack or by Escape (phase 3f)
 - [x] grabs: `begin-move`/`begin-resize` from `move`/`resize`, serial validation (phase 3d, D33)
 - [ ] `wl_pointer.frame` and `wl_seat.release` (a version bump, not a rewrite)
 

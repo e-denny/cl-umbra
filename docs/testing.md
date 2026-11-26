@@ -313,7 +313,36 @@ twice*:
     there is no client image, this session's own arrow to be drawn while the parent stays blanked —
     one pointer shows at all times (D41, revised).
 
-All sixteen clauses pass. Two details worth knowing: the protocol clause
+Popups and positioners add the seventeenth:
+
+17. **A menu, placed by its positioner, dismissed by the user** (`scripts/popup-gate.sh`,
+    `scripts/popup-gate.lisp`, `tests/c-client/wayland-popup-client.c`). A compiled libwayland
+    client draws a 300x200 window and opens menus the way a menu does:
+    `create_positioner` → `set_size` / `set_anchor_rect` / `set_anchor` / `set_gravity` /
+    `set_constraint_adjustment` → `get_popup` → `grab(seat, serial)` → initial commit → ack →
+    attach. The output is 320x240, deliberately barely larger than the window. The gate
+    injects the presses and asserts, from its own state and from the pixels: the first menu's
+    configure is `(30 30 120 80)` -- the anchor point of `(10 10 20 20)` with bottom-right
+    gravity, which is arithmetic, not a number the client sent -- and its magenta pixels are at
+    (35,35) and (145,105) with the window's green around them; the grabbed popup owns the
+    pointer (`cf.grab:popup-grab`); Escape dismisses it (popup_done, and the grab ends); a
+    second menu anchored at the window's bottom-right corner would leave the output, so the
+    compositor **flips** it and the configure is `(170 110 120 80)`, with the requested place
+    (305,205) still empty -- which proves the constraint box the framework supplied is the
+    output expressed in the parent's window-geometry space; and a press outside the menu
+    dismisses it *and* is swallowed, so the client's own log shows no click for a menu that had
+    already closed. A second scenario runs the *same* binary with `--follow-pointer` -- the mode
+    `scripts/popup-demo.sh` uses for a manual test, where the menu is anchored at the pointer
+    rather than at one of the two fixed anchors -- and requires a click at (77, 63) to produce
+    `(78 64 120 80)` (a 1x1 anchor rectangle at that point, bottom-right anchor and gravity),
+    its pixels inside, and Escape to dismiss it. Unit tests cover what a real client cannot
+    easily ask for: an incomplete positioner, a popup that would be its own parent or whose
+    parent has no role, no parent at all, a grab after mapping, a grab the compositor cannot
+    honour (which dismisses the popup), and destroying a popup that is not the topmost. Two
+    framework tests pin the placement rules: a menu is not a window to cycle, and a menu follows
+    the window it belongs to and stays above it.
+
+All seventeen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs

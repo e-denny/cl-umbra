@@ -78,8 +78,9 @@ What exists:
   (generated keymaps, keycodes, modifier state), `cf.scene` (buffer/rect/image nodes, hit
   testing, a software cursor), `cf.grab`, `cf.keybindings`, and `cf.backend.nested` (our
   compositor as a client of another one: its frame goes into the parent's shm buffer, its input
-  comes from the parent's seat). Damage, a focus stack, popups and the DRM/libinput backends are
-  phases 2b-5.
+  comes from the parent's seat). `xdg_popup` and `xdg_positioner` are implemented (menus,
+  tooltips, their grabs and their dismissal); damage, a focus stack and the DRM/libinput
+  backends are phases 2b-5.
 
 ## What this is
 
@@ -270,6 +271,11 @@ are already in:
 ```
 ./scripts/tinywl.sh --nested --launch weston-terminal
 ```
+
+Menus: no client installed here opens a popup (weston-terminal has no menus, kitty needs
+EGL), so `./scripts/popup-demo.sh --size 1024x640` runs the same session with
+`tests/c-client/wayland-popup-client.c` compiled and launched -- left-click anywhere in the
+window and the menu appears at the pointer; Escape or a click outside dismisses it.
 
 `--launch CMD` starts a client *inside* the session immediately, and again on
 **Alt+Shift+Return** — it sets the child's `WAYLAND_DISPLAY` to tinywl's own socket, which

@@ -76,6 +76,12 @@
 #      edge, Alt+F1 cycles and Alt+Esc closes the clients and stops the loop, with
 #      the client's own WAYLAND_DEBUG stream showing an acked configure
 #
+#  17. popups and positioners: a real client (compiled here) asks for a menu with a
+#      positioner, is configured where the rules say, is drawn there, is dismissed by
+#      Escape, asks for a second menu whose requested place is outside the output and
+#      gets it flipped back inside, and a click outside the menu dismisses it without
+#      the click reaching the client
+#
 #  15. our compositor runs as a client of another compositor, in one image and two
 #      sockets: the parent sees a mapped, titled, activated xdg_toplevel; the
 #      parent's pixels equal the nested compositor's own target; a pointer motion
@@ -262,6 +268,15 @@ else
   fail 'tinywl parity' 'a real client was not placed, focused, typed at, dragged, resized, cycled or quit' "$log_dir/tinywl.log"
 fi
 
+# 17. Popups and positioners ---------------------------------------------------
+printf '\nphase 3f gate: popups and positioners\n\n'
+
+if gb "$log_dir/popup.log" "$repo_root/scripts/popup-gate.sh"; then
+  pass 'popups' "$(grep -a '^popup-gate: ' "$log_dir/popup.log" | tail -n 1 | sed 's/^popup-gate: //')"
+else
+  fail 'popups' 'a menu was not placed, drawn, or dismissed' "$log_dir/popup.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -281,7 +296,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 3a, 3b, 3c, 3d, 3e and tinywl parity)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 3a, 3b, 3c, 3d, 3e, tinywl parity and popups)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

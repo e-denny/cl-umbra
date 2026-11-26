@@ -157,6 +157,10 @@ two hooks.")
    #:grab-anchored
    #:clamp-to-output
    #:node-geometry
+   #:popup-grab
+   #:begin-popup-grab
+   #:popup-grab-popup
+   #:popup-grab-swallowed
    #:move-grab-output-width
    #:move-grab-output-height
    #:resize-target-size
@@ -242,6 +246,11 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:compositor-placement-x
    #:compositor-placement-y
    #:on-new-toplevel
+   #:on-new-popup
+   #:raise-window-with-popups
+   #:sync-popup-positions
+   #:popup-parent-geometry
+   #:popup-compositor
    #:surface-under-cursor
    #:update-pointer
    #:on-pointer-button
@@ -344,6 +353,11 @@ owns, and the presentation step is attach + damage + commit.")
                 #:compositor-placement-x
                 #:compositor-placement-y
                 #:on-new-toplevel
+                #:on-new-popup
+                #:raise-window-with-popups
+                #:sync-popup-positions
+                #:popup-parent-geometry
+                #:popup-compositor
                 #:surface-under-cursor
                 #:update-pointer
                 #:on-pointer-button
@@ -427,6 +441,11 @@ docs/framework.md §1 follow.")
    #:compositor-placement-x
    #:compositor-placement-y
    #:on-new-toplevel
+   #:on-new-popup
+   #:raise-window-with-popups
+   #:sync-popup-positions
+   #:popup-parent-geometry
+   #:popup-compositor
    #:surface-under-cursor
    #:update-pointer
    #:on-pointer-button

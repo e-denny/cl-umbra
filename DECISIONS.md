@@ -1693,3 +1693,76 @@ changes its window geometry mid-drag (the anchor is recomputed from the geometry
 it follows the client's own statement). The lesson: **a compositor that speaks buffer coordinates
 to a client is speaking a different language than the one the client answers in — and a drag is
 only as good as its bounds.**
+
+## D44 — A popup is placed by arithmetic against a box the compositor names, and a menu belongs to its window
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** `xdg_popup` + `xdg_positioner`
+
+`xdg_wm_base.create_positioner` and `xdg_surface.get_popup` were the last two v1 requests that
+answered `implementation` ("not built yet"), and the header of
+`cl-wayland-server/src/xdg-shell.lisp` said so on purpose: a positioner that positions nothing
+would be a lie. A menu is the first surface a client creates that the compositor must *place*
+rather than let it place itself, so this slice is where the framework first has to answer
+"where is that, in your coordinates" — and the answer has to survive the parent moving.
+
+Four things were unclear enough to be decided rather than improvised:
+
+1. **The arithmetic is a pure function in the protocol layer, and the constraint box is the
+   compositor's.** `xdg_popup.configure` carries x and y relative to the upper-left corner of
+   the *parent's window geometry*, not to the output — so the protocol layer can compute the
+   whole placement from the positioner's rules plus one box, provided the box arrives in the
+   same space. `positioner-place` (rule, box) is therefore pure and unit-tested (anchor point,
+   gravity, offset, then flip → slide → resize against the box); the box comes from a
+   generic the compositor specialises on the popup's `wl_surface` (`popup-constraint-box`),
+   and `cf.backend.headless` computes it as the output in the parent's geometry space:
+   `(-parent-x -parent-y output-width output-height)`. Neither side guesses the other's
+   coordinates.
+2. **A flip that is still constrained is reverted**, which is what the XML says and what a
+   naive implementation gets wrong: half a menu above the top of the screen is worse than a
+   menu clipped at the bottom, because the *anchor edge* is what the user is looking at. Slide
+   clamps a popup larger than the box so that it still covers the box — the same rule as
+   `clamp-to-output` (D43) — and resize only ever shrinks, as the spec's wording allows.
+3. **A popup's node is placed every frame, from its parent's node.** The configure's position
+   is relative to the parent, and the parent moves: a drag, a resize, a cycle. Storing an
+   absolute position at configure time gives a menu that stays behind when its window is
+   dragged, and re-placing only on configure gives the same thing one interaction later.
+   `sync-popup-positions` asks each frame, exactly as the pointer's image is asked for (D41).
+   Two smaller rules fall out of the same idea: a popup node is *not* a window
+   (`window-node-p` now demands the toplevel role, so cycling cannot raise a menu), and a raise
+   takes the window's popups with it (`raise-window-with-popups`) — a menu left over another
+   window is a menu for the wrong window.
+4. **A popup grab is an owner-events grab that ends on dismissal, not on the button that
+   started it.** Inside the stack the client hears the press (a submenu is clickable); outside,
+   the compositor dismisses and swallows the press *and its release*, because a client that was
+   not sent the press must not be sent the release (the same rule as a consumed key, D33). The
+   grab therefore outlives the dismissal until the swallowed release has arrived, which is why
+   `popup-dismissed` ends it only when nothing is pending. Escape is the keyboard half of the
+   spec's "dismissed by the user"; a grab whose serial is not one this display issued is
+   refused, and a refused grab dismisses the popup, as the XML requires.
+
+**Evidence.** `scripts/popup-gate.sh` (gate clause 17), a compiled libwayland client on a
+320x240 output with a 300x200 window: the first menu's configure is `(30 30 120 80)` (the anchor
+point of `(10 10 20 20)`, bottom-right gravity), its magenta pixels are at (35,35) and
+(145,105) with the window's green around them, Escape produces `popup-done` and the pixels revert,
+the second menu — anchored at the window's corner, where it would leave the output — is
+**flipped** to `(170 110 120 80)` with the requested place (305,205) still empty, and a press
+outside it dismisses it with the client's own log showing no click for the closed menu. 24
+checks over two clients (the gate's two fixed anchors, and the demo's `--follow-pointer` mode,
+which anchors the menu at the pointer and is what a manual test uses). Unit tests: seventeen new ones -- four on the arithmetic (anchor points,
+gravity and offset, flip-then-slide-then-resize, and the flip that is reverted), eleven on the
+state machine over raw messages (the configure and the copied rule, map/unmap, the topmost
+destroy rule, a grab accepted, a grab refused, a grab after mapping, a nested parent without a
+grab, a parent with no role, a popup that would be its own parent, no parent at all, and an
+incomplete positioner), and two on the framework's placement (a menu is not a window; a menu
+follows its window and stays above it). The suite went from 221 to 238 tests; the gate is 17/17.
+
+**Consequences.** Menus, tooltips and dropdowns work, with the placement and the grab a real
+client expects, and the same policy holds in a nested session because nothing in it is parent
+specific. What this does not do: `reposition` or reactive positioning (v3, so the global stays
+v1), popups parented by anything but xdg-shell (a null parent is created and never mapped — no
+layer-shell yet), multiple outputs (the constraint box is *the* output, singular), and
+server-side placement of a menu that its client positions badly (the compositor adjusts only
+what the client asked it to adjust). The lesson: **a surface the compositor places must be
+placed from the parent's frame of reference, and asked for again whenever the parent moves.**

@@ -251,11 +251,18 @@ per existing rectangle rather than trying to be minimal."))
 ;;;                  sent, serials acked, whether a buffer was ever legal yet.
 ;;;   XDG-TOPLEVEL   the window: title, app id, size hints, requested states, and
 ;;;                  the configure that tells the client what to draw.
+;;;   XDG-POPUP      the short-lived child: a copied positioner rule, a parent, the
+;;;                  geometry the compositor placed it at, and whether it took an
+;;;                  explicit grab.
+;;;   XDG-POSITIONER  a rule object, not a surface: size, anchor rectangle, anchor,
+;;;                  gravity, constraint adjustment and offset.  A popup takes a
+;;;                  *copy* of it, which is why one positioner can place many popups
+;;;                  and can be destroyed the moment get_popup has been answered.
 ;;;
-;;; The role is a pointer (XDG-SURFACE-ROLE -> toplevel), not a class change: the
-;;; wl_surface is the same object before and after, and docs/architecture.md §4's
-;;; CHANGE-CLASS idea only pays off once roles share a class hierarchy worth
-;;; changing into.  Popups and positioners are deliberately absent.
+;;; The role is a pointer (XDG-SURFACE-ROLE -> toplevel or popup), not a class
+;;; change: the wl_surface is the same object before and after, and
+;;; docs/architecture.md §4's CHANGE-CLASS idea only pays off once roles share a
+;;; class hierarchy worth changing into.
 ;;; ---------------------------------------------------------------------------
 
 (defclass xdg-wm-base (resource)
@@ -320,7 +327,12 @@ invented ack a protocol error instead of a shrug."))
    (configure-height :initform 0 :accessor xdg-toplevel-configure-height)
    (configure-states :initform nil :accessor xdg-toplevel-configure-states)
    (mapped-p :initform nil :accessor xdg-toplevel-mapped-p)
-   (closed-p :initform nil :accessor xdg-toplevel-closed-p))
+   (closed-p :initform nil :accessor xdg-toplevel-closed-p)
+   ;; The live popups of this toplevel, oldest first: creation order *is* the
+   ;; stacking order ("a newly created xdg_popup will be stacked on top of all
+   ;; previously created xdg_popup surfaces associated with the same xdg_toplevel"),
+   ;; and it is what makes "not the topmost popup" answerable.
+   (popups :initform nil :accessor xdg-toplevel-popups))
   (:documentation
    "xdg_toplevel: a window.
 
@@ -328,6 +340,54 @@ TITLE, APP-ID and the size hints are what a taskbar or a rule engine reads; the
 configure event is what the client reads.  Nothing here decides layout: with a
 headless output and no scene graph, a mapped toplevel is drawn where its buffer
 offset puts it, and that is a documented limit, not an oversight."))
+
+(defclass xdg-positioner (resource)
+  ((size :initform nil :accessor xdg-positioner-size)
+   (anchor-rect :initform nil :accessor xdg-positioner-anchor-rect)
+   (anchor :initform 0 :accessor xdg-positioner-anchor)
+   (gravity :initform 0 :accessor xdg-positioner-gravity)
+   (constraint-adjustment :initform 0 :accessor xdg-positioner-constraint-adjustment)
+   (offset :initform '(0 0) :accessor xdg-positioner-offset))
+  (:documentation
+   "xdg_positioner: the rules for placing one child surface, and nothing else.
+
+It is not a surface and it draws nothing.  SIZE is (width height) or NIL until
+set_size is called, ANCHOR-RECT is (x y width height) or NIL until set_anchor_rect
+is called, and those two NILs are what 'incomplete' means: a popup may not be
+created from a positioner that has neither.  A popup copies the rules at get_popup,
+so changing or destroying the positioner afterwards changes nothing."))
+
+(defclass xdg-popup (resource)
+  ((shell-surface :initarg :shell-surface :initform nil
+                  :accessor xdg-popup-shell-surface)
+   ;; The parent xdg_surface, or NIL for the "some other protocol will say" case
+   ;; the v1 XML allows and this compositor cannot honour (no layer-shell yet).
+   (parent :initform nil :accessor xdg-popup-parent)
+   ;; The positioner rule as it was when get_popup was called.
+   (rule :initform nil :accessor xdg-popup-rule)
+   ;; Where the compositor placed it, relative to the parent's window geometry:
+   ;; (x y width height), from the xdg_popup.configure we sent.  Also the answer to
+   ;; "where is the node" for the compositor that drew it.
+   (geometry :initform nil :accessor xdg-popup-geometry)
+   (configure-count :initform 0 :accessor xdg-popup-configure-count)
+   (mapped-p :initform nil :accessor xdg-popup-mapped-p)
+   ;; An explicit grab: the popup owns the pointer until it is dismissed.
+   (grabbed-p :initform nil :accessor xdg-popup-grabbed-p)
+   ;; Dismissed by the compositor (or its client): popup_done was sent and the
+   ;; surface is unmapped, but the object may still be alive until the client
+   ;; destroys it.
+   (dismissed-p :initform nil :accessor xdg-popup-dismissed-p))
+  (:documentation
+   "xdg_popup: a menu, a tooltip, a dropdown.
+
+Its placement is decided once, from a copy of an xdg_positioner's rules, at the
+initial configure; the position is relative to the parent's *window geometry*, which
+is why the arithmetic lives with the protocol (POSITIONER-PLACE) and the constraint
+area comes from the compositor (POPUP-CONSTRAINT-BOX), expressed in the same space.
+
+DISMISSED-P is not the same as destroyed: the compositor takes a popup off the
+screen and tells the client (xdg_popup.popup_done), and the client destroys the
+object afterwards, in its own time."))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Shared memory

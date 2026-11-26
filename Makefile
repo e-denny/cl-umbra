@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested tinywl soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup tinywl soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested tinywl
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup tinywl
 
 test:
 	./scripts/run-tests.sh
@@ -54,6 +54,11 @@ grab:
 # sockets, one image, pixels and input crossing both.
 nested:
 	./scripts/nested-gate.sh
+
+# A real client opens menus: a positioner's answer, the flipped constrained one,
+# pixels, Escape, and a click outside that dismisses without reaching the client.
+popup:
+	./scripts/popup-gate.sh
 
 # Run tinywl itself (a manual test; --nested puts it in the current session).
 tinywl-run:

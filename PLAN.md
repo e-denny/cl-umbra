@@ -280,8 +280,9 @@ actually applied, opaque-region culling.
 it, moved and resized by mouse.
 
 **Status (phase 3a — xdg-shell toplevels —, 3b — seats and input —, 3c — the scene —, 3d —
-grabs —, 3e — the client library and the nested backend — and the exit slice, `cl-tinywl` —
-met; popups and a nested window on a foreign compositor are what is left of the phase):**
+grabs —, 3e — the client library and the nested backend —, the exit slice, `cl-tinywl` — and
+3f — `xdg_popup` + `xdg_positioner` — met; a nested window on a foreign compositor is what is
+left of the phase):**
 `xdg-shell` v1 is implemented in `cl-wayland-server/src/xdg-shell.lisp`: `xdg_wm_base`
 (ping/pong, `defunct_surfaces`), `xdg_surface` (initial configure after the first commit,
 serial bookkeeping, `ack_configure`, `invalid_serial`, `defunct_role_object`,
@@ -367,10 +368,17 @@ the focused window, that a drag moves and a release stops it (with the pixels mo
 Alt+right produces `resize width: 240, height: 180` in the client's own output, Alt+F1, Alt+Esc,
 and an ordered `WAYLAND_DEBUG` stream (`scripts/tinywl-parity.sh`).
 
-Not in these slices: `xdg_popup` + `xdg_positioner`, the focus stack, edge-anchored resizing,
-layer-shell, client cursor surfaces (a client's `set_cursor` surface is now kept out of the scene
-rather than drawn as a window), and a nested window on a *foreign* compositor (which needs a
-window on a live session, and therefore its own authorization).
+Popups and positioners landed as their own slice (3f, D44): `get_popup` with a copied
+positioner rule, placement by pure arithmetic against a constraint box the compositor supplies,
+`popup_done`, the topmost-popup ordering rule, and an owner-events grab dismissed by a click
+outside or by Escape. Gate clause 17 is a compiled client that opens two menus, one of which the
+compositor must flip back inside the output (`scripts/popup-gate.sh`).
+
+Not in these slices: the focus stack, edge-anchored resizing, `reposition` and reactive
+positioning (v3, so the global stays v1), layer-shell, client cursor surfaces (a client's
+`set_cursor` surface is now kept out of the scene rather than drawn as a window), and a nested
+window on a *foreign* compositor (which needs a window on a live session, and therefore its own
+authorization).
 
 ### Phase 4 — Real hardware: DRM dumb buffers + libinput (6-8 weeks)
 

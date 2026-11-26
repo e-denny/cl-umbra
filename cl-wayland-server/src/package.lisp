@@ -244,6 +244,7 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
   (:import-from #:xdg-shell
                 #:xdg-wm-base.destroy
                 #:xdg-wm-base.get-xdg-surface
+                #:xdg-wm-base.create-positioner
                 #:xdg-wm-base.pong
                 #:xdg-wm-base.ping
                 #:xdg-surface.destroy
@@ -268,14 +269,31 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:xdg-toplevel.set-minimized
                 #:xdg-toplevel.configure
                 #:xdg-toplevel.close
+                ;; popups and positioners (v1: one configure, no reposition)
+                #:xdg-positioner.destroy
+                #:xdg-positioner.set-size
+                #:xdg-positioner.set-anchor-rect
+                #:xdg-positioner.set-anchor
+                #:xdg-positioner.set-gravity
+                #:xdg-positioner.set-constraint-adjustment
+                #:xdg-positioner.set-offset
+                #:xdg-popup.destroy
+                #:xdg-popup.grab
+                #:xdg-popup.configure
+                #:xdg-popup.popup-done
                 ;; opcodes of the events the server sends
                 #:+xdg-wm-base-ping+
                 #:+xdg-surface-configure+
                 #:+xdg-toplevel-configure+
                 #:+xdg-toplevel-close+
+                #:+xdg-popup-configure+
+                #:+xdg-popup-popup-done+
                 ;; xdg_wm_base.error
                 #:+xdg-wm-base-error-role+
                 #:+xdg-wm-base-error-defunct-surfaces+
+                #:+xdg-wm-base-error-not-the-topmost-popup+
+                #:+xdg-wm-base-error-invalid-popup-parent+
+                #:+xdg-wm-base-error-invalid-positioner+
                 ;; xdg_surface.error
                 #:+xdg-surface-error-not-constructed+
                 #:+xdg-surface-error-already-constructed+
@@ -287,6 +305,34 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:+xdg-toplevel-error-invalid-resize-edge+
                 #:+xdg-toplevel-error-invalid-parent+
                 #:+xdg-toplevel-error-invalid-size+
+                ;; xdg_popup.error
+                #:+xdg-popup-error-invalid-grab+
+                ;; xdg_positioner.error, .anchor, .gravity and .constraint_adjustment
+                #:+xdg-positioner-error-invalid-input+
+                #:+xdg-positioner-anchor-none+
+                #:+xdg-positioner-anchor-top+
+                #:+xdg-positioner-anchor-bottom+
+                #:+xdg-positioner-anchor-left+
+                #:+xdg-positioner-anchor-right+
+                #:+xdg-positioner-anchor-top-left+
+                #:+xdg-positioner-anchor-bottom-left+
+                #:+xdg-positioner-anchor-top-right+
+                #:+xdg-positioner-anchor-bottom-right+
+                #:+xdg-positioner-gravity-none+
+                #:+xdg-positioner-gravity-top+
+                #:+xdg-positioner-gravity-bottom+
+                #:+xdg-positioner-gravity-left+
+                #:+xdg-positioner-gravity-right+
+                #:+xdg-positioner-gravity-top-left+
+                #:+xdg-positioner-gravity-bottom-left+
+                #:+xdg-positioner-gravity-top-right+
+                #:+xdg-positioner-gravity-bottom-right+
+                #:+xdg-positioner-constraint-adjustment-slide-x+
+                #:+xdg-positioner-constraint-adjustment-slide-y+
+                #:+xdg-positioner-constraint-adjustment-flip-x+
+                #:+xdg-positioner-constraint-adjustment-flip-y+
+                #:+xdg-positioner-constraint-adjustment-resize-x+
+                #:+xdg-positioner-constraint-adjustment-resize-y+
                 ;; xdg_toplevel.state
                 #:+xdg-toplevel-state-maximized+
                 #:+xdg-toplevel-state-fullscreen+
@@ -471,6 +517,45 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:xdg-toplevel-configure-states
    #:xdg-toplevel-mapped-p
    #:xdg-toplevel-closed-p
+   #:xdg-toplevel-popups
+   ;; popups and positioners
+   #:xdg-positioner
+   #:xdg-popup
+   #:xdg-positioner-size
+   #:xdg-positioner-anchor-rect
+   #:xdg-positioner-anchor
+   #:xdg-positioner-gravity
+   #:xdg-positioner-constraint-adjustment
+   #:xdg-positioner-offset
+   #:xdg-positioner-complete-p
+   #:xdg-positioner-rule
+   #:xdg-popup-shell-surface
+   #:xdg-popup-parent
+   #:xdg-popup-rule
+   #:xdg-popup-geometry
+   #:xdg-popup-configure-count
+   #:xdg-popup-mapped-p
+   #:xdg-popup-grabbed-p
+   #:xdg-popup-dismissed-p
+   #:xdg-popup-toplevel
+   #:popup-topmost-p
+   #:send-popup-configure
+   #:configure-popup
+   #:dismiss-popup
+   #:dismiss-popup-chain
+   #:popup-constraint-box
+   #:popup-grab-requested
+   #:popup-dismissed
+   #:place-popup
+   #:constrain-popup
+   #:popup-position
+   #:anchor-point
+   #:gravity-origin
+   #:corner-directions
+   #:flip-horizontal
+   #:flip-vertical
+   #:slide-position
+   #:span-inside-p
    #:send-configure
    #:ping-xdg-wm-base
    #:close-toplevel

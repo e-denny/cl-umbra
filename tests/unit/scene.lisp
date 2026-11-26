@@ -264,8 +264,8 @@ into it; it failed 100% of the time before targets moved to foreign memory (D35)
 (defun node-for (compositor surface)
   "The node SURFACE is drawn through after a mapped commit: NIL when it has none.
 
-The slot, not the return value of the step that creates it -- "the commit created no
-node" and "the surface is still drawn through the node it already had" are
+The slot, not the return value of the step that creates it -- 'the commit created no
+node' and 'the surface is still drawn through the node it already had' are
 different states, and only the first is acceptable for a cursor image."
   (cf.backend.headless::ensure-scene-node compositor surface)
   (cf:surface-scene-node surface))
@@ -419,17 +419,20 @@ state machine -- but a *roleless* surface is not a window and must not be cycled
 Returns (values surface node)."
   (let* ((surface (make-instance 'cf:cf-surface
                                  :client nil :id 9 :interface nil :version 1))
+         (shell (make-instance 'srv:xdg-surface
+                               :client nil :id 11 :interface nil :version 1))
          (node (scene:scene-add-node (cf:compositor-scene compositor)
                                      (scene:make-buffer-node surface)
                                      :x x :y y)))
-    (setf (srv:surface-current-buffer surface)
+    ;; The role *name* is what WINDOW-NODE-P asks about: a popup has a shell role too,
+    ;; and a menu is not a window to cycle (D44).
+    (setf (srv:xdg-surface-role-name shell) :toplevel
+          (srv:surface-current-buffer surface)
           (make-instance 'srv:shm-buffer
                          :pool nil :offset 0 :width width :height height
                          :stride (* 4 width) :format 0)
           (srv:surface-mapped-p surface) t
-          (srv:surface-shell-surface surface)
-          (make-instance 'srv:xdg-surface
-                         :client nil :id 11 :interface nil :version 1)
+          (srv:surface-shell-surface surface) shell
           (cf:surface-scene-node surface) node)
     (values surface node)))
 
@@ -528,3 +531,93 @@ Returns (values surface node)."
     (ok (null (cf:handle-key compositor "a" :pressed))
         "nothing bound 'a', so it goes to the client (and nowhere, with no focus)")
     (ok (null (cf:compositor-consumed-keys compositor)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Popups: a menu is not a window, and it follows the window it belongs to
+;;; ---------------------------------------------------------------------------
+
+(defun popup-under-window (compositor window-surface &key (x 10) (y 10)
+                                                     (width 100) (height 80)
+                                                     (geometry '(30 30 120 80)))
+  "A popup role, its surface and its node, hanging off WINDOW-SURFACE's window.
+
+Nothing goes through the protocol state machine: this file tests the *placement*,
+which is a question about nodes and the numbers the configure left behind.  Returns
+(values popup-node popup toplevel-role).
+"
+  (let* ((shell (srv:surface-shell-surface window-surface))
+         (toplevel (or (srv:xdg-surface-role shell)
+                       (let ((role (make-instance 'srv:xdg-toplevel
+                                                  :client nil :id 12 :interface nil :version 1)))
+                         (setf (srv:xdg-surface-role shell) role
+                               (srv:xdg-toplevel-shell-surface role) shell)
+                         role)))
+         (popup-shell (make-instance 'srv:xdg-surface
+                                     :client nil :id 21 :interface nil :version 1))
+         (popup (make-instance 'srv:xdg-popup
+                               :client nil :id 22 :interface nil :version 1))
+         (popup-surface (make-instance 'cf:cf-surface
+                                       :client nil :id 23 :interface nil :version 1))
+         (popup-node (scene:scene-add-node (cf:compositor-scene compositor)
+                                           (scene:make-buffer-node popup-surface)
+                                           :x x :y y)))
+    (setf (srv:xdg-surface-surface shell) window-surface
+          (srv:xdg-surface-role-name popup-shell) :popup
+          (srv:xdg-surface-role popup-shell) popup
+          (srv:xdg-surface-surface popup-shell) popup-surface
+          (srv:xdg-popup-shell-surface popup) popup-shell
+          (srv:xdg-popup-parent popup) shell
+          (srv:xdg-popup-geometry popup) geometry
+          (srv:xdg-toplevel-popups toplevel)
+          (append (srv:xdg-toplevel-popups toplevel) (list popup))
+          (srv:surface-current-buffer popup-surface)
+          (make-instance 'srv:shm-buffer :pool nil :offset 0
+                                         :width width :height height
+                                         :stride (* 4 width) :format 0)
+          (srv:surface-mapped-p popup-surface) t
+          (srv:surface-shell-surface popup-surface) popup-shell
+          (cf:surface-scene-node popup-surface) popup-node)
+    (values popup-node popup toplevel)))
+
+(deftest a-menu-is-not-a-window
+  (with-compositor (compositor :width 200 :height 200)
+    (multiple-value-bind (window-surface window-node) (window-node compositor 0 0)
+      (multiple-value-bind (popup-node popup toplevel)
+          (popup-under-window compositor window-surface)
+        (declare (ignore popup toplevel))
+        (ok (cf:window-node-p window-node) "the window is a window")
+        (ok (not (cf:window-node-p popup-node))
+            "a popup has a shell role and a node, but it is not something to cycle")))))
+
+(deftest a-menu-follows-the-window-it-belongs-to
+  (with-compositor (compositor :width 320 :height 240)
+    (multiple-value-bind (window-surface window-node) (window-node compositor 50 40)
+      (multiple-value-bind (popup-node popup toplevel)
+          (popup-under-window compositor window-surface)
+        (declare (ignore popup toplevel))
+        (setf (cf:compositor-surfaces compositor) (list window-surface))
+        (let ((popup-surface (scene:buffer-node-surface popup-node)))
+          (push popup-surface (cf:compositor-surfaces compositor))
+          ;; The configure said (30, 30) relative to the window's geometry, and the
+          ;; window is at (50, 40) with no window geometry of its own.
+          (cf:sync-popup-positions compositor)
+          (ok (equal '(80 70) (multiple-value-list (scene:node-position popup-node)))
+              "the popup is placed parent + configure, in output space")
+          ;; A drag moves the window; the menu must travel with it, which is why the
+          ;; placement is asked for every frame rather than stored at configure time.
+          (scene:set-node-position window-node 10 20)
+          (cf:sync-popup-positions compositor)
+          (ok (equal '(40 50) (multiple-value-list (scene:node-position popup-node)))
+              "moving the window moves the menu")
+          ;; A raise takes the menu with the window: raising the window alone would
+          ;; bury the menu, raising the menu alone would be true only until the next
+          ;; click raised the window.
+          (let ((root (scene:scene-root (cf:compositor-scene compositor))))
+            (scene:node-raised window-node)
+            (ok (eq window-node (car (last (scene:node-children root))))
+                "raising the window alone puts the window over its own menu...")
+            (cf:raise-window-with-popups compositor window-node)
+            (ok (eq popup-node (car (last (scene:node-children root))))
+                "...and RAISE-WINDOW-WITH-POPUPS puts the menu back on top")
+            (ok (eq window-node (car (last (butlast (scene:node-children root)))))
+                "directly above the window it belongs to")))))))

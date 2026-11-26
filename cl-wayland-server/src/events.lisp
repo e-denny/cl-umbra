@@ -150,6 +150,12 @@ that catch *our* bugs: a wrong type is an error in this image, not in the wire."
 (defmethod xdg-toplevel.close ((toplevel xdg-toplevel))
   (send-event toplevel +xdg-toplevel-close+))
 
+(defmethod xdg-popup.configure ((popup xdg-popup) x y width height)
+  (send-event popup +xdg-popup-configure+ x y width height))
+
+(defmethod xdg-popup.popup-done ((popup xdg-popup))
+  (send-event popup +xdg-popup-popup-done+))
+
 (defmethod xdg-wm-base.ping ((wm-base xdg-wm-base) serial)
   (send-event wm-base +xdg-wm-base-ping+ serial))
 

@@ -34,7 +34,7 @@ decomposition is the part worth copying.
 | `cf.types.compositor`, `.surface`, `.region` | `wlr_compositor`, `wlr_surface` | 2 | core protocol objects + surface state machine |
 | `cf.types.output` | `wlr_output` protocol side | 2 | `wl_output`, `zxdg_output_v1` |
 | `cf.types.seat`, `.cursor` | `wlr_seat`, `wlr_cursor` | 3 | focus, capabilities, pointer/keyboard/touch, cursor |
-| `cf.types.xdg-shell` | `wlr_xdg_shell` | 3 | policy over the v1 state machine in `cl-wayland-server`; popups in 6 |
+| `cf.types.xdg-shell` | `wlr_xdg_shell` | 3 | policy over the v1 state machine in `cl-wayland-server`; popups and positioners in 3f (D44) |
 | `cf.types.subcompositor` | `wlr_subcompositor` | 3 | subsurfaces, sync/desync, sublayers |
 | `cf.types.layer-shell` | `wlr_layer_shell_v1` | 6 | panels, notifications, exclusive zones |
 | `cf.types.data-device` | `wlr_data_device_manager` | 6 | clipboard, primary selection, DnD |
@@ -203,7 +203,10 @@ space, a visibility flag and a parent.
   `(values node local-x local-y)`; a `buffer-node` is hit only where it is mapped, inside its
   buffer, and inside its committed **input region** (an empty region makes it click-through).
   `cf:surface-under-cursor` is the framework's `desktop_view_at`: it turns the node into a
-  surface. Popups and their own coordinates arrive with `xdg_popup`.
+  surface. A popup is hit-testable like any other node, and its node is placed from its
+  *parent's* node plus the configure the protocol layer computed (`sync-popup-node`), asked for
+  every frame because the parent can move (D44); it is not a window (`window-node-p` demands
+  the toplevel role), and a raise takes a window's popups with it.
 - **The cursor is drawn last, and it is whoever's picture it is**: the client's cursor image
   (`wl_pointer.set_cursor`) at pointer minus hotspot when the client has installed one, otherwise
   the session's own arrow. A client's image is never a scene node (D40) but is drawn from the
@@ -262,12 +265,14 @@ focus stack, cursor shapes and touch are still ahead.*
   checked for the serial *and* for the focus, and refused silently when they fail: xdg-shell
   defines no error for this, and silence is the honest answer.
 - **Grabs** are objects, not modal flags (`cf.grab`): `grab-motion`, `grab-button`, `grab-key`,
-  and `grab-end`, which is idempotent — a release racing a cancel ends the grab once. Two exist:
-  `move-grab` (the node follows the pointer's delta from a remembered origin) and `resize-grab`
-  (the size an edge implies is computed by the pure `resize-target-size` and *configured*, because
-  a compositor cannot resize a buffer it does not own). A grab holds the button that was
-  physically down when it started, and the compositor learns about frames and configures through
-  two hooks, `grab-changed` and `grab-resize`. Popup grabs and DnD arrive with their protocols.
+  and `grab-end`, which is idempotent — a release racing a cancel ends the grab once. Three
+  exist: `move-grab` (the node follows the pointer's delta from a remembered origin),
+  `resize-grab` (the size an edge implies is computed by the pure `resize-target-size` and
+  *configured*, because a compositor cannot resize a buffer it does not own) and `popup-grab`
+  (owner-events: it decides who *ends* the interaction — a press outside the menu, or Escape —
+  not who hears it). A grab holds the button that was physically down when it started, and the
+  compositor learns about frames and configures through two hooks, `grab-changed` and
+  `grab-resize`. DnD arrives with its protocol.
 - **Keybindings** come before the client (D33): the key path is grab, then table, then focused
   window. `(add-keybinding compositor key function :modifiers mask)` — exact mask match, so
   Alt+Escape does not fire with Alt+Shift held. A consumed press never reaches the client and its
@@ -327,11 +332,30 @@ subclass that specialises the same hooks. What is implemented:
 - Titles, app ids, parents and min/max size hints are stored and validated (`invalid_size`,
   `invalid_parent`, `invalid_resize_edge`), so a rule engine or taskbar has something true to
   read.
-- **Not yet**: popups and positioners (no method → `implementation`), decorations, grabs
-  (`move`/`resize` are accepted and ignored until there is a seat), configure bounds and
-  `wm_capabilities` (v4/v5, so the global advertises v1).
-- Popups: parent-relative positioning via the positioner, `reposition` (v3+), grab semantics
-  (dismiss on outside click, honour `popup_done`), and **nested popup stacks**.
+- **Popups and positioners** are implemented at version 1, which is what the global
+  advertises. `get_popup` copies the positioner's rules (so the client may reuse or destroy the
+  positioner at once), refuses an incomplete one (`invalid_positioner`), a parent with no role
+  or the popup's own surface (`invalid_popup_parent`), and a second role
+  (`already_constructed`). The placement arithmetic is pure (`positioner-place`): anchor point,
+  gravity, then the constraint adjustment in the order the spec fixes — flip (kept only if the
+  flipped position is inside), slide, resize — against a box the *compositor* supplies
+  (`popup-constraint-box`, expressed in the parent's window-geometry space, because that is the
+  space `xdg_popup.configure`'s x and y are in). A v1 popup is configured once.
+- **Popup stacking and lifetime**: creation order is stacking order (`xdg-toplevel-popups`),
+  which is what makes "the client may only destroy the topmost popup"
+  (`not_the_topmost_popup`) answerable. A popup that is taken off the screen gets
+  `popup_done` and its surface is unmapped by the compositor; `destroy-popup-chain` dismisses a
+  stack topmost first, which is the only order a client can answer.
+- **Popup grabs** are owner-events grabs (`cf.grab:popup-grab`): the popup's client hears the
+  pointer as usual, a press inside any popup of the same toplevel is delivered, and a press
+  outside dismisses the stack and is swallowed — including its release, so a client never sees
+  the release of a press it was not sent. Escape dismisses (the keyboard half of the dialog in
+  `xdg_popup.grab`), and a grab is refused — and therefore the popup dismissed — when its serial
+  is not one this display issued.
+- **Not yet**: `reposition` and reactive positioning (v3+, so the global stays at v1),
+  decoration negotiation, configure bounds and `wm_capabilities` (v4/v5), and popups parented by
+  "some other protocol" (a null parent is created but never mapped: no layer-shell exists yet to
+  give it one).
 - `move`/`resize` requests start grabs only if the serial is valid and the surface has focus.
 
 **layer-shell**: anchors, margins, exclusive zones (reserve space before placing content),

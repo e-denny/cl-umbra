@@ -1153,17 +1153,30 @@ first proved that opcodes are worth looking up rather than assuming."
                (ok (search "still alive" message))))
         (ffi:close-fd socket)))))
 
-(deftest an-unimplemented-request-is-an-implementation-error
-  (with-xdg-display (display)
+(deftest a-request-with-no-method-is-an-implementation-error
+  ;; wl_display.error.implementation is what the dispatch layer says when a request
+  ;; exists in the schema but nothing implements it on the object's class -- the
+  ;; honest "not built yet" (D9).  Every xdg-shell v1 request is implemented now, so
+  ;; the subject here is a bare resource class: a wl_output bound as SRV:RESOURCE
+  ;; answers nothing, which is exactly the shape a half-written compositor has.
+  (with-display (display)
+    (srv:add-global display
+                    :interface "wl_output"
+                    :version 4
+                    :resource-class 'srv:resource)
     (let ((socket (raw-connect display)))
       (unwind-protect
            (progn
-             (bind-xdg display socket)
-             (send-message socket 4 1 (lambda (buffer) (wire:put-new-id buffer 15)))
+             (send-get-registry socket 2)
+             (run-server display)
+             (read-events socket)                    ; the global announcement
+             (send-bind socket 2 1 "wl_output" 4 3)
+             (run-server display)
+             (send-message socket 3 0)               ; wl_output.release
              (run-server display)
              (destructuring-bind (object-id code message)
                  (error-reply (read-events socket))
-               (ok (= 4 object-id))
+               (ok (= 3 object-id) "the error names the object that cannot answer")
                (ok (= 3 code) "wl_display.error.implementation: not built yet")
                (ok (search "not implemented" message)
                    "an unsupported request says so instead of pretending"))
@@ -1763,4 +1776,525 @@ is exactly enough."
                (srv:set-keyboard-focus seat nil)
                (ok (not (srv:grab-request-acceptable-p seat surface serial))
                    "a real serial without focus is refused too")))
+        (ffi:close-fd socket)))))
+
+;;; ---------------------------------------------------------------------------
+;;; xdg_popup and xdg_positioner
+;;;
+;;; Two kinds of test, deliberately, for the same reason as everywhere else here:
+;;;
+;;;   * the positioner's *arithmetic*, as pure functions -- a flip that is one pixel
+;;;     off is invisible in a screenshot and obvious in a number;
+;;;   * the popup's state machine over raw messages -- only a client that can make
+;;;     the wrong request can prove that we refuse it.
+;;;
+;;; Opcodes used: wl_compositor.create_surface 0, xdg_wm_base.get_xdg_surface 2,
+;;; .create_positioner 1, xdg_positioner.set_size 1, .set_anchor_rect 2,
+;;; .set_anchor 3, .set_gravity 4, .set_constraint_adjustment 5, .set_offset 6,
+;;; xdg_surface.get_popup 2, .ack_configure 4, xdg_popup.grab 1, .destroy 0.
+;;; ---------------------------------------------------------------------------
+
+(defun test-rule (&key (width 100) (height 60) (rect '(10 20 30 40))
+                       (anchor 8) (gravity 8) (adjustment 0) (offset '(0 0)))
+  "A positioner rule plist; the defaults are a 100x60 popup hung off a corner."
+  (list :width width :height height :anchor-rect rect :anchor anchor
+        :gravity gravity :constraint adjustment :offset offset))
+
+(defmacro edges (form)
+  "The values FORM produces, as a list: (edges (f x)) is (multiple-value-list (f x))."
+  `(multiple-value-list ,form))
+
+(deftest an-anchor-point-is-a-corner-an-edge-middle-or-the-centre
+  (let ((rect '(10 20 30 40)))                  ; x 10..40, y 20..60
+    (ok (equal '(10 20) (edges (srv:anchor-point rect 5))) "top-left corner")
+    (ok (equal '(40 60) (edges (srv:anchor-point rect 8))) "bottom-right corner")
+    (ok (equal '(10 40) (edges (srv:anchor-point rect 3))) "middle of the left edge")
+    (ok (equal '(25 60) (edges (srv:anchor-point rect 2))) "middle of the bottom edge")
+    (ok (equal '(25 40) (edges (srv:anchor-point rect 0)))
+        "no anchor: the centre, which is the only useful default")))
+
+(deftest a-popup-is-placed-towards-its-gravity
+  ;; Anchor bottom-right of the rectangle (40, 60); gravity bottom-right means the
+  ;; popup hangs down and right from that point, i.e. its top-left corner *is* it.
+  (ok (equal '(40 60) (edges (srv:popup-position (test-rule) 8 8))))
+  ;; Top-left gravity and anchor put the popup's bottom-right corner on it.
+  (ok (equal '(-90 -40) (edges (srv:popup-position (test-rule) 5 5))))
+  ;; A gravity with no horizontal direction centres the popup on the anchor.
+  ;; Anchor bottom-right (40, 60); gravity `bottom' has no horizontal direction, so
+  ;; the popup is centred across and its bottom edge sits on the anchor: x = 40 - 50.
+  (ok (equal '(-10 60) (edges (srv:popup-position (test-rule) 8 2)))
+      "bottom gravity: centred across, bottom edge on the anchor")
+  ;; The offset is added after the gravity, which is what makes it an offset.
+  (ok (equal '(45 53) (edges (srv:popup-position (test-rule :offset '(5 -7)) 8 8)))))
+
+(deftest a-constrained-popup-flips-then-slides-then-resizes
+  (let ((rule (test-rule :rect '(140 60 10 10))))     ; anchor point (150, 70)
+    ;; Nothing allowed: the position is the client's, even outside the output.
+    (ok (equal '(150 70 100 60) (edges (srv:place-popup rule '(0 0 200 100))))
+        "adjustment 0 means do not move it")
+    ;; Flip first, and keep it only when the flipped position fits: here both axes
+    ;; flip to (40, 0), which is inside.
+    (ok (equal '(40 0 100 60)
+               (edges (srv:place-popup (test-rule :rect '(140 60 10 10)
+                                                  :adjustment (logior 4 8))
+                                       '(0 0 200 100))))
+        "flip_x and flip_y invert anchor and gravity")
+    ;; Slide clamps the popup into the box when no flip was asked for.
+    (ok (equal '(100 40 100 60)
+               (edges (srv:place-popup (test-rule :rect '(140 60 10 10)
+                                                  :adjustment 3)
+                                       '(0 0 200 100))))
+        "slide_x and slide_y move it the shortest way inside")
+    ;; A popup bigger than the box cannot be unconstrained: it covers the box.
+    (ok (equal '(0 70 300 60)
+               (edges (srv:place-popup (test-rule :width 300 :rect '(140 60 10 10)
+                                                  :adjustment 1)
+                                       '(0 0 200 100))))
+        "an oversized popup slides until it covers the box, not out of it")
+    ;; Resize shrinks it against the box's far edge.
+    (ok (equal '(50 10 70 30)
+               (edges (srv:place-popup (test-rule :rect '(40 0 10 10)
+                                                  :adjustment (logior 16 32))
+                                       '(0 0 120 40))))
+        "resize_x and resize_y shrink the popup to fit")))
+
+(deftest a-flip-that-is-still-constrained-is-reverted
+  ;; Bottom-right anchor, bottom-right gravity, a popup taller than the box is wide:
+  ;; flipping the y axis puts it above the anchor *and* off the top, so the
+  ;; unflipped (constrained) position is kept -- the XML requires exactly that.
+  (let ((rule (test-rule :height 200 :rect '(10 10 10 10) :adjustment 8)))
+    (ok (equal '(20 20 100 200) (edges (srv:place-popup rule '(0 0 400 100))))
+        "the position before the adjustment stands")))
+
+;;; ---------------------------------------------------------------------------
+;;; The popup state machine
+;;; ---------------------------------------------------------------------------
+
+(defun create-positioner (display socket &key (id 30) (width 100) (height 60)
+                                            (rect '(10 20 30 40))
+                                            (anchor 8) (gravity 8)
+                                            (adjustment 0) (offset '(0 0)))
+  "create_positioner (id), and fill it in: size, anchor rect, anchor, gravity,
+adjustment and offset.  WIDTH/RECT of NIL leave that rule unset (an incomplete
+positioner is the negative test)."
+  (send-message socket 4 1 (lambda (buffer) (wire:put-new-id buffer id)))
+  (run-server display)
+  (when width
+    (send-message socket id 1 (lambda (buffer)
+                               (wire:put-int buffer width)
+                               (wire:put-int buffer height))))
+  (when rect
+    (send-message socket id 2 (lambda (buffer)
+                               (dolist (value rect) (wire:put-int buffer value)))))
+  (send-message socket id 3 (lambda (buffer) (wire:put-uint buffer anchor)))
+  (send-message socket id 4 (lambda (buffer) (wire:put-uint buffer gravity)))
+  (send-message socket id 5 (lambda (buffer) (wire:put-uint buffer adjustment)))
+  (send-message socket id 6 (lambda (buffer)
+                             (wire:put-int buffer (first offset))
+                             (wire:put-int buffer (second offset))))
+  (run-server display))
+
+(defmacro with-popup-display ((display) &body body)
+  "A display offering wl_shm (global 1), wl_compositor (2), xdg_wm_base (3) and
+wl_seat (4).  The seat matters because a popup grab names one, and its serials are
+only valid because this display issued them."
+  `(with-display (,display)
+     (srv:add-global ,display
+                     :interface "wl_shm"
+                     :version 1
+                     :resource-class 'srv:shm
+                     :bind #'srv:send-shm-formats)
+     (srv:add-global ,display
+                     :interface "wl_compositor"
+                     :version 1
+                     :resource-class 'srv:compositor)
+     (srv:add-global ,display
+                     :interface "xdg_wm_base"
+                     :version 1
+                     :resource-class 'srv:xdg-wm-base)
+     (let ((seat (srv:make-seat ,display :name "seat0" :capabilities 3)))
+       (srv:add-seat-global ,display seat)
+       (locally ,@body))))
+
+(defun bind-popup (display socket)
+  "get_registry (2), then bind wl_shm as 5, wl_compositor as 3, xdg_wm_base as 4 and
+wl_seat as 6: the same layout as WITH-XDG-DISPLAY plus a seat."
+  (send-get-registry socket 2)
+  (run-server display)
+  (read-events socket)                                  ; four global announcements
+  (send-bind socket 2 1 "wl_shm" 1 5)
+  (send-bind socket 2 2 "wl_compositor" 1 3)
+  (send-bind socket 2 3 "xdg_wm_base" 1 4)
+  (send-bind socket 2 4 "wl_seat" 4 6)
+  (run-server display)
+  (read-events socket)                                  ; shm formats, seat name and caps
+  socket)
+
+(defun make-popup (display socket &key (surface 40) (shell 41) (popup 42)
+                                 (parent 11) (positioner 30))
+  "A wl_surface, an xdg_surface and a popup role for it; nothing committed."
+  (send-message socket 3 0 (lambda (buffer) (wire:put-new-id buffer surface)))
+  (send-message socket 4 2 (lambda (buffer)
+                             (wire:put-new-id buffer shell)
+                             (wire:put-object buffer surface)))
+  (send-message socket shell 2 (lambda (buffer)
+                                 (wire:put-new-id buffer popup)
+                                 (wire:put-object buffer parent)
+                                 (wire:put-object buffer positioner)))
+  (run-server display))
+
+(defun read-popup-configure (socket popup-id shell-id)
+  "Decode xdg_popup.configure + xdg_surface.configure.
+Returns (values x y width height serial)."
+  (let ((events (read-events socket)))
+    (ok (= 2 (length events))
+        (format nil "a popup configure and a surface configure, got ~D message~:P"
+                (length events)))
+    (destructuring-bind ((first-id first-opcode first-reader)
+                         (second-id second-opcode second-reader))
+        events
+      (ok (= popup-id first-id) "xdg_popup.configure arrives on the popup")
+      (ok (= 0 first-opcode) "xdg_popup.configure is opcode 0")
+      (ok (= shell-id second-id) "xdg_surface.configure follows it")
+      (ok (= 0 second-opcode) "xdg_surface.configure is opcode 0")
+      (let ((x (wire:read-int first-reader))
+            (y (wire:read-int first-reader))
+            (width (wire:read-int first-reader))
+            (height (wire:read-int first-reader)))
+        (values x y width height (wire:read-uint second-reader))))))
+
+(deftest a-popup-is-configured-where-the-positioner-says
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (commit-surface display socket)
+             (multiple-value-bind (width height states serial)
+                 (read-configure socket)
+               (declare (ignore width height states))
+               (ack-configure socket serial))
+             (create-positioner display socket)
+             (make-popup display socket)
+             (let ((popup (server-object display 42)))
+               (ok (eq (server-object display 11) (srv:xdg-popup-parent popup))
+                   "the popup points at its parent xdg_surface")
+               (ok (eq (server-object display 12) (srv:xdg-popup-toplevel popup))
+                   "and the walk up its parent chain finds the toplevel")
+               (ok (equal (list popup) (srv:xdg-toplevel-popups (server-object display 12)))
+                   "a new popup is in its toplevel's stack")
+               (commit-surface display socket 40)
+               (multiple-value-bind (x y popup-width popup-height configure-serial)
+                   (read-popup-configure socket 42 41)
+                 ;; Anchor bottom-right of (10 20 30 40) is (40, 60), and
+                 ;; bottom-right gravity hangs the popup down and right from it.
+                 (ok (= 40 x) "x is the anchor point, not the rectangle's origin")
+                 (ok (= 60 y))
+                 (ok (= 100 popup-width) "the size is the positioner's, not the client's choice")
+                 (ok (= 60 popup-height))
+                 (ok (equal (list 40 60 100 60) (srv:xdg-popup-geometry popup))
+                     "the placement is recorded for the compositor to draw")
+                 (ok (srv:xdg-surface-configured-p (server-object display 41)))
+                 (ok (equal (list configure-serial)
+                            (srv:xdg-surface-pending-serials (server-object display 41)))
+                     "the popup's serial waits for its ack")
+                 ;; The rules were copied at get_popup, so reusing the positioner
+                 ;; now changes nothing about this popup.
+                 (send-message socket 30 1 (lambda (buffer)
+                                            (wire:put-int buffer 10)
+                                            (wire:put-int buffer 10)))
+                 (run-server display)
+                 (ok (equal (list 10 10)
+                            (srv:xdg-positioner-size (server-object display 30))))
+                 (ok (equal (list 40 60 100 60) (srv:xdg-popup-geometry popup))
+                     "the popup kept the copy it was made from")
+                 ;; v1 popups are configured once.
+                 (send-message socket 40 6)
+                 (run-server display)
+                 (ok (null (read-events socket :timeout 0.05))
+                     "a second commit is not a second configure")
+                 (ack-configure socket configure-serial 41)
+                 (run-server display)
+                 (ok (srv:xdg-surface-acknowledged-p (server-object display 41))
+                     "and the serial is consumed by ack_configure"))))
+        (ffi:close-fd socket)))))
+
+(deftest a-popup-maps-with-a-buffer-and-unmaps-without-one
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (commit-surface display socket)
+             (multiple-value-bind (width height states serial)
+                 (read-configure socket)
+               (declare (ignore width height states))
+               (ack-configure socket serial))
+             (create-positioner display socket)
+             (make-popup display socket)
+             (commit-surface display socket 40)
+             (multiple-value-bind (x y width height serial)
+                 (read-popup-configure socket 42 41)
+               (declare (ignore x y width height))
+               (ack-configure socket serial 41))
+             (make-buffer-on-the-shm-global display socket)
+             (attach-buffer socket 21 40)
+             (send-message socket 40 2 (lambda (buffer)
+                                        (wire:put-int buffer 0) (wire:put-int buffer 0)
+                                        (wire:put-int buffer 8) (wire:put-int buffer 4)))
+             (commit-surface display socket 40)
+             (ok (srv:xdg-popup-mapped-p (server-object display 42)) "the popup is mapped")
+             (ok (srv:xdg-surface-mapped-p (server-object display 41)))
+             (ok (srv:surface-mapped-p (server-object display 40)))
+             ;; An attach of NIL is an unmap, exactly as for a toplevel.
+             (send-message socket 40 1 (lambda (buffer)
+                                        (wire:put-object buffer nil)
+                                        (wire:put-int buffer 0)
+                                        (wire:put-int buffer 0)))
+             (commit-surface display socket 40)
+             (ok (not (srv:xdg-popup-mapped-p (server-object display 42)))
+                 "detaching the buffer unmaps it again"))
+        (ffi:close-fd socket)))))
+
+(deftest only-the-topmost-popup-may-be-destroyed
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (commit-surface display socket)
+             (multiple-value-bind (width height states serial)
+                 (read-configure socket)
+               (declare (ignore width height states))
+               (ack-configure socket serial))
+             (create-positioner display socket)
+             (make-popup display socket)
+             (make-popup display socket :surface 43 :shell 44 :popup 45)
+             (send-message socket 42 0)                ; destroy the older popup
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 4 object-id) "the error comes from xdg_wm_base")
+               (ok (= 2 code) "xdg_wm_base.error.not_the_topmost_popup")
+               (ok (search "not the topmost" message))))
+        (ffi:close-fd socket)))
+    ;; And the topmost one may be destroyed, with no error at all.
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (create-positioner display socket)
+             (make-popup display socket)
+             (make-popup display socket :surface 43 :shell 44 :popup 45)
+             (send-message socket 45 0)
+             (run-server display)
+             (ok (null (server-object display 45)) "the id is gone")
+             ;; Destroying a resource sends wl_display.delete_id, so the id comes
+             ;; back; anything else here would be an error.
+             (let ((events (read-events socket :timeout 0.05)))
+               (ok (equal (list 1) (mapcar #'first events))
+                   "no error: the newest popup is the client's to destroy")
+               (ok (equal (list 45)
+                          (mapcar (lambda (event) (wire:read-uint (third event))) events))
+                   "the id is handed back to the client"))
+             )
+        (ffi:close-fd socket)))))
+
+(deftest a-popup-grab-needs-a-serial-we-issued
+  ;; A grab the compositor cannot honour is not an error: the popup is dismissed.
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (create-positioner display socket)
+             (make-popup display socket)
+             ;; The seat argument names the shm global: not a seat, so no grab.
+             (send-message socket 42 1 (lambda (buffer)
+                                        (wire:put-object buffer 5)
+                                        (wire:put-uint buffer 0)))
+             (run-server display)
+             (let ((events (read-events socket)))
+               (ok (equal (list 42) (mapcar #'first events))
+                   "popup_done arrives on the popup")
+               (ok (= 1 (second (first events))) "xdg_popup.popup_done is opcode 1")
+               (ok (srv:xdg-popup-dismissed-p (server-object display 42)))
+               (ok (not (srv:surface-mapped-p (server-object display 40)))
+                   "and the surface is unmapped at the same time")))
+        (ffi:close-fd socket)))))
+
+(deftest a-popup-grab-with-our-serial-is-accepted
+  (with-popup-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-popup display socket)
+             (make-toplevel display socket)
+             (create-positioner display socket)
+             (make-popup display socket)
+             (let ((serial (srv:display-next-serial display)))
+               (send-message socket 42 1 (lambda (buffer)
+                                          (wire:put-object buffer 6)   ; the wl_seat
+                                          (wire:put-uint buffer serial)))
+               (run-server display)
+               (ok (srv:xdg-popup-grabbed-p (server-object display 42))
+                   "a serial this display issued is a grab we can honour")
+               (ok (null (read-events socket :timeout 0.05))
+                   "and nothing is dismissed")))
+        (ffi:close-fd socket)))))
+
+(deftest a-popup-may-not-grab-after-it-is-mapped
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (commit-surface display socket)
+             (multiple-value-bind (width height states serial)
+                 (read-configure socket)
+               (declare (ignore width height states))
+               (ack-configure socket serial))
+             (create-positioner display socket)
+             (make-popup display socket)
+             (commit-surface display socket 40)
+             (multiple-value-bind (x y width height serial)
+                 (read-popup-configure socket 42 41)
+               (declare (ignore x y width height))
+               (ack-configure socket serial 41))
+             (make-buffer-on-the-shm-global display socket)
+             (attach-buffer socket 21 40)
+             (commit-surface display socket 40)
+             (send-message socket 42 1 (lambda (buffer)
+                                        (wire:put-object buffer 5)
+                                        (wire:put-uint buffer 0)))
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 42 object-id))
+               (ok (= 0 code) "xdg_popup.error.invalid_grab")
+               (ok (search "after the popup was mapped" message))))
+        (ffi:close-fd socket)))))
+
+(deftest a-popup-under-a-popup-without-a-grab-is-refused
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (create-positioner display socket)
+             (make-popup display socket)
+             ;; A submenu of a menu: the parent must itself have a grab.
+             (make-popup display socket :surface 43 :shell 44 :popup 45
+                                       :parent 41)
+             (ok (eq (server-object display 41)
+                     (srv:xdg-popup-parent (server-object display 45)))
+                 "the submenu's parent is the parent popup's xdg_surface")
+             (ok (eq (server-object display 42)
+                     (srv:xdg-surface-role (server-object display 41)))
+                 "whose role is the menu, not the window")
+             (send-message socket 45 1 (lambda (buffer)
+                                        (wire:put-object buffer 5)
+                                        (wire:put-uint buffer 1)))
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 4 object-id))
+               (ok (= 3 code) "xdg_wm_base.error.invalid_popup_parent")
+               (ok (search "has no explicit grab" message))))
+        (ffi:close-fd socket)))))
+
+(deftest a-popup-parent-must-have-a-role
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             ;; An xdg_surface with no role: nothing to be a child of.
+             (send-message socket 3 0 (lambda (buffer) (wire:put-new-id buffer 13)))
+             (send-message socket 4 2 (lambda (buffer)
+                                        (wire:put-new-id buffer 14)
+                                        (wire:put-object buffer 13)))
+             (run-server display)
+             (create-positioner display socket)
+             (make-popup display socket :parent 14)
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 41 object-id) "the error names the popup's xdg_surface")
+               (ok (= 3 code) "xdg_wm_base.error.invalid_popup_parent")
+               (ok (search "no role" message))))
+        (ffi:close-fd socket)))))
+
+(deftest a-popup-with-no-parent-is-never-configured
+  ;; The v1 XML allows a null parent when "some other protocol" will supply one; no
+  ;; other protocol here can, so the honest answer is not to map it rather than to
+  ;; invent a position.
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (create-positioner display socket)
+             (make-popup display socket :parent nil)
+             (commit-surface display socket 40)
+             (let ((popup (server-object display 42)))
+               (ok (null (srv:xdg-popup-parent popup)))
+               (ok (null (srv:xdg-popup-geometry popup)) "no placement was invented")
+               (ok (not (srv:xdg-surface-configured-p (server-object display 41))))
+               (ok (null (read-events socket :timeout 0.05))
+                   "and the client is told nothing it cannot act on")))
+        (ffi:close-fd socket)))))
+
+(deftest a-positioner-must-be-complete-before-a-popup-can-use-it
+  ;; A positioner with a size but no anchor rectangle is "incomplete" by the spec's
+  ;; definition, and the error is xdg_wm_base's (invalid_positioner) -- not the
+  ;; positioner's own, because the *popup* is what cannot be made.
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (create-positioner display socket :rect nil)
+             (ok (null (srv:xdg-positioner-anchor-rect (server-object display 30)))
+                 "the positioner has a size and no anchor rectangle")
+             (make-popup display socket)
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 41 object-id) "the error names the xdg_surface that asked")
+               (ok (= 5 code) "xdg_wm_base.error.invalid_positioner")
+               (ok (search "anchor rectangle" message))))
+        (ffi:close-fd socket)))))
+
+(deftest a-popup-cannot-be-its-own-parent
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (create-positioner display socket)
+             ;; The parent argument names the popup's *own* xdg_surface, which is
+             ;; not a role yet -- so this is caught as "no role" or "its own
+             ;; parent" depending on the order of the checks; what matters is that
+             ;; it is refused rather than made into a cycle.
+             (make-popup display socket :parent 41)
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 41 object-id))
+               (ok (= 3 code) "xdg_wm_base.error.invalid_popup_parent")
+               (ok (or (search "its own popup parent" message)
+                       (search "has no role" message))
+                   (format nil "and it says which rule was broken: ~S" message))))
         (ffi:close-fd socket)))))

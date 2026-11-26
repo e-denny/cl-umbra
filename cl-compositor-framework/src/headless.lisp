@@ -245,6 +245,101 @@ node and remembering it stays the framework's job either way.")
                          (srv:resource-id surface) x y)
         node))))
 
+(defun popup-parent-geometry (popup)
+  "Where POPUP's parent geometry starts, in output space; two values or NIL.
+
+NIL when the parent has no scene node yet -- a popup whose toplevel has not mapped has
+nothing to be placed against, and guessing (0,0) would draw a menu in the corner."
+  (let* ((parent-shell (srv:xdg-popup-parent popup))
+         (parent-surface (and parent-shell (srv:xdg-surface-surface parent-shell)))
+         (parent-node (and parent-surface (surface-scene-node parent-surface))))
+    (when parent-node
+      (multiple-value-bind (geometry-x geometry-y width height)
+          (grab:node-geometry parent-node)
+        (declare (ignore width height))
+        (values (+ (scene:node-x parent-node) geometry-x)
+                (+ (scene:node-y parent-node) geometry-y))))))
+
+(defun sync-popup-node (surface)
+  "Put SURFACE's popup node where its configure and its parent say it belongs.
+
+Asked every frame (SYNC-POPUP-POSITIONS) rather than only when the configure
+arrives: the parent can move under the popup -- a drag, a resize, a cycle -- and a
+menu that does not follow its window is a menu over the wrong thing.  That is the
+same rule as the pointer's image (D41): ask, do not be told."
+  (let* ((node (surface-scene-node surface))
+         (shell (srv:surface-shell-surface surface))
+         (popup (and shell (srv:xdg-surface-role shell))))
+    (when (and node (typep popup 'srv:xdg-popup))
+      (let ((geometry (srv:xdg-popup-geometry popup)))
+        (when geometry
+          (multiple-value-bind (parent-x parent-y) (popup-parent-geometry popup)
+            (when parent-x
+              (destructuring-bind (x y width height) geometry
+                (declare (ignore width height))
+                ;; The configure's (x, y) is the popup's *window geometry* origin;
+                ;; the node draws the buffer, which may start earlier (a shadow).
+                (multiple-value-bind (own-x own-y) (grab:node-geometry node)
+                  (scene:set-node-position node
+                                           (- (+ parent-x x) own-x)
+                                           (- (+ parent-y y) own-y)))))))))))
+
+(defun sync-popup-positions (compositor)
+  "Re-place every mapped popup.  Called once per frame, before the draw."
+  (dolist (surface (compositor-surfaces compositor))
+    (when (srv:surface-mapped-p surface)
+      (let ((shell (srv:surface-shell-surface surface)))
+        (when (and shell (eq :popup (srv:xdg-surface-role-name shell)))
+          (sync-popup-node surface))))))
+
+(defun popup-nodes-of (compositor node)
+  "The nodes of NODE's window's popups, bottom to top (the protocol's stacking)."
+  (declare (ignore compositor))
+  (let* ((surface (and (typep node 'scene:buffer-node) (scene:buffer-node-surface node)))
+         (shell (and surface (srv:surface-shell-surface surface)))
+         (toplevel (and shell (srv:xdg-surface-role shell))))
+    (when (typep toplevel 'srv:xdg-toplevel)
+      (loop for popup in (srv:xdg-toplevel-popups toplevel)
+            for popup-surface = (let ((popup-shell (srv:xdg-popup-shell-surface popup)))
+                                  (and popup-shell (srv:xdg-surface-surface popup-shell)))
+            for popup-node = (and popup-surface (surface-scene-node popup-surface))
+            when popup-node collect popup-node))))
+
+(defun raise-window-with-popups (compositor node)
+  "Raise NODE, and keep its window's popups above it; returns NODE.
+
+A menu is not a window with its own place in the stack: it belongs to the window it
+dropped from.  Raising the window alone would bury its menu; raising the menu alone
+would be true only until the next click raised the window."
+  (scene:node-raised node)
+  (dolist (popup-node (popup-nodes-of compositor node))
+    (scene:node-raised popup-node))
+  node)
+
+(defgeneric on-new-popup (compositor surface popup)
+  (:documentation
+   "SURFACE has just mapped with the popup role: give it a node, where its
+configure and its parent say it goes.
+
+The default places it at the parent's window-geometry origin plus the configure's
+(x, y) -- the position the protocol layer already computed and sent -- and puts it on
+top of the stack.  Creating the node and remembering it stays the framework's job; a
+compositor specialises this only to change *where* a child window belongs
+(docs/framework.md §9).")
+  (:method ((compositor headless-compositor) surface popup)
+    (let ((node (scene:scene-add-node (compositor-scene compositor)
+                                      (scene:make-buffer-node surface))))
+      (setf (surface-scene-node surface) node)
+      (sync-popup-node surface)
+      ;; A menu belongs above the window it drops from, and a new popup is above
+      ;; every older one (the protocol's own stacking rule).
+      (raise-window-with-popups compositor node)
+      (srv:log-message :debug "client ~D: popup ~D placed at (~D, ~D)"
+                       (srv:client-id (srv:resource-client surface))
+                       (srv:resource-id surface)
+                       (scene:node-x node) (scene:node-y node))
+      node)))
+
 (defun cursor-surface-p (compositor surface)
   "Is SURFACE the pointer image some client has installed right now?
 
@@ -256,7 +351,7 @@ origin, drawn where the client's attach offset says); and it is hit-testable and
 first in stack order, which is where a cycling or click-to-focus policy would find
 it and raise a tiny arrow instead of a window.
 
-This answers "is it the cursor *now*".  SURFACE-POINTER-IMAGE-P is the durable
+This answers 'is it the cursor *now*'.  SURFACE-POINTER-IMAGE-P is the durable
 version, and the pair covers the ordering hole: a client may commit a cursor
 surface before it names it, at which point nothing here can know yet (D40)."
   (let ((seat (compositor-seat compositor)))
@@ -295,23 +390,31 @@ node at all (CURSOR-SURFACE-P, SURFACE-POINTER-IMAGE-P)."
     (unless node
       (unless (or (surface-pointer-image-p surface)
                   (cursor-surface-p compositor surface))
-        (setf node (if (srv:surface-shell-surface surface)
-                       ;; ON-NEW-TOPLEVEL records it: placement is policy, the
-                       ;; node is the framework's.
-                       (on-new-toplevel compositor surface)
-                       ;; A roleless surface records its own node here.  It used
-                       ;; not to, and the node was then invisible to everything
-                       ;; that finds a surface's node by looking at the surface:
-                       ;; PRUNE-SURFACES could not remove it when the surface
-                       ;; unmapped, and a cursor image that had been given one
-                       ;; could not be taken back (D40).
-                       (setf (surface-scene-node surface)
-                             (scene:scene-add-node (compositor-scene compositor)
-                                                   (scene:make-buffer-node surface)))))))
+        (let* ((shell (srv:surface-shell-surface surface))
+               (role-name (and shell (srv:xdg-surface-role-name shell))))
+          (setf node
+                (cond
+                  ;; A window is placed by policy; a popup is placed by the
+                  ;; protocol's own answer (ON-NEW-POPUP); a bare surface is
+                  ;; where its attach offset says.
+                  ((eq role-name :toplevel)
+                   (on-new-toplevel compositor surface))
+                  ((eq role-name :popup)
+                   (on-new-popup compositor surface (srv:xdg-surface-role shell)))
+                  (t
+                   ;; A roleless surface records its own node here.  It used
+                   ;; not to, and the node was then invisible to everything
+                   ;; that finds a surface's node by looking at the surface:
+                   ;; PRUNE-SURFACES could not remove it when the surface
+                   ;; unmapped, and a cursor image that had been given one
+                   ;; could not be taken back (D40).
+                   (setf (surface-scene-node surface)
+                         (scene:scene-add-node (compositor-scene compositor)
+                                               (scene:make-buffer-node surface)))))))))
     ;; Committing is not raising.  Phase 2a used commit order as draw order, which
     ;; made two redrawing clients flip places several times a second; stacking is
     ;; the compositor's decision, and v0's decision is "the order windows were
-    ;; placed in".  SCENE:NODE-RAISED is the call a click-to-raise policy makes.
+    ;; placed in".  RAISE-WINDOW-WITH-POPUPS is what a click-to-raise policy calls.
     node))
 
 (defun mark-dirty (compositor)
@@ -425,8 +528,8 @@ focus and a click must not require one (D32)."
 (defun seat-pointer-cursor-image (seat)
   "The cursor image of the pointer whose client has pointer focus.
 
-Returns (values surface hotspot-x hotspot-y), or NIL.  Focus, not "any pointer with an
-image": every client installs a cursor when the pointer enters it and may keep it, so
+Returns (values surface hotspot-x hotspot-y), or NIL.  Focus, not 'any pointer with an
+image': every client installs a cursor when the pointer enters it and may keep it, so
 the only image that means anything is the one belonging to the client the pointer is
 over (D41)."
   (let ((focus (srv:seat-pointer-focus seat)))
@@ -484,10 +587,13 @@ motion handling instead."
   "Tell an xdg_toplevel it is activated or not.
 
 The state array is recomputed on every configure, never patched, so a losing
-toplevel gets an empty array rather than a stale `activated`."
-  (let ((shell (and surface (srv:surface-shell-surface surface))))
-    (when (and shell (srv:xdg-surface-role shell))
-      (srv:set-toplevel-activated (srv:xdg-surface-role shell) has-focus)))
+toplevel gets an empty array rather than a stale `activated`.  A popup has no
+activated state and no xdg_toplevel object: asking one for its activated configure
+would be a type error at the worst possible moment (the click that focuses a menu)."
+  (let* ((shell (and surface (srv:surface-shell-surface surface)))
+         (role (and shell (srv:xdg-surface-role shell))))
+    (when (typep role 'srv:xdg-toplevel)
+      (srv:set-toplevel-activated role has-focus)))
   nil)
 
 ;;; ---------------------------------------------------------------------------
@@ -513,25 +619,28 @@ toplevel gets an empty array rather than a stale `activated`."
   (reactor:request-stop (srv:display-reactor (compositor-display compositor))))
 
 (defun window-node-p (node)
-  "Is NODE a window: a mapped surface with a shell role?
+  "Is NODE a window: a mapped surface with the *toplevel* role?
 
 Not every buffer node is a window.  A client's cursor surface is a buffer node with
-no role, and so is any surface a client maps without asking for one; cycling or
-click-to-raise that treated those as windows would raise an arrow."
+no role, a popup is a buffer node with a role but no window of its own, and so is any
+surface a client maps without asking for one; cycling or click-to-raise that treated
+those as windows would raise an arrow or a menu (D36, D44)."
   (and (typep node 'scene:buffer-node)
-       (let ((surface (scene:buffer-node-surface node)))
-         (and surface (srv:surface-shell-surface surface) t))))
+       (let* ((surface (scene:buffer-node-surface node))
+              (shell (and surface (srv:surface-shell-surface surface))))
+         (and shell (eq :toplevel (srv:xdg-surface-role-name shell))))))
 
 (defun cycle-views (compositor)
   "Bring the bottom window to the top and give it the keyboard (tinywl's Alt+F1).
 
 The bottom is draw order, so cycling visits every window once and the old one ends
-up at the back -- the same rule tinywl's view list has."
+up at the back -- the same rule tinywl's view list has.  A window's popups travel
+with it, or a menu would be left behind over whatever is now on top."
   (let* ((root (scene:scene-root (compositor-scene compositor)))
          (windows (remove-if-not #'window-node-p (scene:node-children root))))
     (when windows
       (let ((node (first windows)))
-        (scene:node-raised node)
+        (raise-window-with-popups compositor node)
         (focus-surface compositor (scene:buffer-node-surface node))
         (mark-dirty compositor)
         node))))
@@ -569,7 +678,7 @@ up at the back -- the same rule tinywl's view list has."
   (let* ((surface (scene:buffer-node-surface (grab:grab-node grab)))
          (shell (and surface (srv:surface-shell-surface surface)))
          (toplevel (and shell (srv:xdg-surface-role shell))))
-    (when toplevel
+    (when (typep toplevel 'srv:xdg-toplevel)
       (srv:request-toplevel-size toplevel width height))))
 
 (defun handle-key (compositor name state)
@@ -855,6 +964,10 @@ found (D38)."
       (sync-cursor-image compositor)
       (render:fill-target target (compositor-background compositor))
       (prune-surfaces compositor)
+      ;; A popup's place is a function of its parent's place, and its parent may have
+      ;; moved since the last frame (a drag, a resize, a cycle).  Asked here, before
+      ;; the draw, for the same reason the pointer's image is (D41, D44).
+      (sync-popup-positions compositor)
       (let ((drawn (scene:scene-render scene target)))
         ;; The pixels are in the target now, so this is the first moment at which
         ;; presenting them is truthful.  Presenting first was a real bug, not a
@@ -907,3 +1020,134 @@ only the parts the framework owns change here."
 (defun frame-pixel (compositor x y)
   "The premultiplied 0xAARRGGBB pixel at X, Y of the current target."
   (render::target-pixel (compositor-target compositor) x y))
+
+;;; ---------------------------------------------------------------------------
+;;; Popups: placement, the grab, and the way back
+;;;
+;;; The protocol layer (wayland.server) owns the popup state machine; what is left
+;;; for a compositor is the three things it alone can know: where the output is so
+;;; the position can be constrained, what the pointer does while a popup holds an
+;;; explicit grab, and what to do when the popup goes away (D44).
+;;; ---------------------------------------------------------------------------
+
+(defun popup-compositor (surface)
+  "The compositor a wl_surface's popup belongs to, or NIL."
+  (let ((owner (and surface (srv:surface-owner surface))))
+    (and owner (cf-compositor-headless owner))))
+
+(defmethod srv:popup-constraint-box ((surface cf-surface) popup)
+  "The output, expressed in POPUP's parent's window-geometry space.
+
+The configure's (x, y) is relative to the upper-left corner of the parent's window
+geometry, so the output's bounds are that same origin taken *negative*: a parent
+whose geometry starts at (32, 32) of a 1280x800 output constrains its popups to the
+box (-32 -32 1280 800)."
+  (let ((compositor (popup-compositor surface)))
+    (when compositor
+      (multiple-value-bind (parent-x parent-y) (popup-parent-geometry popup)
+        (when parent-x
+          (list (- parent-x) (- parent-y)
+                (compositor-width compositor) (compositor-height compositor)))))))
+
+(defmethod srv:popup-grab-requested ((surface cf-surface) popup seat serial)
+  "A validated xdg_popup.grab: the popup owns the pointer until it is dismissed."
+  (declare (ignore seat serial))
+  (let ((compositor (popup-compositor surface)))
+    (when compositor
+      (start-grab compositor (grab:begin-popup-grab popup))
+      (srv:log-message :debug "popup ~D: explicit grab" (srv:resource-id popup))
+      t)))
+
+(defmethod srv:popup-dismissed ((surface cf-surface) popup reason)
+  "POPUP is off the screen: end its grab, and give the keyboard back to its parent.
+
+The node is not removed here.  The surface is already unmapped, so PRUNE-SURFACES
+drops the node on the next frame -- and doing it here would remove a node from a
+scene the render loop may be walking (the same rule as D26's tombstones)."
+  (declare (ignore reason))
+  (let ((compositor (popup-compositor surface)))
+    (when compositor
+      (let ((grab (compositor-grab compositor)))
+        ;; A grab that swallowed the press that dismissed it stays until that
+        ;; button's release has been swallowed too: ending it here would deliver
+        ;; the release to a client that never saw the press (GRAB-BUTTON does it).
+        (when (and (typep grab 'grab:popup-grab)
+                   (eq popup (grab:popup-grab-popup grab))
+                   (null (grab:popup-grab-swallowed grab)))
+          (grab:grab-end grab :reason :popup-dismissed)))
+      ;; Keyboard focus goes back to the window the menu belonged to; a menu that
+      ;; kept the keys after closing would type into nothing.
+      (when (eq surface (srv:seat-keyboard-focus (compositor-seat compositor)))
+        (let* ((parent-shell (srv:xdg-popup-parent popup))
+               (parent-surface (and parent-shell (srv:xdg-surface-surface parent-shell))))
+          (focus-surface compositor parent-surface))))
+    nil))
+
+(defun popup-keeps-pointer-p (compositor popup x y)
+  "Does a press at (X, Y) belong to POPUP's stack -- the popup or one of its siblings?
+
+A press inside any popup of the same toplevel keeps the stack open: submenus are
+popups of their own, and clicking a submenu must not read as a click outside the menu
+it belongs to."
+  (multiple-value-bind (node local-x local-y)
+      (scene:scene-hit-test (compositor-scene compositor) x y)
+    (declare (ignore local-x local-y))
+    (let* ((surface (and node (typep node 'scene:buffer-node)
+                              (scene:buffer-node-surface node)))
+           (shell (and surface (srv:surface-shell-surface surface)))
+           (role (and shell (srv:xdg-surface-role shell))))
+      (and (typep role 'srv:xdg-popup)
+           (eq (srv:xdg-popup-toplevel role) (srv:xdg-popup-toplevel popup))))))
+
+(defmethod grab:grab-motion ((grab grab:popup-grab) x y)
+  "A popup grab is an owner-events grab: the pointer is delivered as usual.
+
+What the grab changes is who *ends* the interaction, not who hears it -- so motion
+and hover behave exactly as they would with no grab at all."
+  (declare (ignore x y))
+  (let ((compositor (grab:grab-owner grab)))
+    (when compositor (update-pointer compositor))))
+
+(defmethod grab:grab-button ((grab grab:popup-grab) button state)
+  "Inside the stack the client hears the press; outside, the popup is dismissed.
+
+The press that dismisses is swallowed, and so is its release: it was a click on
+\"away\", not a click on whatever is under the pointer, and a client that acts on it
+would be acting on a menu that had already closed."
+  (let* ((compositor (grab:grab-owner grab))
+         (popup (grab:popup-grab-popup grab)))
+    (cond
+      ((eq state :pressed)
+       (if (popup-keeps-pointer-p compositor popup
+                                  (compositor-cursor-x compositor)
+                                  (compositor-cursor-y compositor))
+           (progn (on-pointer-button compositor button state) t)
+           (progn
+             (pushnew button (grab:popup-grab-swallowed grab))
+             (srv:dismiss-popup-chain popup :reason :click-outside)
+             t)))
+      ((member button (grab:popup-grab-swallowed grab))
+       (setf (grab:popup-grab-swallowed grab)
+             (remove button (grab:popup-grab-swallowed grab)))
+       ;; The dismissal's own release is the last thing this grab has to do.
+       (when (null (grab:popup-grab-swallowed grab))
+         (grab:grab-end grab :reason :dismissed))
+       t)
+      (t (on-pointer-button compositor button state) t))))
+
+(defmethod grab:grab-key ((grab grab:popup-grab) key-name state)
+  "Plain Escape dismisses the stack -- the keyboard half of `or using the keyboard'.
+
+Alt+Escape is deliberately *not* consumed: it is the compositor's quit binding, and a
+menu that swallowed the way out of the session would be a trap.  Any other key falls
+through too, so the bindings and the focused client see what they would without the
+grab."
+  (let ((compositor (grab:grab-owner grab)))
+    (when (and (eq state :pressed)
+               (string-equal key-name "Escape")
+               (not (and compositor
+                         (logtest input:+modifier-mod1+
+                                  (input:modifiers-depressed
+                                   (compositor-modifiers compositor))))))
+      (srv:dismiss-popup-chain (grab:popup-grab-popup grab) :reason :keyboard)
+      t)))

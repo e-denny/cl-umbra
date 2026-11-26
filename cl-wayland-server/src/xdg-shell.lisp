@@ -25,12 +25,18 @@
 ;;;;   * the initial configure carries 0x0 and an empty state array: "you choose,
 ;;;;     nothing special about you" (docs/protocol-layer.md §8).
 ;;;;
-;;;; Deliberately absent, and a missing method is how the dispatch layer says so
-;;;; (it becomes wl_display.error implementation, "not built yet"): popups
-;;;; (xdg_surface.get_popup), positioners (xdg_wm_base.create_positioner) and
-;;;; decoration negotiation.  A compositor that advertises xdg_wm_base v1 and
-;;;; refuses the v1 requests it cannot honour is honest; advertising v4 and
-;;;; staying silent about configure_bounds would not be.
+;;;; Popups (xdg_surface.get_popup) and positioners (xdg_wm_base.create_positioner)
+;;;; are implemented here too, at version 1: a popup gets one configure, at the
+;;;; position the positioner's rules ask for, constrained to the area the
+;;;; compositor names (POPUP-CONSTRAINT-BOX) -- and `grab' is honoured by a hook the
+;;;; compositor answers (POPUP-GRAB-REQUESTED), because a grab is policy.
+;;;;
+;;;; Deliberately absent, and a missing method is how the dispatch layer says so (it
+;;;; becomes wl_display.error implementation, "not built yet"): decoration
+;;;; negotiation, and the v3 additions to popups (reposition, reactive
+;;;; positioning), which the v1 global does not advertise.  A compositor that
+;;;; advertises xdg_wm_base v1 and refuses the requests it cannot honour is honest;
+;;;; advertising v4 and staying silent about configure_bounds would not be.
 
 (in-package #:wayland.server)
 
@@ -158,8 +164,10 @@ attach of NIL (unmap) is always legal."
 (defmethod surface-shell-committed ((shell xdg-surface) surface damage)
   "The client committed.  On the first commit: answer with the initial configure.
 
-On a later commit: notice the toplevel appearing and disappearing, which is what a
-compositor's map/unmap policy will hang off in phase 3 (cf.types.xdg-shell)."
+On a later commit: notice the role's surface appearing and disappearing, which is
+what a compositor's map/unmap policy hangs off (cf.types.xdg-shell).  A popup's
+first commit is answered with PLACE-POPUP's geometry instead of a toplevel
+configure: that is the one place where the two roles differ in the handshake."
   (declare (ignore damage))
   (unless (xdg-surface-live-p shell)
     (return-from surface-shell-committed nil))
@@ -168,19 +176,38 @@ compositor's map/unmap policy will hang off in phase 3 (cf.types.xdg-shell)."
      ;; The initial commit is the client saying "I am ready to be told a size".
      ;; Nothing may be attached yet (CHECK-COMMIT has already refused it), so
      ;; there is nothing to draw and no state to compute.
-     (send-configure shell))
+     (if (eq (xdg-surface-role-name shell) :popup)
+         (configure-popup (xdg-surface-role shell) surface)
+         (send-configure shell)))
     (t
-     (let ((mapped (and (surface-mapped-p surface) t))
-           (toplevel (xdg-surface-role shell)))
-       (unless (eq mapped (xdg-surface-mapped-p shell))
-         (setf (xdg-surface-mapped-p shell) mapped)
-         (when toplevel
-           (setf (xdg-toplevel-mapped-p toplevel) mapped))
+     (shell-surface-mapped shell surface)))
+  nil)
+
+(defun shell-surface-mapped (shell surface)
+  "Notice SHELL's surface mapping or unmapping, and tell the role.
+
+One function for both roles, because the *question* is the same: did the surface go
+from unmapped to mapped, or the other way?  What differs is only what the record is
+called (a toplevel and a popup both keep MAPPED-P) and who hears about it."
+  (let ((mapped (and (surface-mapped-p surface) t))
+        (role (xdg-surface-role shell)))
+    (unless (eq mapped (xdg-surface-mapped-p shell))
+      (setf (xdg-surface-mapped-p shell) mapped)
+      (typecase role
+        (xdg-toplevel
+         (setf (xdg-toplevel-mapped-p role) mapped)
          (log-message :info "client ~D: toplevel ~D ~:[unmapped~;mapped~]~@[ (title ~S)~]"
                       (client-id (resource-client shell))
-                      (if toplevel (resource-id toplevel) (resource-id shell))
+                      (resource-id role)
                       mapped
-                      (and toplevel (xdg-toplevel-title toplevel)))))))
+                      (xdg-toplevel-title role)))
+        (xdg-popup
+         (setf (xdg-popup-mapped-p role) mapped)
+         (log-message :debug "client ~D: popup ~D ~:[unmapped~;mapped~] at ~S"
+                      (client-id (resource-client shell))
+                      (resource-id role)
+                      mapped
+                      (xdg-popup-geometry role))))))
   nil)
 
 (defmethod surface-shell-lost ((shell xdg-surface) surface)
@@ -264,9 +291,278 @@ trip real now means the gate can prove the client hears us and we hear it back."
                  (client-id (resource-client wm-base)) serial)
     serial))
 
-;;; xdg_wm_base.create_positioner is not implemented on purpose: popups are a
-;;; later slice, and a positioner that positions nothing would be a lie.  The
-;;; dispatch layer turns the missing method into an implementation error.
+;;; xdg_wm_base.create-positioner and xdg_positioner: a rule for a child surface
+;;;
+;;; A positioner is the odd object of the shell: it is a *rule*, not a surface, it
+;;; draws nothing, and it exists for one call.  The spec is explicit that the
+;;; compositor copies the rules at get_popup, so everything here is "store it" and
+;;; the interesting part -- the arithmetic -- is POSITIONER-PLACE below.
+
+(defmethod xdg-wm-base.create-positioner ((wm-base xdg-wm-base))
+  "Create the positioner a client will fill in and hand to get_popup."
+  (let ((client (resource-client wm-base)))
+    (let ((positioner (allocate-resource client
+                                         (resolve-interface "xdg_positioner")
+                                         :version (resource-version wm-base)
+                                         :class 'xdg-positioner)))
+      (log-message :debug "client ~D: xdg_positioner ~D"
+                   (client-id client) (resource-id positioner))
+      positioner)))
+
+(defmethod xdg-positioner.destroy ((positioner xdg-positioner))
+  (destroy-resource positioner))
+
+(defmethod xdg-positioner.set-size ((positioner xdg-positioner) width height)
+  (when (or (<= width 0) (<= height 0))
+    (protocol-error (resource-client positioner) (resource-id positioner)
+                    +xdg-positioner-error-invalid-input+
+                    "positioner size ~Dx~D is not positive" width height))
+  (setf (xdg-positioner-size positioner) (list width height)))
+
+(defmethod xdg-positioner.set-anchor-rect ((positioner xdg-positioner) x y width height)
+  (when (or (minusp width) (minusp height))
+    (protocol-error (resource-client positioner) (resource-id positioner)
+                    +xdg-positioner-error-invalid-input+
+                    "anchor rectangle ~Dx~D has a negative side" width height))
+  (setf (xdg-positioner-anchor-rect positioner) (list x y width height)))
+
+(defmethod xdg-positioner.set-anchor ((positioner xdg-positioner) anchor)
+  (unless (<= +xdg-positioner-anchor-none+ anchor +xdg-positioner-anchor-bottom-right+)
+    (protocol-error (resource-client positioner) (resource-id positioner)
+                    +xdg-positioner-error-invalid-input+
+                    "anchor ~D is not an xdg_positioner.anchor value" anchor))
+  (setf (xdg-positioner-anchor positioner) anchor))
+
+(defmethod xdg-positioner.set-gravity ((positioner xdg-positioner) gravity)
+  ;; The XML says this one raises invalid_input, and it is the only value here that
+  ;; does; set_anchor is checked the same way because a value outside its enum is
+  ;; not a positioner rule either (D44).
+  (unless (<= +xdg-positioner-gravity-none+ gravity +xdg-positioner-gravity-bottom-right+)
+    (protocol-error (resource-client positioner) (resource-id positioner)
+                    +xdg-positioner-error-invalid-input+
+                    "gravity ~D is not an xdg_positioner.gravity value" gravity))
+  (setf (xdg-positioner-gravity positioner) gravity))
+
+(defmethod xdg-positioner.set-constraint-adjustment ((positioner xdg-positioner)
+                                                     adjustment)
+  "Store the adjustment bits; unknown bits are dropped, not an error.
+
+The positioner's error enum has one value (`invalid_input'), and the XML names no
+error for an unknown adjustment bit.  Dropping a bit nobody defines is the honest
+reading of 'adjust as you can'; disconnecting is not."
+  (let ((known (logand adjustment
+                       (logior +xdg-positioner-constraint-adjustment-slide-x+
+                               +xdg-positioner-constraint-adjustment-slide-y+
+                               +xdg-positioner-constraint-adjustment-flip-x+
+                               +xdg-positioner-constraint-adjustment-flip-y+
+                               +xdg-positioner-constraint-adjustment-resize-x+
+                               +xdg-positioner-constraint-adjustment-resize-y+))))
+    (unless (= known adjustment)
+      (log-message :debug "positioner ~D: constraint adjustment ~D has unknown bits; ~D used"
+                   (resource-id positioner) adjustment known))
+    (setf (xdg-positioner-constraint-adjustment positioner) known)))
+
+(defmethod xdg-positioner.set-offset ((positioner xdg-positioner) x y)
+  (setf (xdg-positioner-offset positioner) (list x y)))
+
+(defun positioner-complete-p (positioner)
+  "Is POSITIONER usable: a non-zero size *and* a non-zero anchor rectangle?
+
+That is the spec's definition, and the two NILs are separate from zero: set_size
+with 0 is an error at the request, so a stored size is already positive, while
+set_anchor_rect accepts a zero side (a client may place a popup relative to a
+one-pixel-wide caret, then widen it) -- so the rectangle is checked here."
+  (let ((size (xdg-positioner-size positioner))
+        (rect (xdg-positioner-anchor-rect positioner)))
+    (and size (plusp (first size)) (plusp (second size))
+         rect (plusp (third rect)) (plusp (fourth rect)))))
+
+(defun positioner-rule (positioner)
+  "A snapshot of POSITIONER's rules, as the plist a popup keeps for its lifetime.
+
+Keys: :width :height (the surface size), :anchor-rect (:x :y :width :height),
+:anchor, :gravity, :constraint (adjustment bits) and :offset (:x :y).  Copying is
+the point: the xdg_positioner description says the compositor makes a copy at the
+request, so the client may reuse or destroy the positioner the moment get_popup has
+been answered."
+  (list :width (first (xdg-positioner-size positioner))
+        :height (second (xdg-positioner-size positioner))
+        :anchor-rect (copy-list (xdg-positioner-anchor-rect positioner))
+        :anchor (xdg-positioner-anchor positioner)
+        :gravity (xdg-positioner-gravity positioner)
+        :constraint (xdg-positioner-constraint-adjustment positioner)
+        :offset (copy-list (xdg-positioner-offset positioner))))
+
+;;; ---------------------------------------------------------------------------
+;;; The positioner's arithmetic
+;;;
+;;; Pure functions on a rule plist and a box, so the part that can be wrong in a way
+;;; a screenshot will not show is testable on its own (the same split as
+;;; cf.grab:resize-target-size, D42).  Everything is in the parent's *window
+;;; geometry* space, because that is the space xdg_popup.configure's x and y are
+;;; relative to; a compositor converts its output bounds into that space and hands
+;;; them to POPUP-CONSTRAINT-BOX.
+;;; ---------------------------------------------------------------------------
+
+(defun corner-directions (value)
+  "The sides a corner-enum value names: (values horizontal vertical).
+
+ANCHOR and GRAVITY share this layout (none=0, top=1, bottom=2, left=3, right=4 and
+the four corners), so one reader serves both.  0 -- and anything out of range, which
+the setters refuse -- means 'no direction': centred on that axis."
+  (case value
+    (1 (values nil :top))
+    (2 (values nil :bottom))
+    (3 (values :left nil))
+    (4 (values :right nil))
+    (5 (values :left :top))
+    (6 (values :left :bottom))
+    (7 (values :right :top))
+    (8 (values :right :bottom))
+    (t (values nil nil))))
+
+(defparameter +flip-horizontal+
+  '((0 . 0) (1 . 1) (2 . 2) (3 . 4) (4 . 3) (5 . 7) (6 . 8) (7 . 5) (8 . 6))
+  "ANCHOR/GRAVITY values with left and right exchanged, top and bottom kept.")
+
+(defparameter +flip-vertical+
+  '((0 . 0) (1 . 2) (2 . 1) (3 . 3) (4 . 4) (5 . 6) (6 . 5) (7 . 8) (8 . 7))
+  "ANCHOR/GRAVITY values with top and bottom exchanged, left and right kept.")
+
+(defun flip-horizontal (value) (cdr (assoc value +flip-horizontal+)))
+(defun flip-vertical (value) (cdr (assoc value +flip-vertical+)))
+
+(defun anchor-point (rect anchor)
+  "The point inside RECT ((x y width height)) that ANCHOR names, as two values.
+
+A corner anchors the corner itself, an edge the middle of that edge, and `none' the
+centre of the rectangle."
+  (multiple-value-bind (horizontal vertical) (corner-directions anchor)
+    (destructuring-bind (x y width height) rect
+      (values (case horizontal
+                (:left x)
+                (:right (+ x width))
+                (t (+ x (floor width 2))))
+              (case vertical
+                (:top y)
+                (:bottom (+ y height))
+                (t (+ y (floor height 2))))))))
+
+(defun gravity-origin (gravity width height)
+  "Where a WIDTH x HEIGHT popup's top-left corner sits relative to its anchor point.
+
+Gravity `top_left' means the popup is placed *towards* the top left, so its own
+bottom-right corner is on the anchor point: both offsets are negative.  A gravity
+with no direction on an axis centres the popup on it."
+  (multiple-value-bind (horizontal vertical) (corner-directions gravity)
+    (values (case horizontal
+              (:right 0)
+              (:left (- width))
+              (t (- (floor width 2))))
+            (case vertical
+              (:bottom 0)
+              (:top (- height))
+              (t (- (floor height 2)))))))
+
+(defun popup-position (rule anchor gravity)
+  "The popup's top-left corner for RULE with ANCHOR and GRAVITY, and its offset.
+
+Relative to the upper-left corner of the parent's window geometry, which is exactly
+what xdg_popup.configure carries.  Two values."
+  (multiple-value-bind (anchor-x anchor-y)
+      (anchor-point (getf rule :anchor-rect) anchor)
+    (multiple-value-bind (dx dy) (gravity-origin gravity (getf rule :width) (getf rule :height))
+      (values (+ anchor-x dx (first (getf rule :offset)))
+              (+ anchor-y dy (second (getf rule :offset)))))))
+
+(defun span-inside-p (position size box-position box-size)
+  "Does a SIZE-long span at POSITION lie inside a BOX-SIZE-long box at BOX-POSITION?"
+  (and (<= box-position position)
+       (<= (+ position size) (+ box-position box-size))))
+
+(defun slide-position (position size box-position box-size)
+  "SLIDE one axis until the span is inside, or as close as it can get.
+
+A span shorter than the box moves the shortest distance that puts it inside.  A span
+*longer* than the box cannot be unconstrained at all, so it is placed so that it
+covers the box -- the same rule as cf.grab:clamp-to-output, and for the same reason:
+what is left outside must not be the part you need."
+  (if (<= size box-size)
+      (max box-position (min position (- (+ box-position box-size) size)))
+      (max (- (+ box-position box-size) size) (min position box-position))))
+
+(defun shrink-to-fit (position size box-position box-size)
+  "RESIZE one axis so a SIZE-long span at POSITION is inside the box; two values."
+  (when (< position box-position)
+    (decf size (- box-position position))
+    (setf position box-position))
+  (when (> (+ position size) (+ box-position box-size))
+    (setf size (- (+ box-position box-size) position)))
+  (values position (max 1 size)))
+
+(defun constrain-popup (rule x y width height box)
+  "Apply RULE's constraint adjustment to a popup at (X, Y, WIDTH, HEIGHT) in BOX.
+
+Box is (x y width height) in the parent's window-geometry space.  The adjustments
+are applied in the order the spec fixes and only to a constrained axis:
+
+  1. flip   -- swap the anchor and gravity on that axis, and keep the result only if
+               it is actually unconstrained (otherwise the unflipped position is
+               kept, as the XML requires);
+  2. slide  -- move the popup along the axis until it is inside, or as close as a
+               popup larger than the box can be;
+  3. resize -- shrink the popup so that it fits, when the client allowed it.
+
+Returns (values x y width height)."
+  (let ((adjustment (getf rule :constraint))
+        (anchor (getf rule :anchor))
+        (gravity (getf rule :gravity))
+        (box-x (first box))
+        (box-y (second box))
+        (box-width (third box))
+        (box-height (fourth box)))
+    (unless (span-inside-p x width box-x box-width)
+      (when (logtest +xdg-positioner-constraint-adjustment-flip-x+ adjustment)
+        (multiple-value-bind (flipped-x flipped-y)
+            (popup-position rule (flip-horizontal anchor) (flip-horizontal gravity))
+          (declare (ignore flipped-y))
+          (when (span-inside-p flipped-x width box-x box-width)
+            (setf x flipped-x
+                  anchor (flip-horizontal anchor)
+                  gravity (flip-horizontal gravity)))))
+      (when (and (logtest +xdg-positioner-constraint-adjustment-slide-x+ adjustment)
+                 (not (span-inside-p x width box-x box-width)))
+        (setf x (slide-position x width box-x box-width)))
+      (when (and (logtest +xdg-positioner-constraint-adjustment-resize-x+ adjustment)
+                 (not (span-inside-p x width box-x box-width)))
+        (multiple-value-setq (x width) (shrink-to-fit x width box-x box-width))))
+    (unless (span-inside-p y height box-y box-height)
+      (when (logtest +xdg-positioner-constraint-adjustment-flip-y+ adjustment)
+        (multiple-value-bind (flipped-x flipped-y)
+            (popup-position rule (flip-vertical anchor) (flip-vertical gravity))
+          (declare (ignore flipped-x))
+          (when (span-inside-p flipped-y height box-y box-height)
+            (setf y flipped-y))))
+      (when (and (logtest +xdg-positioner-constraint-adjustment-slide-y+ adjustment)
+                 (not (span-inside-p y height box-y box-height)))
+        (setf y (slide-position y height box-y box-height)))
+      (when (and (logtest +xdg-positioner-constraint-adjustment-resize-y+ adjustment)
+                 (not (span-inside-p y height box-y box-height)))
+        (multiple-value-setq (y height) (shrink-to-fit y height box-y box-height))))
+    (values x y (max 1 width) (max 1 height))))
+
+(defun place-popup (rule &optional constraint-box)
+  "Where RULE puts a popup: (values x y width height), parent-geometry relative.
+
+Without a constraint box the position is exactly what the positioner asked for -- a
+server with no output has no work area to constrain against, and a guess would be
+worse than the client's own numbers."
+  (multiple-value-bind (x y)
+      (popup-position rule (getf rule :anchor) (getf rule :gravity))
+    (if constraint-box
+        (constrain-popup rule x y (getf rule :width) (getf rule :height) constraint-box)
+        (values x y (getf rule :width) (getf rule :height)))))
+
 
 ;;; ---------------------------------------------------------------------------
 ;;; xdg_surface
@@ -432,7 +728,7 @@ This is what an interactive resize *is* for a shm client: the compositor cannot
 resize a buffer it does not own, so it configures a size and the client comes
 back with a buffer that size.  The size is remembered on the toplevel, so a later
 configure for a focus change (SET-TOPLEVEL-ACTIVATED) keeps it instead of
-resetting the window to "you choose"."
+resetting the window to 0x0, 'you choose'."
   (let* ((shell (xdg-toplevel-shell-surface toplevel))
          (states (xdg-toplevel-configure-states toplevel)))
     (when (and shell (shell-alive-p shell))
@@ -542,3 +838,303 @@ send, never patched (docs/framework.md §6)."
                       :width (xdg-toplevel-configure-width toplevel)
                       :height (xdg-toplevel-configure-height toplevel)
                       :states (if activated (list +xdg-toplevel-state-activated+) nil)))))
+
+;;; ---------------------------------------------------------------------------
+;;; xdg_surface.get_popup and xdg_popup
+;;;
+;;; A popup is a toplevel's child: it is positioned once (from a copy of a
+;;; positioner's rules), it may take an explicit grab (which is an owner-events
+;;; grab: the popup's client hears the pointer, and a press outside the stack
+;;; dismisses it), and when it goes away the compositor says so with popup_done
+;;; rather than unmapping in silence.
+;;;
+;;; What the protocol layer owns is the *state*: the parent chain, the copied rule,
+;;; the configure that carries the placement, the ordering rules ("a client may only
+;;; destroy the topmost popup"), and the two errors the XML names.  What it does not
+;;; own is policy, so three hooks go to the compositor, dispatched on the popup's
+;;; wl_surface -- the object a framework subclasses (D7):
+;;;
+;;;   POPUP-CONSTRAINT-BOX    where the popup may not leave (the output, in the
+;;;                           parent's window-geometry space)
+;;;   POPUP-GRAB-REQUESTED    a validated explicit grab: take the pointer
+;;;   POPUP-DISMISSED         it is off the screen: drop the node, hand focus back
+;;; ---------------------------------------------------------------------------
+
+(defgeneric popup-constraint-box (surface popup)
+  (:documentation
+   "The box POPUP must stay inside, in its parent's window-geometry space, or NIL.
+
+The popup's configure position is relative to the upper-left corner of the parent's
+*window geometry*, so a compositor converts its output: an output at (0,0) 1280x800
+with the parent's geometry at (32,32) in output space is the box (-32 -32 1280 800).
+The default is NIL -- no constraint -- because a transport-only server has no output,
+and an unconstrained position is honest where a guess would not be.")
+  (:method (surface popup)
+    (declare (ignore surface popup))
+    nil))
+
+(defgeneric popup-grab-requested (surface popup seat serial)
+  (:documentation
+   "POPUP asked for an explicit grab, with a SEAT and a SERIAL this display issued.
+
+The default does nothing, so a compositor without a seat still answers the protocol
+(and lets the popup be dismissed by its own client).  A compositor that honours it
+owns the pointer until the popup is dismissed and must send popup_done when the user
+clicks outside it.  The serial has already been validated against the display's
+recent serials; the surface is the popup's own wl_surface.")
+  (:method (surface popup seat serial)
+    (declare (ignore surface popup seat serial))
+    nil))
+
+(defgeneric popup-dismissed (surface popup reason)
+  (:documentation
+   "POPUP is off the screen: dismissed by the compositor (:DISMISSED, :CLICK-OUTSIDE,
+:KEYBOARD, :GRAB-REFUSED, :PARENT-DISMISSED) or destroyed by its client (:DESTROYED).
+
+SURFACE is the popup's wl_surface.  The default does nothing; a compositor drops the
+scene node and hands keyboard focus back to the window the popup belonged to.")
+  (:method (surface popup reason)
+    (declare (ignore surface popup reason))
+    nil))
+
+(defun xdg-popup-toplevel (popup)
+  "The xdg_toplevel POPUP ultimately belongs to, or NIL for an unparented popup.
+
+A popup's parent is an xdg_surface whose role is a toplevel or another popup; the
+walk up that chain is what the stacking and \"topmost popup\" rules are about."
+  (loop with shell = (xdg-popup-parent popup)
+        with limit = 16
+        while (and shell (plusp limit))
+        do (let ((role (xdg-surface-role shell)))
+             (cond ((typep role 'xdg-toplevel)
+                    (return role))
+                   ((typep role 'xdg-popup)
+                    (setf shell (xdg-popup-parent role)))
+                   (t (return nil))))
+           (decf limit)))
+
+(defun popup-topmost-p (popup)
+  "Is POPUP the popup its client may destroy: the newest live one of its toplevel?
+
+Dismissed popups do not count: they are off the screen but still the client's to
+destroy, and refusing that would leave a client unable to clean up."
+  (let ((toplevel (xdg-popup-toplevel popup)))
+    (if toplevel
+        (let ((live (remove-if (lambda (other)
+                                 (or (resource-destroyed-p other)
+                                     (xdg-popup-dismissed-p other)))
+                               (xdg-toplevel-popups toplevel))))
+          (or (null live) (eq popup (car (last live)))))
+        t)))
+
+(defun unlink-popup (popup)
+  "Take POPUP out of its toplevel's popup list."
+  (let ((toplevel (xdg-popup-toplevel popup)))
+    (when toplevel
+      (setf (xdg-toplevel-popups toplevel)
+            (remove popup (xdg-toplevel-popups toplevel) :test #'eq)))
+    popup))
+
+(defmethod xdg-surface.get-popup ((shell xdg-surface) parent positioner)
+  "Give this surface the popup role, placed by a copy of POSITIONER's rules."
+  (let ((client (resource-client shell)))
+    (unless (xdg-surface-live-p shell)
+      (protocol-error client (resource-id shell) +xdg-surface-error-not-constructed+
+                      "this xdg_surface lost its wl_surface"))
+    (when (xdg-surface-role shell)
+      (protocol-error client (resource-id shell)
+                      +xdg-surface-error-already-constructed+
+                      "this xdg_surface already has the ~(~A~) role"
+                      (xdg-surface-role-name shell)))
+    (unless (positioner-complete-p positioner)
+      (protocol-error client (resource-id shell)
+                      +xdg-wm-base-error-invalid-positioner+
+                      "the positioner has no size, or no anchor rectangle"))
+    (when parent
+      (cond
+        ((eq parent shell)
+         (protocol-error client (resource-id shell)
+                         +xdg-wm-base-error-invalid-popup-parent+
+                         "an xdg_surface cannot be its own popup parent"))
+        ((or (resource-destroyed-p parent)
+             (not (xdg-surface-live-p parent))
+             (null (xdg-surface-role parent)))
+         (protocol-error client (resource-id shell)
+                         +xdg-wm-base-error-invalid-popup-parent+
+                         "the parent xdg_surface ~D has no role (or no surface)"
+                         (resource-id parent)))))
+    (let ((popup (allocate-resource client
+                                    (resolve-interface "xdg_popup")
+                                    :version (resource-version shell)
+                                    :class 'xdg-popup
+                                    :destroy-function #'destroy-xdg-popup)))
+      (setf (xdg-popup-shell-surface popup) shell
+            (xdg-popup-parent popup) parent
+            (xdg-popup-rule popup) (positioner-rule positioner)
+            (xdg-surface-role shell) popup
+            (xdg-surface-role-name shell) :popup)
+      ;; Creation order is stacking order, so a new popup goes last.
+      (let ((toplevel (xdg-popup-toplevel popup)))
+        (when toplevel
+          (setf (xdg-toplevel-popups toplevel)
+                (append (xdg-toplevel-popups toplevel) (list popup)))))
+      (log-message :debug "client ~D: xdg_popup ~D for xdg_surface ~D (parent ~S)"
+                   (client-id client) (resource-id popup) (resource-id shell)
+                   (and parent (resource-id parent)))
+      popup)))
+
+(defun send-popup-configure (popup x y width height)
+  "Send xdg_popup.configure then xdg_surface.configure; returns the serial.
+
+The order is what makes the pair atomic: the role's geometry comes first, the
+xdg_surface.configure serial that the client acks comes last, exactly as for a
+toplevel (docs/framework.md §6)."
+  (let ((shell (xdg-popup-shell-surface popup)))
+    (unless (and shell (shell-alive-p shell))
+      (return-from send-popup-configure nil))
+    (let ((serial (display-next-serial (resource-display popup))))
+      (xdg-popup.configure popup x y width height)
+      (setf (xdg-popup-geometry popup) (list x y width height)
+            (xdg-popup-configure-count popup)
+            (1+ (xdg-popup-configure-count popup)))
+      (xdg-surface.configure shell serial)
+      (setf (xdg-surface-configure-serial shell) serial
+            (xdg-surface-configured-p shell) t
+            (xdg-surface-pending-serials shell)
+            (cons serial (xdg-surface-pending-serials shell)))
+      (log-message :debug "client ~D: popup ~D configured at (~D, ~D) ~Dx~D (serial ~D)"
+                   (client-id (resource-client popup)) (resource-id popup)
+                   x y width height serial)
+      serial)))
+
+(defun configure-popup (popup surface)
+  "Answer a popup's initial commit with its placement, and only its placement.
+
+Unlike a toplevel there is nothing for the client to choose: the size is the
+positioner's and the position is the compositor's, so the configure is a decision,
+not a suggestion.  A popup with no parent is not configured at all -- in v1 a null
+parent means \"some other protocol will say\", and no other protocol here can."
+  (let ((parent (xdg-popup-parent popup)))
+    (cond
+      ((null parent)
+       (log-message :debug "popup ~D has no parent and no other protocol gives it one; not mapping"
+                    (resource-id popup))
+       nil)
+      (t
+       (multiple-value-bind (x y width height)
+           (place-popup (xdg-popup-rule popup) (popup-constraint-box surface popup))
+         (send-popup-configure popup x y width height))))))
+
+(defmethod xdg-popup.grab ((popup xdg-popup) seat-object serial)
+  "Take an explicit grab, or refuse it and dismiss the popup, as the spec says."
+  (let* ((shell (xdg-popup-shell-surface popup))
+         (surface (and shell (xdg-surface-surface shell)))
+         (seat (and (typep seat-object 'seat-resource)
+                    (seat-resource-seat seat-object)))
+         (parent (xdg-popup-parent popup))
+         (parent-role (and parent (xdg-surface-role parent))))
+    (when (xdg-popup-mapped-p popup)
+      (protocol-error (resource-client popup) (resource-id popup)
+                      +xdg-popup-error-invalid-grab+
+                      "grab after the popup was mapped"))
+    ;; A popup may only parent a *grabbing* popup, and a dismissed parent dismisses
+    ;; its child before the child could ever be shown.
+    (when (typep parent-role 'xdg-popup)
+      (cond
+        ((xdg-popup-dismissed-p parent-role)
+         (dismiss-popup popup :reason :parent-dismissed)
+         (return-from xdg-popup.grab nil))
+        ((not (xdg-popup-grabbed-p parent-role))
+         (let ((wm-base (xdg-surface-wm-base shell)))
+           (protocol-error (resource-client popup)
+                           (if wm-base (resource-id wm-base) (resource-id popup))
+                           +xdg-wm-base-error-invalid-popup-parent+
+                           "the parent popup ~D has no explicit grab"
+                           (resource-id parent-role))))))
+    (cond
+      ((and surface serial seat (valid-serial-p seat serial))
+       (setf (xdg-popup-grabbed-p popup) t)
+       (log-message :debug "client ~D: popup ~D took an explicit grab (serial ~D)"
+                    (client-id (resource-client popup)) (resource-id popup) serial)
+       (popup-grab-requested surface popup seat serial)
+       t)
+      (t
+       ;; "If the compositor denies the grab, the popup will be immediately
+       ;; dismissed."  A serial we never issued is a grab we cannot honour.
+       (log-message :debug "popup ~D: grab refused (serial ~S, seat ~S); dismissing"
+                    (resource-id popup) serial (not (null seat)))
+       (dismiss-popup popup :reason :grab-refused)
+       nil))))
+
+(defun dismiss-popup (popup &key (reason :dismissed))
+  "Take POPUP off the screen and tell its client (xdg_popup.popup_done).
+
+Idempotent: a popup dismissed twice (a click and a key in the same batch) sends one
+popup_done, because the second one would name a surface the client has already
+forgotten.  The object stays alive: destroying it is the client's decision."
+  (unless (or (xdg-popup-dismissed-p popup) (resource-destroyed-p popup))
+    (let* ((shell (xdg-popup-shell-surface popup))
+           (surface (and shell (xdg-surface-surface shell))))
+      (setf (xdg-popup-dismissed-p popup) t
+            (xdg-popup-mapped-p popup) nil
+            (xdg-popup-grabbed-p popup) nil)
+      (when (and shell (shell-alive-p shell))
+        (xdg-popup.popup-done popup)
+        (setf (xdg-surface-mapped-p shell) nil))
+      (when (and surface (not (resource-destroyed-p surface)))
+        ;; Unmapping here, not only in the client: "at the same time the surface
+        ;; will be unmapped" is the compositor's half of popup_done.
+        (setf (surface-mapped-p surface) nil)
+        (popup-dismissed surface popup reason))
+      (log-message :debug "client ~D: popup ~D dismissed (~A)"
+                   (client-id (resource-client popup)) (resource-id popup) reason)
+      t)))
+
+(defun dismiss-popup-chain (popup &key (reason :dismissed))
+  "Dismiss POPUP and every popup created after it under the same toplevel.
+
+Topmost first, which is the only order a client can answer: a submenu goes before
+the menu it belongs to, and each gets its own popup_done.  A compositor is allowed
+to dismiss a whole nested stack (the xdg_popup.grab description says so), and a
+click outside a menu is exactly that."
+  (let* ((toplevel (xdg-popup-toplevel popup))
+         (stack (if toplevel (xdg-toplevel-popups toplevel) (list popup)))
+         (tail (member popup stack :test #'eq)))
+    (dolist (other (reverse (copy-list tail)))
+      (dismiss-popup other :reason reason))))
+
+(defun destroy-xdg-popup (popup)
+  "POPUP's id is gone: unmap the surface, unlink it, and free the role."
+  (let* ((shell (xdg-popup-shell-surface popup))
+         (surface (and shell (not (resource-destroyed-p shell))
+                       (xdg-surface-surface shell))))
+    ;; The compositor hears first, while both objects still point at each other.
+    (when (and surface (not (resource-destroyed-p surface)))
+      (popup-dismissed surface popup :destroyed)
+      (setf (surface-mapped-p surface) nil))
+    (unlink-popup popup)
+    (when (and shell (not (resource-destroyed-p shell)))
+      ;; The surface is "newly unmapped": per the spec it needs a fresh initial
+      ;; commit and a new role, exactly as after an xdg_toplevel is destroyed.
+      (setf (xdg-surface-role shell) nil
+            (xdg-surface-role-name shell) nil
+            (xdg-surface-configured-p shell) nil
+            (xdg-surface-acknowledged-p shell) nil
+            (xdg-surface-configure-serial shell) nil
+            (xdg-surface-pending-serials shell) nil
+            (xdg-surface-mapped-p shell) nil))
+    (setf (xdg-popup-shell-surface popup) nil
+          (xdg-popup-parent popup) nil
+          (xdg-popup-dismissed-p popup) t)))
+
+(defmethod xdg-popup.destroy ((popup xdg-popup))
+  "The client destroys its popup -- only the topmost one, per the XML."
+  (unless (popup-topmost-p popup)
+    (let* ((shell (xdg-popup-shell-surface popup))
+           (wm-base (and shell (xdg-surface-wm-base shell))))
+      (protocol-error (resource-client popup)
+                      (if wm-base (resource-id wm-base) (resource-id popup))
+                      +xdg-wm-base-error-not-the-topmost-popup+
+                      "popup ~D is not the topmost popup of its toplevel"
+                      (resource-id popup))))
+  (destroy-resource popup))

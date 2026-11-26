@@ -114,7 +114,9 @@ framework's own focus call sends the keyboard enter and the toplevel's `activate
 configure together (D27), so there is nothing to keep in sync here."
   (let ((node (and surface (cf:surface-scene-node surface))))
     (when node
-      (scene:node-raised node)
+      ;; A window's popups come up with it: a menu left behind over another window
+      ;; is a menu for the wrong window (D44).
+      (cf:raise-window-with-popups tinywl node)
       (cf:focus-surface tinywl surface)
       ;; The stack changed, so the frame changed, and no client committed anything
       ;; to say so.
@@ -150,8 +152,8 @@ The sides a person can aim at are the sides that take input.  A client with
 client-side decorations sets an input region that excludes its shadow -- weston-terminal's
 is (32 32 742 499) inside an 806x563 surface -- so the *visible* left border is 32 pixels
 in from the surface's bounding box.  Measuring the grab margin from the bounding box put
-that border outside it, and a press on the visible border then read as "the body of the
-window" and resized from the bottom-right: the right and bottom edges moved and the one
+that border outside it, and a press on the visible border then read as 'the body of the
+window' and resized from the bottom-right: the right and bottom edges moved and the one
 under the pointer did not (the sixth manual test).  A surface with no input region is its
 own reach, which is every client that does not decorate itself."
   (let* ((surface (and (typep node 'scene:buffer-node) (scene:buffer-node-surface node)))
@@ -258,7 +260,7 @@ its compositor wants click-to-raise."
            (declare (ignore x y))
            (let ((node (and surface (cf:surface-scene-node surface))))
              (when node
-               (scene:node-raised node)
+               (cf:raise-window-with-popups tinywl node)
                (cf:request-frame tinywl)))))))))
 
 ;;; ---------------------------------------------------------------------------
