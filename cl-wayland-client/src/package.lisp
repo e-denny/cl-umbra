@@ -89,13 +89,61 @@ generated event generic functions, whichever the caller prefers.")
                 #:connect-unix-socket
                 #:make-socket-pair
                 #:fd-open-p
-                #:io-error)
+                #:io-error
+                #:memfd-create
+                #:set-file-size
+                #:map-file
+                #:unmap-file
+                #:pointer+
+                #:mapped-octets
+                #:+prot-read+
+                #:+prot-write+)
   ;; The request generic functions this package implements a client side for.
   ;; The package is named after the protocol (docs/protocol-layer.md §4.1).
   (:import-from #:wayland
                 #:wl-display.get-registry
                 #:wl-display.sync
-                #:wl-registry.bind)
+                #:wl-registry.bind
+                #:wl-compositor.create-surface
+                #:wl-compositor.create-region
+                #:wl-surface.attach
+                #:wl-surface.damage
+                #:wl-surface.frame
+                #:wl-surface.set-opaque-region
+                #:wl-surface.set-input-region
+                #:wl-surface.commit
+                #:wl-surface.set-buffer-transform
+                #:wl-surface.set-buffer-scale
+                #:wl-surface.destroy
+                #:wl-region.add
+                #:wl-region.subtract
+                #:wl-region.destroy
+                #:wl-buffer.destroy
+                #:wl-shm.create-pool
+                #:wl-shm-pool.create-buffer
+                #:wl-shm-pool.resize
+                #:wl-shm-pool.destroy
+                #:wl-seat.get-pointer
+                #:wl-seat.get-keyboard
+                #:wl-seat.get-touch
+                #:wl-seat.release
+                #:wl-pointer.set-cursor
+                #:wl-pointer.release
+                #:wl-keyboard.release
+                #:wl-touch.release)
+  ;; xdg-shell is its own generated package (it is its own protocol XML).
+  (:import-from #:xdg-shell
+                #:xdg-wm-base.get-xdg-surface
+                #:xdg-wm-base.pong
+                #:xdg-wm-base.ping
+                #:xdg-wm-base.destroy
+                #:xdg-surface.get-toplevel
+                #:xdg-surface.set-window-geometry
+                #:xdg-surface.ack-configure
+                #:xdg-surface.destroy
+                #:xdg-toplevel.set-title
+                #:xdg-toplevel.set-app-id
+                #:xdg-toplevel.destroy)
   (:export
    ;; conditions
    #:client-error
@@ -145,10 +193,51 @@ generated event generic functions, whichever the caller prefers.")
    #:check-live
    #:allocate-proxy
    #:register-proxy
+   #:register-proxy-class
+   #:proxy-class-for
    #:release-object
    #:object-for-id
    #:interface-request
    #:interface-event
+   #:object-id-of
+   ;; surfaces, regions and buffers
+   #:compositor
+   #:surface
+   #:region
+   #:buffer
+   #:callback
+   ;; shared memory
+   #:shm
+   #:shm-pool
+   #:client-pool
+   #:make-client-pool
+   #:client-pool-proxy
+   #:client-pool-fd
+   #:client-pool-pointer
+   #:client-pool-size
+   #:client-buffer
+   #:allocate-client-buffer
+   #:client-buffer-proxy
+   #:client-buffer-pool
+   #:client-buffer-width
+   #:client-buffer-height
+   #:client-buffer-stride
+   #:client-buffer-format
+   #:client-buffer-pointer
+   #:client-buffer-pixel
+   #:client-buffer-fill
+   #:client-buffer-fill-rect
+   #:destroy-client-buffer
+   #:destroy-client-pool
+   ;; seats and devices
+   #:seat
+   #:pointer
+   #:keyboard
+   #:touch
+   ;; xdg-shell
+   #:xdg-wm-base
+   #:xdg-surface
+   #:xdg-toplevel
    ;; transport and dispatch
    #:send-request
    #:flush
@@ -157,4 +246,42 @@ generated event generic functions, whichever the caller prefers.")
    ;; re-exported request generic functions
    #:wl-display.get-registry
    #:wl-display.sync
-   #:wl-registry.bind))
+   #:wl-registry.bind
+   #:wl-compositor.create-surface
+   #:wl-compositor.create-region
+   #:wl-surface.attach
+   #:wl-surface.damage
+   #:wl-surface.frame
+   #:wl-surface.set-opaque-region
+   #:wl-surface.set-input-region
+   #:wl-surface.commit
+   #:wl-surface.set-buffer-transform
+   #:wl-surface.set-buffer-scale
+   #:wl-surface.destroy
+   #:wl-region.add
+   #:wl-region.subtract
+   #:wl-region.destroy
+   #:wl-buffer.destroy
+   #:wl-shm.create-pool
+   #:wl-shm-pool.create-buffer
+   #:wl-shm-pool.resize
+   #:wl-shm-pool.destroy
+   #:wl-seat.get-pointer
+   #:wl-seat.get-keyboard
+   #:wl-seat.get-touch
+   #:wl-seat.release
+   #:wl-pointer.set-cursor
+   #:wl-pointer.release
+   #:wl-keyboard.release
+   #:wl-touch.release
+   #:xdg-wm-base.get-xdg-surface
+   #:xdg-wm-base.pong
+   #:xdg-wm-base.ping
+   #:xdg-wm-base.destroy
+   #:xdg-surface.get-toplevel
+   #:xdg-surface.set-window-geometry
+   #:xdg-surface.ack-configure
+   #:xdg-surface.destroy
+   #:xdg-toplevel.set-title
+   #:xdg-toplevel.set-app-id
+   #:xdg-toplevel.destroy))

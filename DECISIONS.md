@@ -1029,3 +1029,131 @@ never issued, or a real one without focus, is refused, and a grab's second endin
 `cf:end-active-grab`. Window menus, keyboard grabs, popup grabs, a focus stack and edge-anchored
 resizing are the next slices; the grab object, the serial predicate and the key path do not change
 when they arrive.
+
+---
+
+## D34 — The client speaks surfaces and shm, and a nested session is a headless compositor with a parent
+
+**Status:** accepted
+
+**Context.** Phase 3's last pieces needed two things the tree did not have: a client library that
+can create and draw a surface (it could connect, bind, roundtrip and receive events, and nothing
+else), and a backend that presents our output inside another compositor. Both were listed in
+`docs/roadmap.md` under `cf.backend.nested`; neither needs libwayland, a display or hardware. The
+live-session demo of a nested window needs its own authorization and was not part of this slice.
+
+**Decision.**
+
+1. **The client library implements the requests a compositor needs, one method per request, and
+   nothing more**: surfaces and regions, shm pools and buffers, seat devices, and the xdg-shell
+   toplevel handshake. Each method is a `check-live`, an id allocation where the XML has a
+   `new_id`, and one `send-request`. A child speaks its parent's version, clamped to what the
+   interface knows (`allocate-child`).
+2. **A bound global gets the class its interface registered**, not a bare `proxy`: a class table
+   keyed by wire interface name, filled at load time. Both directions use it — `bind` and a
+   server-chosen id in an event. Without it `wl_seat.get_pointer` would return something with no
+   methods, and the failure would appear one call later.
+3. **`object-id-of` is a generic function, not an `etypecase`.** A `client-buffer` is not a proxy
+   but attaches as one, so `ATTACH` takes the struct and the encoder asks it for its `wl_buffer`
+   id. An `etypecase` in `proxy.lisp` cannot know about a class defined later in `shm.lisp`.
+4. **The client owns a memfd and a read-write mapping; the compositor gets the descriptor once.**
+   `wl_shm.create_pool` carries it as ancillary data and spends no octets on it (D23). The client
+   keeps its own descriptor only because its mapping was made from it, and keeps the mapping for
+   as long as its buffers live. Geometry is checked client-side before the wire: a buffer larger
+   than its pool is a client bug, and the compositor's answer would arrive as a protocol error
+   after the pixels were written.
+5. **A nested session is a `headless-compositor` with two function slots**, `frame-preparer` and
+   `frame-presenter`. Nothing in `cf.backend.headless` knows what a parent is: the preparer returns
+   the target to draw into and the presenter is called after the scene is rendered and before the
+   nested clients' frame callbacks fire. This is the backend seam `docs/framework.md` §2 asked
+   for, at the size the second backend justified.
+6. **The nested output is drawn straight into the parent's buffer.** The target is a pixman image
+   over the `wl_shm` mapping (`make-target-over-pointer`), not a Lisp vector mirrored into one:
+   there is no copy per frame, and `target-octets-copy` exists only for screenshots. Two buffers
+   are used; a frame that finds both owned by the parent is **deferred**, not queued — the dirty
+   flag stays set and the parent's `wl_buffer.release` re-arms the frame. The parent's
+   `wl_surface.frame` callback is the frame clock: at most one frame is in flight.
+7. **The parent sees an ordinary toplevel when it offers `xdg_wm_base`**: a title, an app id, an
+   initial commit with no buffer to ask for a configure, `ack_configure` for every configure, and
+   a `pong` for every `ping` (the pong lives in the client library: a client that ignores a ping is
+   a client the parent may kill). A parent without xdg-shell gets a roleless surface, which our own
+   headless compositor maps at the client's attach offset.
+8. **The nested output's size is fixed at start.** A configure offering another size is
+   acknowledged and its size ignored. A client may choose its own size, so this is legal, and
+   resizing the inner output (scene dimensions, target, scene nodes) is a separate change; the
+   nested window not following a parent-driven resize is a documented v0 limit.
+9. **Input crosses as reports, not as shared state**: a parent motion becomes
+   `cf:inject-pointer-motion`, a button becomes `cf:inject-pointer-button`, a key becomes
+   `cf:inject-key` after its evdev code is translated through our key table. Modifier masks are
+   recomputed from *our* keymap by the one key path every backend uses, because the parent's masks
+   belong to the parent's keymap and our clients are sent ours (D28). A key our table has no name
+   for is dropped rather than guessed. The parent's keymap descriptor is read and closed — a
+   client that never closes a received descriptor leaks one per keyboard.
+10. **Two reactors, polled.** The parent connection and the nested compositor have separate epoll
+    instances and `nested-dispatch` advances both; a merged wait is phase-4 work, and a nested
+    session is a test and debugging backend. `start-nested` takes an optional `:pump` so that the
+    in-process gate can run the parent's reactor while the nested backend waits, without the
+    backend knowing the parent is in the same image.
+
+**Evidence.** Gate clause 15 (`scripts/nested-gate.sh`): one image, two sockets, a real
+`weston-eventdemo` inside the nested session. The parent maps our window with the title and app id
+we sent and configures it activated; the parent's frame equals the nested compositor's own target at
+five sample points and has content of its own; a pointer motion and a Shift+q injected into the
+*parent* are printed by the client inside the *nested* session at the same coordinates with
+unicode 81 and mask 0x1; the parent's keymap descriptor crossed (6978 octets); teardown removes the
+parent's toplevel, empties its client list and leaks no descriptors. Eight new client tests pin the
+wire: the request opcodes and argument order for surfaces, regions, seats and xdg-shell, that a
+pool's descriptor really is attached and names the same file as our mapping, that pixel helpers
+check bounds, and that a `ping` produces a `pong`.
+
+**Consequences.** Nesting into a *foreign* compositor on the live session is possible now but is
+not demonstrated here: it needs a window on the user's session and its own authorization. Client
+cursor surfaces, buffer scale and transform, damage-driven partial updates, popups, and a merged
+reactor wait are the next slices; none of them changes the seam this decision introduces. A trap
+worth recording: `wl_keyboard.release` and `wl_touch.release` are opcode 0 (the interfaces have no
+other request), not opcode 1 like `wl_pointer.release`.
+
+---
+
+## D35 — A render target's pixels live in foreign memory, and C never keeps a pointer to a Lisp object
+
+**Status:** accepted
+
+**Context.** Phase 2a put a render target in a Lisp octet vector: convenient to allocate, easy to
+read back, and pixman draws into it in place. The pixman image is created once, in `make-target`,
+and holds the vector's address for the life of the image. Phase 3e's nested backend needed a
+target over a `wl_shm` mapping, which prompted a second look — and a unit test that forced a full
+GC between creating a target and drawing into it failed 100% of the time: the vector had moved,
+pixman was still writing to the old address, and `frame-pixel` read the new one, so the frame was
+background with no error anywhere. The same latent bug had been producing a rare flaky failure in
+the cursor tests (about one run in ten under CPU load) since phase 3c.
+
+**Decision.**
+
+1. **Targets own foreign memory** (`make-target` uses `cffi:foreign-alloc`), and
+   `make-target-over-pointer` is the same shape over memory someone else owns (a `wl_shm`
+   mapping). The two differ only in who frees the memory; `destroy-target` releases the image and
+   only frees what `make-target` allocated.
+2. **Readback copies** (`target-octets-copy`) instead of returning a vector that is the target.
+   The PNG writer and tests use it; the render path never does.
+3. **A Lisp vector may be handed to C only inside the call that uses it.** The cursor bitmap is
+   the remaining case: it is copied through `with-pointer-to-vector-data` for the duration of one
+   `composite32`, and the pixman image over it is unref'd before the block ends. Nothing keeps a
+   SAP to Lisp memory across calls.
+4. **The regression is a test, not a comment**:
+   `a-target-survives-a-full-gc` runs a full GC between creating the compositor and rendering, and
+   asserts the cursor's white pixel is still there. It is in the suite because this failure is
+   invisible without forcing it.
+
+**Evidence.** Before the change, a script that allocates, calls `(sb-ext:gc :full t)`, then
+renders reported `stored #x12024C2A40 vector-now #x1200D23FC0 image-data #x12024C2A40` — the
+image pointed at the old address after the vector moved — and `frame-pixel` returned the
+background; the same script after the change returns `#xFFFFFFFF`. The new unit test fails on the
+old code and passes on the new. The unit suite is 201 tests and passes repeatedly under CPU load,
+where the cursor flake used to appear.
+
+**Consequences.** A target is no longer a Lisp vector, so anything that wants to read pixels does
+a copy; `target-octets` is gone. `fill-target` writes word at a time through `cffi:mem-aref`
+(slower than a vector loop, and invisible next to compositing). The nested backend and the
+headless backend now share one target representation, which is why the nested path could render
+straight into the parent's buffer with no copy in the first place.

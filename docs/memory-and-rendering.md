@@ -246,14 +246,21 @@ viable. That is exactly why the next section is ordered DRM-dumb-first and GL-se
 Render into a memfd-backed shm target, then either measure time and drop it, or write a PNG
 on demand. This is the CI workhorse: no display, no privileges, deterministic pixels.
 
-Phase 2a implements it, with one simplification: the target is a Lisp octet vector rather
-than a memfd (pixman draws into it in place either way, and a vector is easier to read back
-and to pin), and the frame clock is a reactor *idle* — a commit marks the compositor dirty
-and one render happens at the end of that cycle. A commit-driven idle is the right shape for a
-headless output with no vblank; the timer/vblank clock replaces it without touching the
+Phase 2a implements it with the frame clock as a reactor *idle*: a commit marks the compositor
+dirty and one render happens at the end of that cycle. A commit-driven idle is the right shape
+for a headless output with no vblank; the timer/vblank clock replaces it without touching the
 renderer or the surface objects. Rendering flushes the connections it produced events for:
 frame callbacks are queued by the render, after the read loop already flushed, and an event
 nobody writes is an event the client waits for forever.
+
+The target's pixels are in **foreign memory** (`cffi:foreign-alloc`), not in a Lisp vector.
+Phase 2a used a vector because it is easy to read back and to pin; phase 3e found that pixman
+holds the address for the image's whole life while SBCL's GC may move a vector that has been
+handed out as a SAP, and the failure mode was silent — a full GC between creating a target and
+drawing turned every frame into background with no error anywhere (D35, and
+`a-target-survives-a-full-gc` in `tests/unit/scene.lisp`). Foreign memory cannot move, and
+readback copies (`target-octets-copy`).
+
 
 ### 8.2 Nested (compositor inside a compositor)
 
@@ -261,6 +268,25 @@ Our compositor is a Wayland *client* of the parent (using `cl-wayland-client`): 
 `wl_shm` pools for its outputs, renders into them, then `wl_surface.attach`/`commit`. Input
 arrives as `wl_pointer`/`wl_keyboard` events from the parent's seat. This is how `cl-tinywl`
 is developed before touching DRM, and it exercises both protocol directions at once.
+
+Phase 3e implements it with **no copy per frame**: a client pool is a memfd plus a read-write
+mapping, a buffer is a rectangle of that mapping, and the pixman target is created *over the
+mapping* (`make-target-over-pointer`). The renderer writes the frame where the parent will read
+it. The consequences worth knowing:
+
+- **Readback needs a copy.** `target-octets` is NIL for a mapped target, and
+  `target-octets-copy` makes a vector on demand — used by the PNG writer and by nothing on the
+  render path.
+- **Two buffers, and a frame is deferred rather than queued.** A buffer stays the parent's until
+  it sends `wl_buffer.release`; a frame that finds both busy leaves the output dirty and is
+  re-requested on the release. Queueing instead would build an unbounded backlog behind a slow
+  parent.
+- **The parent's frame callback is the clock.** At most one frame is in flight, so a nested
+  session cannot outrun the parent, and no timer is needed.
+- **Damage is still "everything".** The nested path damages the whole buffer because the
+  renderer still repaints the whole target (2b adds real damage to both).
+- **No scale, no transform.** The nested output is 1:1 with the parent surface; buffer
+  scale/transform are stored and not applied, as everywhere else in v0 (D29).
 
 ### 8.3 DRM/KMS with dumb buffers (phases 4-6)
 
@@ -271,7 +297,7 @@ No EGL. libdrm's helpers keep this small — the whole path is roughly these cal
 | open device | `open("/dev/dri/cardN", O_RDWR\|O_NONBLOCK)` | via libseat's `open_device` for session handling |
 | enumerate | `drmModeGetResources`, `drmModeGetConnector`, `drmModeGetEncoder`, `drmModeGetCrtc` | pick connected connector + its current/new CRTC, preferred mode |
 | allocate | `drmModeCreateDumbBuffer(fd, w, h, 32, 0, &handle, &pitch, &size)` | pitch is driver-chosen; do not assume width×4 |
-| map | `drmModeMapDumbBuffer(fd, handle, &offset)` then `mmap(size)` | our scanout memory |
+| map | `drmModeMapDumbBuffer(fd, handle, &offset)` then `mmap(size)` | our scanout memory, the same shape as a nested target |
 | register | `drmModeAddFB(fd, w, h, depth=24, bpp=32, pitch, handle, &fb_id)` | |
 | set mode | `drmModeSetCrtc(fd, crtc, fb_id, 0, 0, &connector, 1, &mode)` | once per output |
 | present | `drmModePageFlip(fd, crtc, fb_id, DRM_MODE_PAGE_FLIP_EVENT, user_data)` | non-blocking |
@@ -335,6 +361,9 @@ The renderer and the input path are the two places where a GC pause is visible. 
   clip arrays.
 - `dynamic-extent` for argument vectors and temporary structs; `with-pinned-objects` only
   where CFFI needs it (small, rare).
+- **Never let C keep a pointer to a Lisp object beyond a call.** Pixels that pixman reads or
+  writes live in foreign memory or in a `wl_shm` mapping (D35); the only Lisp vectors handed
+  to C are copied-from/into within the same `with-pointer-to-vector-data` block.
 - Damage regions are preallocated `pixman_region32_t` per output and per surface, cleared
   rather than re-created.
 - Hot-path functions are compiled with `(optimize (speed 3) (safety 1))` and are periodically

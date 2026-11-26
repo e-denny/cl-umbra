@@ -58,7 +58,7 @@ The scripts go through `wayland.test.runner`, which names the nine suites instea
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 192 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 201 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -85,18 +85,31 @@ other end:
   coordinates and the serials a client needs for grabs; a region's union and difference; a
   region snapshotted at commit and outliving its object; and a pool that grows, refuses to
   shrink, and refuses to grow past its file.
-- **The scene.** Seventeen tests: stacking and raising, node-local coordinates through a nested
+- **The scene.** Eighteen tests: stacking and raising, node-local coordinates through a nested
   group, an invisible node taking nothing, a buffer node being exactly its buffer (size, edges,
   and "no buffer is not a window"), an input region deciding what a surface takes (`nil` for the
   whole surface, `:empty` for click-through, a rectangle list with an exclusive far edge), node
   removal and repositioning, and — against a real headless compositor — the cursor's pixels at
   the pointer, the old place cleaned up after a move, the cursor not being hit-testable, a
-  hidden cursor not being drawn, and rectangles drawn in stacking order. The same file covers
+  hidden cursor not being drawn, rectangles drawn in stacking order, and a target that survives a
+  full GC (D35: pixman holds the address, so the pixels are not a Lisp vector). The same file covers
   grabs and keybindings: a move grab following the pointer's delta and ending exactly once, a
   resize grab asking once per distinct size (with the edge arithmetic tested on its own), Alt+Esc
   stopping the reactor, Alt+F1 cycling and focusing, and an unbound key being left alone. Plus,
   in `wayland.test.server`, a region destroyed before the commit it belongs to, serial validity
   over the recent window, and the move-request rule (our serial *and* the focus).
+- **The client's own requests.** Twenty-nine `wayland.test.client` tests. The phase-3e ones pin
+  the wire the nested backend depends on: `create_surface`/`create_region` id allocation and
+  parent-version inheritance; the `wl_surface` request opcodes and argument order (attach with a
+  buffer id and an offset, damage, `frame`'s `new_id`, a `nil` input region as a *null id*,
+  `set_buffer_scale`, commit); that `wl_shm.create_pool` carries exactly one descriptor as
+  ancillary data, spends no octets on it, and that the descriptor names the same file as the
+  client's mapping (written through one, read through the other); that pixel access checks
+  bounds, that fills clip, and that a buffer larger than its pool, a short stride and a
+  misaligned stride are all refused before anything is written; that `attach` accepts the
+  client-buffer struct; the four `wl_seat` factories and the device releases; the xdg-shell
+  handshake's arguments; and that a `ping` produces a `pong` with the same serial after one
+  dispatch and one flush.
 - **The shell's refusals.** Eight `xdg-shell` tests drive the same raw peer through the v1
   handshake and through every way a client can get it wrong: a second role, a second
   `xdg_surface` on one `wl_surface`, a buffer before the initial ack, an ack for a serial we
@@ -233,7 +246,26 @@ Phase 3d (grabs and keybindings) adds the fourteenth:
     cannot: an invented serial and a real serial without focus are both refused, and a grab's
     second ending is a no-op.
 
-All fourteen clauses pass. Two details worth knowing: the protocol clause
+Phase 3e (the client library and a nested session) adds the fifteenth:
+
+15. **Our compositor inside our compositor, with a real client inside that**
+    (`scripts/nested-gate.sh`, `scripts/nested-gate.lisp`). One image, two sockets: a parent
+    headless compositor, a nested backend connected to it as a *client* (the completed client
+    library: surface, pool, two shm buffers, attach/commit, seat devices, the xdg-shell
+    handshake), and `weston-eventdemo` running against the nested compositor's own socket. The
+    gate asserts: the parent sees a mapped, titled ("cl-umbra nested"), app-id'd and
+    activated xdg_toplevel, and its keyboard focus is our nested surface; the parent's frame
+    equals the nested compositor's own target at five sample points *and* has content of its
+    own (the parent's own cursor is parked in a corner, because it is not part of the nested
+    output); a pointer motion injected into the parent reaches the client inside the nested
+    session as a motion at the same coordinates; Shift+q injected into the parent arrives as
+    keycode 16 with unicode 81 and modifier mask 0x1; the pointer, key and keymap counters on
+    the backend are non-zero and the parent's keymap descriptor (6978 octets) crossed the
+    boundary; teardown removes the parent's toplevel, empties its client list, and leaves the
+    descriptor count where it started. A PNG of the parent's frame is written and validated —
+    it shows the inner client's window inside the inner session's output.
+
+All fifteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs
@@ -335,6 +367,7 @@ scale, pool resize), and anything that needs `xdg-shell`.
 | server | GTK4 app | subsurfaces, buffer scale, fractional scale, decoration negotiation |
 | server | Qt app | buffer formats, `xdg_popup`, activation |
 | server | a dmabuf client | import, modifier negotiation, fallback to shm |
+| client | our own server (the nested backend) | surface + shm pool + buffers + attach/commit, the xdg-shell handshake, seat devices and keymap fd -- **passes** (`scripts/nested-gate.sh`) |
 | client | `sway`, `weston` | registry, bind, roundtrip, fd passing, seat events |
 | both | ourselves (nested) | each side exercises the other; the nested compositor is a test |
 
@@ -351,8 +384,10 @@ side of a real display. `demo-globals` against the live session is the one check
 foreign compositor; it is compared with `wayland-info` by diff, not by eye.
 
 Rows that still have nothing behind them are the protocol content of phases 2 and later: the
-shm client, the toolkits, dmabuf, and our client against `sway`/`weston`. The peer fuzzer and
-the C probe cover the *transport* half of the server's obligations, not the compositor's.
+toolkits, dmabuf, and our client as a *window on a live foreign compositor* (the nested backend
+is proven against our own server in one image; running it on the user's session needs a window
+there, which is a separate authorized step). The peer fuzzer and the C probe cover the
+*transport* half of the server's obligations, not the compositor's.
 
 ## 6. Golden images
 

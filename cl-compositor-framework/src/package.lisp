@@ -17,6 +17,9 @@ It draws into a `target' -- a pixman image over an octet vector -- from wl_shm
 buffers, which are read in place: no copy, no texture, no upload.")
   (:export
    #:make-target
+   #:make-target-over-pointer
+   #:destroy-target
+   #:target-octets-copy
    #:fill-target
    #:fill-rect
    #:composite-buffer
@@ -197,14 +200,17 @@ a debugging artefact and a test fixture, not a compression benchmark.")
                 #:wl-output.name
                 #:wl-output.description
                 #:wl-output.done)
+  (:import-from #:cf.render.pixman
+                #:target-octets-copy)
   (:documentation
    "The headless backend: an in-memory target of a configured size, an idle-driven
 frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §8.1).")
   (:export
    #:make-headless-compositor
+   #:request-frame
    #:render-frame
    #:frame-pixel
-   #:target-octets
+   #:target-octets-copy
    #:compositor-display
    #:compositor-width
    #:compositor-height
@@ -239,18 +245,66 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:inject-pointer-axis
    #:compositor-target
    #:compositor-frame-count
+   #:compositor-frame-preparer
+   #:compositor-frame-presenter
+   #:compositor-dirty-p
    #:write-frame-png
    #:cf-surface
    #:cf-compositor))
 
-(defpackage #:cf
+(defpackage #:cf.backend.nested
   (:use #:cl)
+  (:local-nicknames (#:wc #:wayland.client)
+                    (#:srv #:wayland.server)
+                    (#:render #:cf.render.pixman)
+                    (#:input #:cf.input)
+                    (#:headless #:cf.backend.headless)
+                    (#:reactor #:wayland.reactor)
+                    (#:ffi #:wayland.ffi))
+  (:documentation
+   "The nested backend: our compositor inside another compositor
+(docs/framework.md §2, docs/roadmap.md phase 3).
+
+The nested output is a parent wl_surface with shm buffers; the nested input devices
+are the parent's wl_pointer and wl_keyboard; the parent's frame callback is our frame
+clock.  Nothing here renders: the inner compositor draws into a mapping this package
+owns, and the presentation step is attach + damage + commit.")
+  (:export
+   #:nested-backend
+   #:start-nested
+   #:stop-nested
+   #:run-nested
+   #:nested-dispatch
+   #:nested-display
+   #:nested-compositor
+   #:nested-parent-compositor
+   #:nested-surface
+   #:nested-width
+   #:nested-height
+   #:nested-seat
+   #:nested-seat-name
+   #:nested-pointer
+   #:nested-keyboard
+   #:nested-wm-base
+   #:nested-xdg-surface
+   #:nested-toplevel
+   #:nested-configured-p
+   #:nested-mapped-p
+   #:nested-awaiting-frame-p
+   #:nested-frame-count
+   #:nested-pointer-event-count
+   #:nested-key-count
+   #:nested-parent-keymap-size))
+
+(defpackage #:cf
   (:nicknames #:cl-compositor-framework)
   (:import-from #:cf.backend.headless
                 #:make-headless-compositor
+                #:request-frame
                 #:write-frame-png
                 #:render-frame
                 #:frame-pixel
+                #:target-octets-copy
                 #:compositor-display
                 #:compositor-width
                 #:compositor-height
@@ -284,10 +338,26 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
                 #:inject-pointer-button
                 #:inject-pointer-axis
                 #:compositor-frame-count
+                #:compositor-dirty-p
                 #:cf-surface
                 #:cf-compositor)
+  (:import-from #:cf.backend.nested
+                #:nested-backend
+                #:start-nested
+                #:stop-nested
+                #:run-nested
+                #:nested-dispatch
+                #:nested-display
+                #:nested-compositor
+                #:nested-frame-count
+                #:nested-key-count
+                #:nested-pointer-event-count
+                #:nested-parent-keymap-size
+                #:nested-mapped-p)
   (:import-from #:cf.render.pixman
                 #:make-target
+                #:make-target-over-pointer
+                #:destroy-target
                 #:fill-target
                 #:fill-rect
                 #:composite-buffer
@@ -307,8 +377,10 @@ docs/framework.md §1 follow.")
   (:export
    ;; the headless compositor
    #:make-headless-compositor
+   #:request-frame
    #:render-frame
    #:frame-pixel
+   #:target-octets-copy
    #:compositor-display
    #:compositor-width
    #:compositor-height
@@ -344,8 +416,23 @@ docs/framework.md §1 follow.")
    #:compositor-frame-count
    #:write-png
    #:write-frame-png
+   ;; the nested backend
+   #:start-nested
+   #:stop-nested
+   #:run-nested
+   #:nested-dispatch
+   #:nested-backend
+   #:nested-display
+   #:nested-compositor
+   #:nested-frame-count
+   #:nested-key-count
+   #:nested-pointer-event-count
+   #:nested-parent-keymap-size
+   #:nested-mapped-p
    ;; the renderer
    #:make-target
+   #:make-target-over-pointer
+   #:destroy-target
    #:fill-target
    #:fill-rect
    #:composite-buffer

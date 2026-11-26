@@ -44,7 +44,16 @@ SLOT-VALUE shows a different one."))
    (width :initarg :width :reader compositor-width)
    (height :initarg :height :reader compositor-height)
    (background :initarg :background :initform #xFF000000 :reader compositor-background)
-   (target :initarg :target :reader compositor-target)
+   (target :initarg :target :accessor compositor-target)
+   ;; A backend supplies the frame's destination and its presentation.  NIL is the
+   ;; headless case: the target is COMPOSITOR-TARGET and presenting is nothing.
+   ;; The nested backend sets both: the destination is a wl_shm buffer it owns, and
+   ;; presenting is attach + damage + commit to a parent compositor.  Two function
+   ;; slots keep this file from knowing what a parent is (docs/framework.md §2).
+   (frame-preparer :initarg :frame-preparer :initform nil
+                   :accessor compositor-frame-preparer)
+   (frame-presenter :initarg :frame-presenter :initform nil
+                    :accessor compositor-frame-presenter)
    ;; In commit order, which is also draw order: back to front.
    (surfaces :initform nil :accessor compositor-surfaces)
    ;; The xdg_wm_base globals this compositor created, one per client that bound
@@ -260,6 +269,14 @@ outside any client's readable event (D27)."
        (render-frame compositor)
        (srv:flush-all (compositor-display compositor))))))
 
+(defun request-frame (compositor)
+  "Ask for a frame at the end of this reactor cycle.
+
+MARK-DIRTY's public name: a backend that owns the frame clock (nested: a parent
+buffer came free, or the parent's frame callback arrived) uses it to say that there is
+something to draw now, without reaching into the compositor's state."
+  (mark-dirty compositor))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Commit: what a compositor does about it
 ;;; ---------------------------------------------------------------------------
@@ -391,7 +408,7 @@ toplevel gets an empty array rather than a stale `activated`."
 (defun cycle-views (compositor)
   "Bring the bottom window to the top and give it the keyboard (tinywl's Alt+F1).
 
-"Bottom" is draw order, so cycling visits every window once and the old one ends
+The bottom is draw order, so cycling visits every window once and the old one ends
 up at the back -- the same rule tinywl's view list has."
   (let* ((root (scene:scene-root (compositor-scene compositor)))
          (windows (remove-if-not (lambda (node) (typep node 'scene:buffer-node))
@@ -619,33 +636,47 @@ that the render loop is walking; a session must not accumulate tombstones (D26).
       (forget-surface compositor surface))))
 
 (defun render-frame (compositor)
-  "Draw the scene, cursor last, and present the frame; returns the target.
+  "Draw the scene, present the frame, and fire the callbacks; returns the target.
 
-Frame callbacks fire here, after the draw, which is the only moment the protocol
-allows (docs/framework.md §3).  Buffers are released after compositing and before
-the callbacks, for the clients whose surfaces were actually drawn (D25)."
-  (let* ((target (compositor-target compositor))
-         (scene (compositor-scene compositor)))
-    (render:fill-target target (compositor-background compositor))
-    (prune-surfaces compositor)
-    (dolist (surface (scene:scene-render scene target))
-      (enter-surface compositor surface)
-      ;; The pixels are in the target now, so the client may have its buffer
-      ;; back -- before the frame callback, so a client that redraws on the
-      ;; callback already knows which buffer is free.  A double-buffered client
-      ;; deadlocks without this (D25).
-      (srv:release-surface-buffer surface)
-      (srv:surface-presented surface))
-    (incf (compositor-frame-count compositor))
-    (setf (compositor-dirty-p compositor) nil)
-    (setf (compositor-surfaces compositor)
-          (remove-if #'srv:resource-destroyed-p (compositor-surfaces compositor)))
-    target))
+Returns NIL when there is nothing to draw into (a nested backend whose parent has
+not released a buffer yet); the output stays dirty and the backend re-arms the
+frame when a buffer comes free.
+
+Frame callbacks fire here, after the draw and the presentation, which is the only
+moment the protocol allows (docs/framework.md §3).  Buffers are released after
+compositing and before the callbacks, for the clients whose surfaces were actually
+drawn (D25)."
+  (let* ((preparer (compositor-frame-preparer compositor))
+         (target (if preparer
+                     (funcall preparer compositor)
+                     (compositor-target compositor))))
+    (unless target
+      (return-from render-frame nil))
+    (setf (compositor-target compositor) target)
+    (let ((scene (compositor-scene compositor)))
+      (render:fill-target target (compositor-background compositor))
+      (prune-surfaces compositor)
+      (let ((presenter (compositor-frame-presenter compositor)))
+        (when presenter
+          (funcall presenter compositor target)))
+      (dolist (surface (scene:scene-render scene target))
+        (enter-surface compositor surface)
+        ;; The pixels are in the target now, so the client may have its buffer
+        ;; back -- before the frame callback, so a client that redraws on the
+        ;; callback already knows which buffer is free.  A double-buffered client
+        ;; deadlocks without this (D25).
+        (srv:release-surface-buffer surface)
+        (srv:surface-presented surface))
+      (incf (compositor-frame-count compositor))
+      (setf (compositor-dirty-p compositor) nil)
+      (setf (compositor-surfaces compositor)
+            (remove-if #'srv:resource-destroyed-p (compositor-surfaces compositor)))
+      target)))
 
 (defun write-frame-png (compositor path)
   "Write the current target to PATH as a PNG: the screenshot, and the gate's artefact."
   (let ((target (compositor-target compositor)))
-    (png:write-png path (render::target-octets target)
+    (png:write-png path (render:target-octets-copy target)
                    (compositor-width compositor)
                    (compositor-height compositor))))
 

@@ -23,6 +23,7 @@ cl-wayland-project/
 ├── cl-wayland-client/
 │   ├── cl-wayland-client.asd        (also the demo system)
 │   ├── src/  package.lisp  proxy.lisp  display.lisp  registry.lisp
+│   │         surface.lisp  shm.lisp  seat.lisp  xdg-shell.lisp
 │   └── demo/ demo-globals.lisp
 ├── cl-wayland-server/
 │   ├── cl-wayland-server.asd        (also the demo system)
@@ -34,7 +35,7 @@ cl-wayland-project/
 ├── cl-compositor-framework/
 │   ├── cl-compositor-framework.asd
 │   └── src/  package.lisp  render-pixman.lisp  scene.lisp  grab.lisp
-│             keybindings.lisp  xkb.lisp  png.lisp  headless.lisp
+│             keybindings.lisp  xkb.lisp  png.lisp  headless.lisp  nested.lisp
 │       ├── backend/   (phase 3+) protocol.lisp headless.lisp nested.lisp drm.lisp
 │       │              libinput.lisp multi.lisp session.lisp
 │       ├── render/    protocol.lisp pixman.lisp gles2.lisp target.lisp
@@ -59,7 +60,7 @@ cl-wayland-project/
 │                    c-probe.sh  headless-frame.sh  headless-gate.lisp
 │                    xdg-shell-gate.sh  xdg-shell-gate.lisp  seat-gate.sh
 │                    seat-gate.lisp  scene-gate.sh  scene-gate.lisp  grab-gate.sh
-│                    grab-gate.lisp  check-loads.sh
+│                    grab-gate.lisp  nested-gate.sh  nested-gate.lisp  check-loads.sh
 │                    purity-check.sh  lib.sh  capture.sh  run-nested.sh  run-tty.sh
 └── qlfile           local Quicklisp/qlot project set
 ```
@@ -94,7 +95,13 @@ order, a front-to-back hit test that honours input regions, a cascade placement 
 clicked. Phase 3d added `cf.grab` (move and resize grabs that end exactly once, started from a
 serial the display issued and the shell validated) and `cf.keybindings` (a table consulted
 before the focused client, with Alt+Esc and Alt+F1 by default), so a window can be moved,
-resized and cycled. The nested backend, tinywl and `cl-umbra` are still their plan.
+resized and cycled. Phase 3e completed the client library (surfaces and regions, shm pools,
+buffers and descriptor sending, seat devices, the xdg-shell toplevel handshake) and added
+`cf.backend.nested`: a headless compositor whose frame goes into a parent compositor's shm
+buffer and whose input devices are the parent's seat, with two function slots
+(`frame-preparer`/`frame-presenter`) as the whole backend seam. Two sockets, one image, a real
+client inside the nested session -- clause 15. Tinywl, `cl-umbra` and a nested window on a
+foreign compositor are still their plan.
 
 ## 2. Packages
 
@@ -108,7 +115,7 @@ resized and cycled. The nested backend, tinywl and `cl-umbra` are still their pl
 | `wayland.asdf` | — | the `:wayland-protocol` component type (build time only) |
 | `wayland.object` | — | object tables and the two id namespaces, shared by both ends (D19); destruction stays in each dispatch layer |
 | `wayland.reactor` | — | epoll sources (level-triggered), timers, idles, posted commands, signalfd; `epoll.lisp` holds the packed-event syscall wrapper |
-| `wayland.client` | `wl.client` | display, proxies, client ids, registry, roundtrip, event dispatch |
+| `wayland.client` | `wl.client` | display, proxies, client ids, registry, roundtrip, event dispatch; since 3e: surfaces/regions/buffers, shm pools with descriptor sending, seat devices, xdg-shell toplevels |
 | `wayland.server` | `wl.server` | display, globals, resources, clients |
 | `cl-compositor-framework` | `cf` | framework, one sub-package per module (`cf.backend`, `cf.scene`, …) |
 | `tinywl` | — | the tutorial compositor |
@@ -283,6 +290,10 @@ The point of writing this in Lisp. Constraints:
 | `plump` | XML parsing of protocol files | build time only |
 | `static-vectors` | pinned, GC-safe byte vectors | optional; `sb-posix:mmap` covers most needs |
 | `bordeaux-threads` | not used initially | revisit if threads spread |
+
+`cl-compositor-framework` depends on `cl-wayland-client` since phase 3e: the nested backend is
+a client of another compositor, and using the same client library our tests use is the point
+(two directions of one protocol implementation, not two implementations).
 
 Explicitly *not* dependencies: anything that wraps `libwayland`, any compositor toolkit,
 any GUI framework, any JSON library or IPC framework (there is no IPC layer to feed — D14).

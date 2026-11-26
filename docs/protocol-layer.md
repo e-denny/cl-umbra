@@ -344,6 +344,24 @@ What exists:
 - **Requests** are methods on the generated generic functions: `wl-display.get-registry`,
   `wl-display.sync`, `wl-registry.bind` (four wire arguments, version clamped to what the
   loaded schema knows). Everything else arrives with the protocols the client declares.
+  Phase 3e added the methods a compositor needs when it is itself a client (D34):
+  `wl-compositor.create-surface`/`.create-region`, the nine `wl-surface` requests a shm client
+  uses (`attach`, `damage`, `frame`, `set-opaque-region`, `set-input-region`, `commit`,
+  `set-buffer-transform`, `set-buffer-scale`, `destroy`), `wl-region` and `wl-buffer`,
+  `wl-shm.create-pool` (with a descriptor), `wl-shm-pool.create-buffer`/`.resize`,
+  the four `wl-seat` factories and releases, `wl-pointer.set-cursor`/`.release`, and the
+  xdg-shell toplevel handshake (`get_xdg_surface`, `get_toplevel`, `set_title`, `set_app_id`,
+  `set_window_geometry`, `ack_configure`, `destroy`, `pong`).
+- **A proxy's class comes from the interface**, not from the call site: `bind` and a
+  server-chosen id (a `new_id` in an event) both consult a table keyed by wire interface name,
+  so `get_pointer` returns something with methods. A `client-buffer` can be passed straight to
+  `attach`: `object-id-of` is a generic function, and a buffer knows its `wl_buffer` id.
+- **A client pool is a memfd and a mapping** (`make-client-pool`), cut into buffers by
+  `allocate-client-buffer`; the descriptor travels once, as ancillary data, and occupies no
+  octets (D23, §1). Geometry is checked before the wire, because the compositor's refusal
+  would arrive after the pixels were written.
+- **A client answers `xdg_wm_base.ping` itself.** Ignoring a ping is what a hung client does,
+  so the `pong` is a library method, not a policy a user can forget.
 - **Events** reach hooks — `(push (lambda (event &rest args) …) (proxy-hooks proxy))`, with
   `event` a keyword such as `:global` — and, independently, methods specialised on the
   generated event function (`(defmethod wl-registry.global ((registry my-registry) name
@@ -360,10 +378,11 @@ Differences from libwayland that matter: no manual proxy destruction for GC'd ob
 toplevel-only callbacks, enums as keywords, `handler-case` instead of error codes, and one
 table of objects per connection instead of per-proxy vtables.
 
-Not yet: receiving descriptors into typed arguments for real protocols (the transport handles
-fds; no client-side protocol in phase 0 declares one), `wl_registry.bind` for protocols the
-system does not declare, and any notion of a client-side "destroy" request that is not
-`wl_display.delete_id`.
+Not yet: `wl_registry.bind` for protocols the system does not declare, a client-side cursor
+surface/theme, buffer-scale and transform application, and `wl_shm_pool.resize` growth from
+the client side (the method exists; nothing resizes a pool yet). A destroyed client proxy stays
+in the object table until the server's `wl_display.delete_id` arrives, so its id cannot be
+reused for something else in the meantime.
 
 ## 7. The reactor
 

@@ -67,6 +67,16 @@
 #      request becomes a configure carrying the size the drag implies; Alt+F1
 #      cycles the bottom window to the top and Alt+Esc stops the main loop
 #
+# Phase 3e (nested):
+#
+#  15. our compositor runs as a client of another compositor, in one image and two
+#      sockets: the parent sees a mapped, titled, activated xdg_toplevel; the
+#      parent's pixels equal the nested compositor's own target; a pointer motion
+#      and a key injected into the *parent* arrive in a weston client inside the
+#      nested session at the same coordinates, with the same modifier mask; the
+#      parent's keymap descriptor crossed the boundary; teardown removes the
+#      parent's window and leaks no descriptors
+#
 # Logs land in a temporary directory that is printed when something fails.
 
 set -uo pipefail
@@ -227,6 +237,15 @@ else
   fail 'grabs and keys' 'a real client was not moved, resized or out-cycled' "$log_dir/grab.log"
 fi
 
+# 15. A nested session --------------------------------------------------------
+printf '\nphase 3e gate: a nested session\n\n'
+
+if gb "$log_dir/nested.log" "$repo_root/scripts/nested-gate.sh"; then
+  pass 'nested session' "$(grep -a '^pixel grid' "$log_dir/nested.log" | sed 's/^ *//' | cut -c1-44)"
+else
+  fail 'nested session' 'a client inside a nested session was not drawn or did not get input' "$log_dir/nested.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -246,7 +265,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 3a, 3b, 3c and 3d clauses)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 3a, 3b, 3c, 3d and 3e clauses)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

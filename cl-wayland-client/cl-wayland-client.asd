@@ -13,7 +13,11 @@
   :components ((:file "src/package")
                (:file "src/proxy")
                (:file "src/display")
-               (:file "src/registry")))
+               (:file "src/registry")
+               (:file "src/surface")
+               (:file "src/shm")
+               (:file "src/seat")
+               (:file "src/xdg-shell")))
 
 (defsystem "cl-wayland-client/demo"
   :description "demo-globals: print the globals of the session this process is

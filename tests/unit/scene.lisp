@@ -207,6 +207,23 @@ concerned; the protocol state machine has its own tests in wayland.test.server."
     (ok (= #xFFFFFFFF (cf:frame-pixel compositor 31 23)) "drawn at the new place")
     (ok (= #xFF000000 (cf:frame-pixel compositor 11 13)) "and not at the old one")))
 
+(deftest a-target-survives-a-full-gc
+  "pixman keeps the target's address for the image's life.
+
+A Lisp vector handed to pixman as a SAP is not safe: SBCL's GC may move it, and the
+symptom is a frame that draws into an address nobody reads -- every pixel background,
+no error anywhere.  This test forces a full GC between creating the target and drawing
+into it; it failed 100% of the time before targets moved to foreign memory (D35)."
+  (with-compositor (compositor :width 64 :height 64)
+    (dotimes (i 200) (make-array 4096))
+    (sb-ext:gc :full t)
+    (cf:inject-pointer-motion compositor 10 10)
+    (cf:render-frame compositor)
+    (ok (= #xFFFFFFFF (cf:frame-pixel compositor 11 13))
+        "the cursor is still drawn after a full GC")
+    (ok (= #xFF000000 (cf:frame-pixel compositor 25 25))
+        "and nothing appeared where nothing was drawn")))
+
 (deftest the-cursor-is-not-hit-testable
   (with-compositor (compositor :width 64 :height 64)
     (cf:inject-pointer-motion compositor 10 10)

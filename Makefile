@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested
 
 test:
 	./scripts/run-tests.sh
@@ -49,6 +49,11 @@ scene:
 # A real client asks to be moved and resized with our serials; Alt+F1/Alt+Esc.
 grab:
 	./scripts/grab-gate.sh
+
+# Our compositor inside our compositor, with a real client inside that: two
+# sockets, one image, pixels and input crossing both.
+nested:
+	./scripts/nested-gate.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:

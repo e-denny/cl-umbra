@@ -6,8 +6,8 @@ The repository is named for where the stack is going: `cl-umbra`, a daily-driver
 Everything that makes it possible is here too — the protocol implementation, the server, the
 compositor framework, and a tinywl port — as the six systems below.
 
-**Status: phase 0, phase 1, phase 2a, phase 3a, phase 3b, phase 3c and phase 3d gates
-passing.** `./scripts/gate.sh` checks fourteen clauses. Phase 0: the unit suite (192 tests), every vendored protocol compiling,
+**Status: phase 0, phase 1, phase 2a, phase 3a, phase 3b, phase 3c, phase 3d and phase 3e
+gates passing.** `./scripts/gate.sh` checks fifteen clauses. Phase 0: the unit suite (201 tests), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections
@@ -27,7 +27,11 @@ windows are drawn where they were placed, and the cursor's own pixels are compos
 the pointer's position. Phase 3d: a real client asks to be moved with the serial from a button
 event we sent, is dragged and stops on the release; a right-drag becomes a `configure` of the
 size the drag implies; Alt+F1 cycles the bottom window to the top and Alt+Esc stops the loop.
-Purity (no libwayland, no wlroots) runs over all of it. The gate exits 0.
+Phase 3e: our compositor runs *inside* our compositor — one image, two sockets — with a real
+`weston-eventdemo` inside the nested session; the parent sees a titled, activated window, its
+frame is the nested compositor's own frame pixel for pixel, and a pointer motion and a key
+injected into the parent come out of the client at the same coordinates with the same modifier
+mask. Purity (no libwayland, no wlroots) runs over all of it. The gate exits 0.
 
 Three roadmap quality items are still open and are not gate clauses: fixed-size in/out
 rings, `WAYLAND_DEBUG`-compatible tracing, and surplus-descriptor detection (which needs a
@@ -42,8 +46,11 @@ What exists:
   signals), `wayland.protocol` (the 69-file XML corpus, checked against `wayland-scanner`)
   and `wayland.codegen` (schema to Lisp, generated at build time).
 - `cl-wayland-client` — connect, proxies and ids, `get_registry`, `bind`, `sync` roundtrip,
-  hooks or methods on the generated event functions. `demo-globals` prints the live session's
-  globals in `wayland-info`'s format, byte-identical.
+  hooks or methods on the generated event functions, and since phase 3e the requests a
+  compositor needs when *it* is a client: surfaces and regions, shm pools and buffers with real
+  descriptor sending, seat devices, and the xdg-shell toplevel handshake (`ping` answered by
+  the library). `demo-globals` prints the live session's globals in `wayland-info`'s format,
+  byte-identical.
 - `cl-wayland-server` — the socket with its lock file and permissions, accept with peer
   credentials, `wl_display` and both id ranges, globals and version-negotiated `bind`,
   `wl_display.sync`, the error policy, flush batching with backpressure, and idempotent
@@ -62,9 +69,11 @@ What exists:
 - `cl-compositor-framework` — a pixman renderer (the reference), a headless compositor that
   draws committed surfaces into an in-memory target and offers `wl_compositor`, `wl_shm`,
   `wl_output`, `xdg_wm_base` and `wl_seat`, `read-pixels`, a PNG writer, `cf.input`
-  (generated keymaps, keycodes, modifier state) and `cf.scene` (buffer/rect/image nodes, hit
-  testing, a software cursor). Backends beyond headless, damage and the remaining seat work
-  (grabs, a focus stack) are phases 2b-5.
+  (generated keymaps, keycodes, modifier state), `cf.scene` (buffer/rect/image nodes, hit
+  testing, a software cursor), `cf.grab`, `cf.keybindings`, and `cf.backend.nested` (our
+  compositor as a client of another one: its frame goes into the parent's shm buffer, its input
+  comes from the parent's seat). Damage, a focus stack, popups and the DRM/libinput backends are
+  phases 2b-5.
 
 ## What this is
 
@@ -88,7 +97,7 @@ Dependency direction is strictly one-way:
 cl-wayland-core
    ├── cl-wayland-client
    └── cl-wayland-server
-          └── cl-compositor-framework
+          └── cl-compositor-framework   (also depends on cl-wayland-client: nested)
                  ├── cl-tinywl
                  └── cl-umbra
 ```
@@ -236,6 +245,17 @@ to be resized. Alt+F1 and Alt+Esc are asserted in the same run.
 
 ```
 ./scripts/grab-gate.sh
+```
+
+## Hello, nested
+
+The phase-3e gate, in one command: our compositor inside our compositor inside one image, with
+a real `weston-eventdemo` inside *that*. The parent's frame is compared with the nested
+compositor's own target, and motion and keys injected into the parent are asserted from the
+client's output. No display, no hardware, no session.
+
+```
+./scripts/nested-gate.sh
 ```
 
 ## Hello, pointer

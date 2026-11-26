@@ -279,8 +279,9 @@ actually applied, opaque-region culling.
 **Demo:** `cl-tinywl` running as a window inside the current desktop, with kitty inside
 it, moved and resized by mouse.
 
-**Status (phase 3a — xdg-shell toplevels — and phase 3b — seats and input — met; the rest of
-the phase is not started):**
+**Status (phase 3a — xdg-shell toplevels —, 3b — seats and input —, 3c — the scene —, 3d —
+grabs — and 3e — the client library and the nested backend — met; tinywl, popups and a nested
+window on a foreign compositor are the rest of the phase):**
 `xdg-shell` v1 is implemented in `cl-wayland-server/src/xdg-shell.lisp`: `xdg_wm_base`
 (ping/pong, `defunct_surfaces`), `xdg_surface` (initial configure after the first commit,
 serial bookkeeping, `ack_configure`, `invalid_serial`, `defunct_role_object`,
@@ -331,8 +332,25 @@ moved with the serial from a button event we sent, is dragged, stops on release 
 again; a right-drag produces `configure 240x180`; Alt+F1 cycles the bottom window to the top and
 Alt+Esc stops the loop (`scripts/grab-gate.sh`).
 
-Not in these slices, and needed before tinywl: the nested backend, `xdg_popup` +
-`xdg_positioner`, the focus stack, edge-anchored resizing and layer-shell.
+**Phase 3e** completes the client library and adds the nested backend (D34). On the client
+side: events and ids for surfaces, regions, buffers, seats, devices and xdg-shell, chosen by
+wire interface name; `wl_compositor.create_surface`/`.create_region`; the nine `wl_surface`
+requests, `wl_region` and `wl_buffer`; `wl_shm.create_pool` with a descriptor (D23) and
+`wl_shm_pool.create_buffer`/`.resize`, wrapped as a client pool (memfd + read-write mapping)
+and buffer records with bounds-checked pixel access; the four `wl_seat` factories and device
+releases; the xdg-shell toplevel handshake with `ping` answered by the library. On the
+framework side, `cf.backend.nested` is a `headless-compositor` whose frame target is the
+parent's `wl_shm` mapping (rendered into directly, no copy), presented by attach + damage +
+commit, with the parent's frame callback as the clock, two buffers and deferred frames, and
+parent pointer/keyboard events forwarded through `cf:inject-*`. Gate clause 15: in one image
+and two sockets, a parent compositor maps our window (titled, activated), its frame equals the
+nested compositor's own target, a motion and a Shift+q injected into the parent are printed by
+`weston-eventdemo` inside the nested session, and teardown leaks nothing
+(`scripts/nested-gate.sh`).
+
+Not in these slices, and needed before tinywl: `xdg_popup` + `xdg_positioner`, the focus stack,
+edge-anchored resizing, layer-shell, and a nested window on a *foreign* compositor (which
+needs a window on a live session, and therefore its own authorization).
 
 ### Phase 4 — Real hardware: DRM dumb buffers + libinput (6-8 weeks)
 

@@ -74,56 +74,95 @@ the x bits are undefined and OVER would blend them."
 ;;; Targets
 ;;; ---------------------------------------------------------------------------
 
-(defstruct (target (:constructor %make-target (octets width height stride image)))
-  ;; A simple octet vector, so it can be pinned and handed to pixman directly.
-  (octets #() :type (simple-array (unsigned-byte 8) (*)))
+(defstruct (target (:constructor %make-target (pointer width height stride image
+                                                         &aux (owned-p nil))))
+  ;; The pixels live in foreign memory, never in a Lisp vector.  pixman keeps the
+  ;; address for the image's whole life, and SBCL's GC may move a vector that has
+  ;; been handed out as a SAP (found the hard way: a full GC between creating the
+  ;; target and drawing turned every frame into background).  A wl_shm mapping and
+  ;; a headless target are therefore the same shape -- someone else's memory that
+  ;; nothing in Lisp moves -- and readback copies.
+  (pointer (cffi:null-pointer) :type cffi:foreign-pointer)
   (width 0 :type fixnum)
   (height 0 :type fixnum)
   (stride 0 :type fixnum)
-  (image (cffi:null-pointer) :type cffi:foreign-pointer))
+  (image (cffi:null-pointer) :type cffi:foreign-pointer)
+  ;; True only for a target that allocated its own pixels, so DESTROY-TARGET knows
+  ;; whether freeing the pointer would free someone else's mapping.
+  (owned-p nil :type boolean))
 
 (defun make-target (width height)
-  "A cleared ARGB8888 target of WIDTH x HEIGHT."
+  "A cleared ARGB8888 target of WIDTH x HEIGHT, in allocated foreign memory."
   (let* ((stride (* width 4))
-         (octets (make-array (* stride height) :element-type '(unsigned-byte 8)
-                                             :initial-element 0))
-         (image (cffi:with-pointer-to-vector-data (pointer octets)
-                  (%create-bits +format-a8r8g8b8+ width height pointer stride))))
-    (when (cffi:null-pointer-p image)
+         (size (* stride height))
+         (pointer (cffi:foreign-alloc :unsigned-char :count size :initial-element 0))
+         (image (%create-bits +format-a8r8g8b8+ width height pointer stride)))
+    (unless image
+      (cffi:foreign-free pointer)
       (error "pixman_image_create_bits failed for ~Dx~D" width height))
-    (%make-target octets width height stride image)))
+    (let ((target (%make-target pointer width height stride image)))
+      (setf (target-owned-p target) t)
+      target)))
+
+(defun make-target-over-pointer (pointer width height &key (stride (* width 4)))
+  "An ARGB8888 target over memory someone else owns (a wl_shm mapping).
+
+The caller keeps the memory alive and of the stated stride for as long as the
+target is drawn into; nothing is copied and nothing is unmapped or freed here."
+  (unless (plusp width)
+    (error "a target needs a positive width, got ~S" width))
+  (let ((image (%create-bits +format-a8r8g8b8+ width height pointer stride)))
+    (when (cffi:null-pointer-p image)
+      (error "pixman_image_create_bits failed for ~Dx~D over a mapping" width height))
+    (%make-target pointer width height stride image)))
+
+(defun destroy-target (target)
+  "Unref the image, and free the pixels when this target allocated them.
+
+A target made over a wl_shm mapping (nested) releases only its pixman image: the
+mapping belongs to the pool.  A second call is a no-op."
+  (unless (cffi:null-pointer-p (target-image target))
+    (%image-unref (target-image target))
+    (setf (target-image target) (cffi:null-pointer)))
+  (when (and (target-owned-p target)
+             (not (cffi:null-pointer-p (target-pointer target))))
+    (cffi:foreign-free (target-pointer target))
+    (setf (target-pointer target) (cffi:null-pointer)))
+  nil)
+
+(defun target-octets-copy (target)
+  "The target's pixels as a Lisp octet vector, copied out of the mapping.
+
+For screenshots and tests.  The render path never calls this: it draws through
+pixman straight into the memory POINTER names."
+  (let* ((length (* (target-stride target) (target-height target)))
+         (octets (make-array length :element-type '(unsigned-byte 8)))
+         (pointer (target-pointer target)))
+    (dotimes (index length octets)
+      (setf (aref octets index)
+            (cffi:mem-aref pointer :unsigned-char index)))))
 
 (defun fill-target (target argb)
-  "Fill TARGET with a premultiplied 0xAARRGGBB colour, the way pixman would."
-  (let ((octets (target-octets target))
-        (b (ldb (byte 8 0) argb))
-        (g (ldb (byte 8 8) argb))
-        (r (ldb (byte 8 16) argb))
-        (a (ldb (byte 8 24) argb)))
-    (loop for index from 0 below (length octets) by 4
-          do (setf (aref octets index) b
-                   (aref octets (+ index 1)) g
-                   (aref octets (+ index 2)) r
-                   (aref octets (+ index 3)) a))
-    target))
+  "Fill TARGET with a premultiplied 0xAARRGGBB colour.
+
+A word at a time through MEM-AREF, which indexes elements, so the count is the
+octet length over four.  Foreign memory cannot be a vector, so this stays a loop;
+the colour is written exactly, not composited."
+  (let ((pointer (target-pointer target)))
+    (dotimes (index (/ (* (target-stride target) (target-height target)) 4))
+      (setf (cffi:mem-aref pointer :uint32 index) argb)))
+  target)
 
 (declaim (inline target-pixel))
 (defun target-pixel (target x y)
   "The premultiplied 0xAARRGGBB pixel at X, Y, read straight from the target."
-  (let ((offset (+ (* y (target-stride target)) (* x 4)))
-        (octets (target-octets target)))
-    (logior (aref octets offset)
-            (ash (aref octets (+ offset 1)) 8)
-            (ash (aref octets (+ offset 2)) 16)
-            (ash (aref octets (+ offset 3)) 24))))
+  (cffi:mem-aref (target-pointer target) :uint32
+                 (ash (+ (* y (target-stride target)) (* x 4)) -2)))
 
 (defun (setf target-pixel) (argb target x y)
-  (let ((offset (+ (* y (target-stride target)) (* x 4)))
-        (octets (target-octets target)))
-    (setf (aref octets offset) (ldb (byte 8 0) argb)
-          (aref octets (+ offset 1)) (ldb (byte 8 8) argb)
-          (aref octets (+ offset 2)) (ldb (byte 8 16) argb)
-          (aref octets (+ offset 3)) (ldb (byte 8 24) argb)))
+  (setf (cffi:mem-aref (target-pointer target) :uint32
+                       (ash (+ (* y (target-stride target)) (* x 4)) -2))
+        argb)
   argb)
 
 ;;; ---------------------------------------------------------------------------

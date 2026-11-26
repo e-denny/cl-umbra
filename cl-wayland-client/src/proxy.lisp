@@ -88,6 +88,27 @@
                      (roundtrip-timeout-seconds condition)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Which Lisp class speaks for an interface
+;;; ---------------------------------------------------------------------------
+;;
+;; A bound global is a PROXY unless some client module says otherwise: wl_surface
+;; has state and methods, wl_shm does not.  The table is keyed by wire name, and a
+;; module registers itself at load time (there is no per-interface DEFCLASS the
+;; schema could generate, because a class is behaviour, not schema).
+
+(defvar *proxy-classes* (make-hash-table :test #'equal)
+  "wire interface name -> the class REGISTER-PROXY instantiates for it.")
+
+(defun register-proxy-class (interface class)
+  "Make instances of INTERFACE (a name or a WL-INTERFACE) be of CLASS."
+  (setf (gethash (interface-name (ensure-interface interface)) *proxy-classes*) class)
+  class)
+
+(defun proxy-class-for (interface)
+  "The class a proxy for INTERFACE is made of: PROXY unless registered."
+  (gethash (interface-name (ensure-interface interface)) *proxy-classes* 'proxy))
+
+;;; ---------------------------------------------------------------------------
 ;;; The proxy
 ;;; ---------------------------------------------------------------------------
 
@@ -125,13 +146,15 @@ against a newer XML keeps working against an older compositor."
       designator
       (resolve-interface designator)))
 
-(defun register-proxy (display id interface &key (version 1) (class 'proxy))
+(defun register-proxy (display id interface &key (version 1) class)
   "Install a proxy for ID, whatever chose it.
 
 An id the *server* introduced (wl_data_device.data_offer) carries no negotiated
 version anywhere on the wire; DECODE-ARGUMENT passes the interface's own maximum,
-which the server cannot exceed either."
+which the server cannot exceed either.  CLASS defaults to what the interface
+registered, so a server-chosen wl_pointer becomes a POINTER and not a bare proxy."
   (let* ((interface (ensure-interface interface))
+         (class (or class (proxy-class-for interface)))
          (object (make-instance class
                                 :display display
                                 :id id
@@ -157,7 +180,7 @@ reused."
     (error 'destroyed-proxy :object object))
   object)
 
-(defun allocate-proxy (display interface &key (version 1) (class 'proxy))
+(defun allocate-proxy (display interface &key (version 1) class)
   "Create a proxy for INTERFACE with a freshly allocated id."
   (let* ((interface (ensure-interface interface))
          (version (clamp-version interface version))
@@ -236,12 +259,16 @@ beats decoding our own message from the compositor's error event."
                                 (arg-name argument) value)))
        (put-fd buffer value)))))
 
-(defun object-id-of (value)
-  "A proxy, or a raw id, as the u32 the wire wants (NIL stays null)."
-  (etypecase value
-    (null nil)
-    (proxy (proxy-id value))
-    (integer value)))
+(defgeneric object-id-of (value)
+  (:documentation
+   "A proxy, a client-side buffer, or a raw id, as the u32 the wire wants.
+
+A generic function rather than an ETYPECASE so that a module can teach the
+encoder about the object it owns: a CLIENT-BUFFER is not a proxy, but attaching it
+has to put its wl_buffer id on the wire, and the caller should not have to say so.")
+  (:method ((value null)) nil)
+  (:method ((value proxy)) (proxy-id value))
+  (:method ((value integer)) value))
 
 (defun coerce-array (value argument)
   (etypecase value

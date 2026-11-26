@@ -188,11 +188,13 @@ trace tests and the malicious-pool cases are in `wayland.test.server`.
 
 **Status: phase 3a landed (xdg-shell toplevels), 3b landed (seats and input), 3c landed (the
 scene: placement, hit testing, click-to-focus, a drawn cursor), 3d landed (grabs and
-keybindings).** The v1 state machine is in
+keybindings), 3e landed (the client library completed, and a nested session that draws and
+takes input).** The v1 state machine is in
 `cl-wayland-server/src/xdg-shell.lisp` and the policy seam is `cf:on-new-toplevel`. Gates:
 clause 11 `./scripts/xdg-shell-gate.sh`, clause 12 `./scripts/seat-gate.sh`, clause 13
-`./scripts/scene-gate.sh`, clause 14 `./scripts/grab-gate.sh`. The focus stack, the nested
-backend, tinywl and popups are open below.
+`./scripts/scene-gate.sh`, clause 14 `./scripts/grab-gate.sh`, clause 15
+`./scripts/nested-gate.sh`. The focus stack, tinywl, popups and a nested window on a foreign
+compositor are open below.
 
 `cf.types.xdg-shell` (core)
 - [x] `xdg_wm_base` ping/pong; error conditions (`role`, `defunct_surfaces`)
@@ -220,14 +222,35 @@ backend, tinywl and popups are open below.
 - [ ] focus stack (alt-tab order); v0 has "the window that mapped last" and nothing more
 - [ ] edge-anchored resizing (a top/left drag resizes without moving the node until the client
       comes back with a buffer); Escape-to-cancel bound by default; popup grabs
-- [ ] grabs: `begin-move`/`begin-resize` from `move`/`resize`, serial validation
+- [x] grabs: `begin-move`/`begin-resize` from `move`/`resize`, serial validation (phase 3d, D33)
 - [ ] `wl_pointer.frame` and `wl_seat.release` (a version bump, not a rewrite)
 
-`cf.backend.nested`
-- [ ] output = parent `wl_surface` + shm buffers; attach/commit with damage
-- [ ] input = parent `wl_seat` → our seat events
-- [ ] parent `wl_surface.frame` → our frame clock
-- [ ] resize when parent configures; scale from parent output
+`cl-wayland-client` (phase 3e, D34)
+- [x] event classes for surfaces, regions, buffers, seats, devices and xdg-shell, chosen by
+      wire interface name on `bind` and on server-chosen ids
+- [x] `wl_compositor.create_surface`/`.create_region`; `attach`/`damage`/`frame`/commit/
+      `set_*_region`/`set_buffer_scale`/`set_buffer_transform`/`destroy`; `wl_region`; `wl_buffer`
+- [x] `wl_shm.create_pool` with a descriptor (D23), `wl_shm_pool.create_buffer`/`.resize`,
+      a client pool (memfd, mapping) and buffer records with bounds-checked pixel access
+- [x] `wl_seat.get_pointer`/`.get_keyboard`/`.get_touch`/`.release`;
+      `wl_pointer.set_cursor`/`.release`; `wl_keyboard.release`; `wl_touch.release`
+- [x] `xdg_wm_base.get_xdg_surface`/`.pong`/`.destroy`; `xdg_surface.get_toplevel`/
+      `.set_window_geometry`/`.ack_configure`/`.destroy`; `xdg_toplevel.set_title`/`.set_app_id`/
+      `.destroy`; `ping` answered with `pong` by the library
+- [ ] a client-side cursor surface and theme shapes (phase 5)
+- [ ] an event-driven nested demo binary (needs a window on a live session, so it needs its own
+      authorization)
+
+`cf.backend.nested` (phase 3e, D34)
+- [x] output = parent `wl_surface` (xdg_toplevel when the parent offers xdg-shell) + two shm
+      buffers, rendered into directly and attached with a full damage
+- [x] input = parent `wl_seat` pointer/keyboard events → the same `cf:inject-*` calls a test uses;
+      evdev codes translated through our key table, modifiers recomputed from our keymap
+- [x] parent `wl_surface.frame` → our frame clock; a frame with no free buffer is deferred, not
+      queued; `wl_buffer.release` re-arms
+- [x] teardown: destroy the parent's window, unmap, close both displays, no descriptor leak
+- [ ] resize when the parent configures (the nested output's size is fixed at start in v0)
+- [ ] scale from the parent output; more than two buffers; a merged reactor wait
 
 `cl-tinywl`
 - [ ] the parity table in `PLAN.md` §7
@@ -235,9 +258,12 @@ backend, tinywl and popups are open below.
 - [ ] `save-lisp-and-die` binary + `--nested`/`--headless` flags
 
 **Gate:** the tinywl parity script (PLAN §5, phase 3) passes nested, and headless with
-synthetic input.
+synthetic input. Clause 15 already proves the nested half of that with a real client:
+`./scripts/nested-gate.sh` runs our compositor inside our compositor in one image.
 
-**Demo:** `cl-tinywl` in a window, kitty inside, moved/resized with the mouse.
+**Demo:** `cl-tinywl` in a window, kitty inside, moved/resized with the mouse. The nested
+backend can do this now; calling it on a live session is a separate, explicitly authorized
+step (it maps a window on the user's desktop).
 
 ---
 

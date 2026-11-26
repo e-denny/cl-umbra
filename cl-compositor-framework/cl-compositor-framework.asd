@@ -9,7 +9,8 @@ scene graph, seat and focus policy, and the shell protocol state machines."
   ;; CFFI is for libpixman, the reference renderer (D3); the protocol system for
   ;; the generated interface metadata the surface and shm code uses; nothing here
   ;; touches libwayland, libwlroots, EGL or DRM.
-  :depends-on ("cffi" "cl-wayland-core" "cl-wayland-protocols" "cl-wayland-server")
+  :depends-on ("cffi" "cl-wayland-core" "cl-wayland-protocols" "cl-wayland-server"
+               "cl-wayland-client")
   :serial t
   :components ((:file "src/package")
                (:file "src/render-pixman")
@@ -18,4 +19,5 @@ scene graph, seat and focus policy, and the shell protocol state machines."
                (:file "src/keybindings")
                (:file "src/xkb")
                (:file "src/png")
-               (:file "src/headless")))
+               (:file "src/headless")
+               (:file "src/nested")))

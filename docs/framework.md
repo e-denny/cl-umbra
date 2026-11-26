@@ -70,14 +70,49 @@ Events are generic functions on the compositor object:
 
 Phase 2a implements the headless case as one object rather than a backend/compositor pair:
 `cf:make-headless-compositor` creates a display with `wl_compositor`, `wl_shm` and `wl_output`
-globals, a pixman target, and a scene (§4). The split becomes real when there is a second
-backend to abstract (nested, phase 3; DRM, phase 4) — a `backend` class with one implementation
-is the speculative abstraction the roadmap forbids.
+globals, a pixman target, and a scene (§4). Phase 3e added the second backend, and the seam it
+needed turned out to be two function slots rather than a class hierarchy — the compositor owns
+everything except *where the frame goes* and *what presenting it means*:
+
+```lisp
+(setf (cf.backend.headless:compositor-frame-preparer c)
+      (lambda (compositor) ...))   ; -> the target to draw into, or NIL to defer
+(setf (cf.backend.headless:compositor-frame-presenter c)
+      (lambda (compositor target) ...))  ; after the draw, before frame callbacks
+```
+
+`cf.backend.nested` is a `nested-backend` object that *owns* a headless compositor and sets
+those two slots:
+
+```lisp
+(cf:start-nested :parent-path "/run/user/1000/wayland-0"   ; the parent's socket
+                 :width 256 :height 256
+                 :display-name "wayland-1")                 ; the nested socket
+```
+
+It connects to the parent as a client (`cl-wayland-client`), maps an `xdg_toplevel` (or a
+roleless surface when the parent has no xdg-shell), allocates two `wl_shm` buffers, and makes
+each buffer's mapping a pixman target — so the nested compositor draws **straight into the
+parent's buffer** and presenting is attach + damage + commit. The parent's frame callback is
+the frame clock: at most one frame is in flight, and a frame that finds both buffers owned by
+the parent is deferred until a `wl_buffer.release` arrives. Input goes the other way: the
+parent's pointer and keyboard events become the same `cf:inject-pointer-motion`,
+`cf:inject-pointer-button` and `cf:inject-key` calls a test makes, with evdev key codes
+translated through our key table and modifier state recomputed from our keymap.
+
+Standalone, `cf:run-nested` polls the parent connection and the nested compositor's reactor;
+in one image (the gate, a test), `cf:nested-dispatch` advances both once. The two reactors are
+not merged into a single epoll wait in v0 — that is phase-4 work, when a third backend makes it
+worth doing. The nested output's size is fixed at start: a parent configure offering another
+size is acknowledged and ignored (a client chooses its own size), and following it would mean
+resizing the scene and the target, which is a separate change.
 
 Contracts:
 
 - A backend only ever *reports*; it never calls into the scene, seat or shell. A compositor
-  that ignores an event must still behave sanely.
+  that ignores an event must still behave sanely. (The nested backend reports by calling the
+  compositor's own public reporting functions — `inject-*`, `request-frame` — which is the
+  same path a test and a future libinput backend take.)
 - `outputs` is stable within a call; outputs are destroyed only after
   `on-output-removed` returns.
 - Nested and headless backends must be usable with no privileges and no hardware, because
