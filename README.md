@@ -264,15 +264,30 @@ injected into the *parent*.
 ./scripts/tinywl-parity.sh     # both runs;  ./scripts/gate.sh runs it as clause 16
 ```
 
-Run it as a compositor, with a client of your own:
+Run it as a compositor, with a client of your own — as a window inside the session you
+are already in:
 
 ```
-sbcl --eval '(asdf:load-system "cl-tinywl")' \
-     --eval '(tinywl:main (list "--nested" "--size" "1024x768"))'
+./scripts/tinywl.sh --nested --size 1024x640
+WAYLAND_DISPLAY=tinywl-1 weston-terminal      # in another terminal
 ```
 
-`--headless` renders into memory instead, and `--help` lists the rest. The policy is
-`cl-tinywl/src/tinywl.lisp`: five functions and one class, no framework changes.
+`--help` lists the options, `--headless` renders into memory instead (needs `--display`,
+because `wayland-0` is the session's own socket), and `--parent PATH` points at a
+compositor that is not `WAYLAND_DISPLAY`. `scripts/tinywl.sh` is only a launcher: it
+loads ASDF, Quicklisp and `cl-tinywl` and calls `(tinywl:main)`, because a bare `sbcl`
+has none of them. Keys: **Alt+left** drags a window, **Alt+right** resizes it from the
+edge under the pointer, **Alt+F1** cycles, **Alt+Esc** asks every client to close and
+quits. The policy itself is `cl-tinywl/src/tinywl.lisp`: a class, two methods and five
+functions, no framework changes.
+
+From a REPL, the same session is three forms:
+
+```lisp
+(defvar *s* (tinywl:start :mode :nested :width 1024 :height 640))
+(tinywl:run *s*)
+(tinywl:stop *s*)
+```
 
 ## Hello, nested
 

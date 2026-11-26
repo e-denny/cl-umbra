@@ -55,6 +55,10 @@ grab:
 nested:
 	./scripts/nested-gate.sh
 
+# Run tinywl itself (a manual test; --nested puts it in the current session).
+tinywl-run:
+	./scripts/tinywl.sh --nested --size 1024x640
+
 # tinywl itself: the parity script, run headless and nested, with two real clients.
 tinywl:
 	./scripts/tinywl-parity.sh
