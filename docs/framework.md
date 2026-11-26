@@ -103,9 +103,10 @@ translated through our key table and modifier state recomputed from our keymap.
 Standalone, `cf:run-nested` polls the parent connection and the nested compositor's reactor;
 in one image (the gate, a test), `cf:nested-dispatch` advances both once. The two reactors are
 not merged into a single epoll wait in v0 — that is phase-4 work, when a third backend makes it
-worth doing. The nested output's size is fixed at start: a parent configure offering another
-size is acknowledged and ignored (a client chooses its own size), and following it would mean
-resizing the scene and the target, which is a separate change.
+worth doing. The nested output's size follows the parent's `xdg_toplevel.configure`: the output,
+its scene and its shm buffers become the size the parent offers, and a configure of 0x0 (or none
+at all) leaves the size we chose (D37). Inner clients are not resized -- a client's size is its
+own statement -- so a window can be larger than the output, exactly as on a small screen.
 
 Contracts:
 

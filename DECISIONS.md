@@ -1081,7 +1081,9 @@ live-session demo of a nested window needs its own authorization and was not par
 8. **The nested output's size is fixed at start.** A configure offering another size is
    acknowledged and its size ignored. A client may choose its own size, so this is legal, and
    resizing the inner output (scene dimensions, target, scene nodes) is a separate change; the
-   nested window not following a parent-driven resize is a documented v0 limit.
+   nested window not following a parent-driven resize is a documented v0 limit. **Amended by
+   D37 item 2**: the size now follows the parent, because a tiling parent's configure is how a
+   nested session learns how much space it was given.
 9. **Input crosses as reports, not as shared state**: a parent motion becomes
    `cf:inject-pointer-motion`, a button becomes `cf:inject-pointer-button`, a key becomes
    `cf:inject-key` after its evdev code is translated through our key table. Modifier masks are
@@ -1234,3 +1236,68 @@ role itself), because cursor surfaces and roleless surfaces are buffer nodes too
 surfaces are recorded and ignored rather than drawn — a visible gap, listed as phase 5, not a
 silent one. Popups, the focus stack, edge-anchored resizing and a nested window on a *foreign*
 compositor remain the rest of phase 3.
+
+---
+
+## D37 — A nested output follows the parent's size, a press may start a client, and a focus event never names another client's surface
+
+**Status:** accepted
+
+**Context.** The phase-3 exit slice shipped and the first manual test of it produced three
+findings, none of which a gate had asked about. The nested window appeared too small for the
+space the session had given it. Nothing could be started *inside* it: the environment's
+`WAYLAND_DISPLAY` names the parent, so a client started from a shell lands outside the window
+you meant — and `kitty` needs an EGL surface, `xterm` needs XWayland, so neither could work
+anyway. And the first launcher that did connect (`weston-terminal`) was killed immediately by a
+protocol error: `invalid object (3), type (wl_shm_pool), message enter(uoff)`.
+
+**Decision.**
+
+1. **A press is where a client may come from.** `tinywl:launch` starts a command as a client of
+   *this* compositor's display: the child inherits our environment with `WAYLAND_DISPLAY`
+   replaced by our own socket name, through `/bin/sh` so `HOME`, `PATH`, `TERM` and the locale
+   survive (`:environment` would replace all of it). `Alt+Shift+Return` binds it, not
+   `Alt+Return`: the latter is every compositor's "open a terminal", so a parent session would
+   take the key before a nested tinywl saw it. `*terminal-command*` is a special variable, so
+   what to launch is policy the REPL can change (D14); `weston-terminal` is the default because
+   it is toytoolkit over `wl_shm` and works on this renderer today. `--launch CMD` does the same
+   at startup, which matters when the parent has the key bound: then there is no key to press.
+   `stop` closes the display first, so the clients see EOF, and signals whatever is left.
+2. **The nested output follows the parent's configure.** A `xdg_toplevel.configure` carrying a
+   non-zero size resizes the output, the scene and the shm buffers (new pool, new buffers, new
+   pixman targets over their mappings). This supersedes D34.8. A tiling parent configures the
+   slot it gave us; ignoring that drew a 1024x640 window inside a much larger slot, which is
+   what "too small" was. A configure of 0x0 is "choose for yourself" and changes nothing. Inner
+   clients are not resized — a client's size is its own statement — so a window may end up larger
+   than the output, which is the same thing that happens on a small screen. The default output
+   size also went from 512x512 to 1280x800: the old number was one a *test* liked.
+3. **A focus event never names another client's surface.** `wl_seat.get_pointer` and
+   `get_keyboard` send `enter` immediately when the seat already has focus, so a new client does
+   not have to wait for a motion — and they sent the *focused surface* whatever client it belonged
+   to. An object id means nothing across connections: the new client reads it as whatever holds
+   that id in its own table. That is the bug in the context, exactly: weston-terminal's id 3 was
+   its shm pool, we named client 2's surface 3, and libwayland killed the connection with the
+   error above. Both now check `(eq (resource-client focus) client)` first; the client gets its
+   real `enter` at the next motion or focus change. A stale `wl_output` is the same mistake from
+   the other direction, so `client-output` also drops an output the client has released instead of
+   naming a recycled id.
+
+**Evidence.** Gate clause 16 grew to 32 checks headless and 38 nested. Both runs now start a
+client through the key binding and require a *new* client on our own display with a mapped,
+non-zero window (weston-terminal, three clients in total). The nested run also configures the
+nested toplevel from the parent side (`request-toplevel-size 800x600`) and requires the inner
+output, the scene and a fresh presented frame to follow it, with the window that was inside still
+drawn at its old position. The seat bug is what the launcher check found: before the fix the
+terminal connected and was disconnected within a second, in the nested run only, because that is
+the first time a client has ever connected while another client's surface held the focus. Two
+unit tests join it: `resizing-an-output-resizes-the-scene-and-the-target` (the target is
+replaced, not written past its end) and a third keybinding in
+`tinywl-installs-its-own-bindings`. 214 tests in 10 suites.
+
+**Consequences.** A nested session is usable by hand: start it, get a terminal, type in it. What
+it still cannot do is what a *terminal* needs to be pleasant — clipboard (no data device, phase
+6), file dialogs and menus (no `xdg_popup`), crisp text on a 2x output (buffer scale, phase 2b)
+— and the parent has first refusal on any chord it binds, `Mod1+Shift+Return` included, so
+`--launch` is the reliable path on a live session. `wl_pointer.enter`/`wl_keyboard.enter` to a
+*new* device while another client is focused is now silent until the focus changes, which is
+correct but worth knowing when reading a trace.

@@ -446,13 +446,74 @@ of lines of protocol."
              (check (eq surface-b (keyboard-focus *inner*))
                     "and gave it the keyboard"))))
 
-         ;; 7. Alt+Esc asks the clients to close and stops the loop.
+         ;; 7. The parent decides how much space we have and we follow it (D37).
+         ;;    Nested only: a headless output has nobody to configure it.
+         (when *parent*
+           (let ((toplevel (find-if (lambda (resource)
+                                      (and (typep resource 'wayland.server:xdg-toplevel)
+                                           (wayland.server:xdg-toplevel-mapped-p resource)))
+                                    (resources-of-type
+                                     *parent* 'wayland.server:xdg-toplevel)))
+                 (backend (tinywl:session-nested *session*)))
+             (when toplevel
+               (let ((frames (cf.backend.nested:nested-frame-count backend)))
+                 (wayland.server:request-toplevel-size toplevel 800 600)
+                 (pump 10 :until (lambda ()
+                                   (and (= 800 (cf:compositor-width *inner*))
+                                        (= 600 (cf:compositor-height *inner*)))))
+                 (check (= 800 (cf:compositor-width *inner*))
+                        "the parent's configure resized our output to ~Dx~D"
+                        (cf:compositor-width *inner*) (cf:compositor-height *inner*))
+                 (check (= 800 (cf.scene:scene-width (cf:compositor-scene *inner*)))
+                        "and the scene with it")
+                 (pump 1.5)
+                 (check (> (cf.backend.nested:nested-frame-count backend) frames)
+                        "and kept presenting at the new size (~D -> ~D frame(s))"
+                        frames (cf.backend.nested:nested-frame-count backend))
+                 ;; The window that was there before the resize is still drawn: the
+                 ;; eventdemo window at (0,0), which is what makes this a claim about
+                 ;; content and not about a background fill.
+                 (check (= #xFFFF0000 (cf:frame-pixel *inner* 100 75))
+                        "and the window inside is still drawn there (#x~8,'0X)"
+                        (cf:frame-pixel *inner* 100 75))))))
+
+         ;; 8. Alt+Shift+Return starts a client on *our* display, which is the one
+         ;;    thing a nested session cannot do for itself from the outside: the
+         ;;    environment's WAYLAND_DISPLAY names the parent, so a client started
+         ;;    from a shell lands in the wrong compositor.
+         (let ((before (length (wayland.server:display-clients
+                                (cf:compositor-display *inner*)))))
+           (key "Alt_L" :pressed)
+           (key "Shift_L" :pressed)
+           (key "Return" :pressed)
+           (key "Return" :released)
+           (key "Shift_L" :released)
+           (key "Alt_L" :released)
+           (settle)
+           (let ((window (pump 20
+                              :until (lambda ()
+                                       (and (> (length (wayland.server:display-clients
+                                                        (cf:compositor-display *inner*)))
+                                               before)
+                                            (find-if (lambda (surface)
+                                                       (plusp (cf.scene:node-width
+                                                               (node-of surface))))
+                                                     (mapped-surfaces *inner*)))))))
+             (check window
+                    "alt+Shift+Return started a client on our own display (~D client(s))"
+                    (length (wayland.server:display-clients
+                             (cf:compositor-display *inner*))))))
+
+         ;; 9. Alt+Esc asks the clients to close and stops the loop.
          ;;
-         ;; Both clients are connected *before* the quit: nothing before this point
-         ;; cut either off, which is what makes "no protocol error" mean something.
-         (check (= 2 (length (wayland.server:display-clients
-                              (cf:compositor-display *inner*))))
-                "both clients were still connected before Alt+Esc")
+         ;; Every client is connected *before* the quit: nothing before this point
+         ;; cut one off, which is what makes "no protocol error" mean something.
+         (check (>= (length (wayland.server:display-clients
+                             (cf:compositor-display *inner*)))
+                    2)
+                "the clients were still connected before Alt+Esc (~D)"
+                (length (wayland.server:display-clients
+                         (cf:compositor-display *inner*))))
          (key "Alt_L" :pressed)
          (key "Escape" :pressed)
          (settle)
@@ -470,7 +531,7 @@ of lines of protocol."
                        (append *lines-a* *lines-b*)))
                 "no client saw a protocol error")
 
-         ;; 8. B ran with WAYLAND_DEBUG=1: an ordered, valid event stream.
+         ;; 10. B ran with WAYLAND_DEBUG=1: an ordered, valid event stream.
          ;;
          ;; libwayland writes `-> interface#id.request(args)' for what the client
          ;; sent and a bare `interface#id.event(args)' for what arrived, so "did it

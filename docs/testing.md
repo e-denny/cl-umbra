@@ -286,7 +286,12 @@ twice*:
     `get_registry` → `configure` → `ack_configure`. The whole scenario then runs a second
     time with tinywl *nested* inside a headless parent, injecting input into the parent, which
     exercises the same policy through `cf.backend.nested`'s translation; the nested run also
-    checks that the parent ends with no window and no clients of ours.
+    checks that the parent ends with no window and no clients of ours. Both runs also press
+    `Alt+Shift+Return` and require a *new* client on tinywl's own display with a mapped window
+    (`weston-terminal`, which is what a launcher has to get right), and the nested run configures
+    the nested toplevel from the parent side (`request-toplevel-size 800x600`) and requires the
+    inner output, the scene and a fresh presented frame to follow it with the window inside still
+    drawn (D37).
 
 All sixteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface

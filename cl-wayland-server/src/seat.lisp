@@ -360,9 +360,14 @@ owns, not something a grab can infer from the event that started it."
       (log-message :debug "client ~D: wl_pointer ~D created"
                    (client-id client) (resource-id pointer))
       ;; A pointer created while the seat already has focus must not have to wait
-      ;; for the next motion to learn where it is.
+      ;; for the next motion to learn where it is -- but only when the focus is a
+      ;; surface of *this* client: an object id means nothing across connections, so
+      ;; telling a new client about somebody else's surface names whatever now holds
+      ;; that id in its own table (weston-terminal's shm pool, in the bug that put
+      ;; this guard here: "invalid object (3), type (wl_shm_pool), message
+      ;; enter(uoff)").  Until it gets a real enter, the pointer is simply blank.
       (let ((focus (seat-pointer-focus seat)))
-        (when focus
+        (when (and focus (eq (resource-client focus) client))
           (wl-pointer.enter pointer (display-next-serial (seat-display seat))
                             focus (seat-pointer-x seat) (seat-pointer-y seat))
           (setf (pointer-surface pointer) focus)))
@@ -386,8 +391,10 @@ owns, not something a grab can infer from the event that started it."
       (log-message :debug "client ~D: wl_keyboard ~D created"
                    (client-id client) (resource-id keyboard))
       (send-keymap keyboard)
+      ;; The same rule as the pointer above: a keyboard enter names a surface, and a
+      ;; surface of another client is an id this client has never seen.
       (let ((focus (seat-keyboard-focus seat)))
-        (when focus
+        (when (and focus (eq (resource-client focus) client))
           (send-keyboard-enter keyboard focus
                                (display-next-serial (seat-display seat)))))
       keyboard)))

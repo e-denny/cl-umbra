@@ -91,7 +91,7 @@ Six systems, built in order, each useful on its own:
 | `cl-wayland-client` | Client-side display and proxies | libwayland-client | 0, 3 |
 | `cl-wayland-server` | Display, globals, resources, clients, serials, error policy | libwayland-server | 1 |
 | `cl-compositor-framework` | Backends, renderers, scene graph, seat/input, output, shell protocol state machines | **wlroots** | 2-5 |
-| `cl-tinywl` | The tutorial compositor: one file of policy over the framework | tinywl | 3 |
+| `cl-tinywl` | The tutorial compositor: one file of policy over the framework, and a launcher | tinywl | 3 |
 | `cl-umbra` | A compositor for daily use | Umbriel / niri / sway | 6-7 |
 
 Two build-time systems sit beside those six: `cl-wayland-asdf` (the
@@ -268,18 +268,28 @@ Run it as a compositor, with a client of your own — as a window inside the ses
 are already in:
 
 ```
-./scripts/tinywl.sh --nested --size 1024x640
-WAYLAND_DISPLAY=tinywl-1 weston-terminal      # in another terminal
+./scripts/tinywl.sh --nested --launch weston-terminal
 ```
 
-`--help` lists the options, `--headless` renders into memory instead (needs `--display`,
-because `wayland-0` is the session's own socket), and `--parent PATH` points at a
-compositor that is not `WAYLAND_DISPLAY`. `scripts/tinywl.sh` is only a launcher: it
-loads ASDF, Quicklisp and `cl-tinywl` and calls `(tinywl:main)`, because a bare `sbcl`
-has none of them. Keys: **Alt+left** drags a window, **Alt+right** resizes it from the
-edge under the pointer, **Alt+F1** cycles, **Alt+Esc** asks every client to close and
-quits. The policy itself is `cl-tinywl/src/tinywl.lisp`: a class, two methods and five
-functions, no framework changes.
+`--launch CMD` starts a client *inside* the session immediately, and again on
+**Alt+Shift+Return** — it sets the child's `WAYLAND_DISPLAY` to tinywl's own socket, which
+is the one thing a client started from a shell cannot do for itself in a nested session.
+`--size WxH` defaults to 1280x800 and the nested output also follows the parent's
+`xdg_toplevel.configure`, so a tiling parent decides (D37). `--help` lists the rest,
+`--headless` renders into memory instead (needs `--display`, because `wayland-0` is the
+session's own socket), and `--parent PATH` points at a compositor that is not
+`WAYLAND_DISPLAY`. `scripts/tinywl.sh` is only a launcher: it loads ASDF, Quicklisp and
+`cl-tinywl` and calls `(tinywl:main)`, because a bare `sbcl` has none of them. The policy
+itself is `cl-tinywl/src/tinywl.lisp`: a class, two methods and six functions, no framework
+changes.
+
+| Chord | Does |
+|---|---|
+| `Alt+Shift+Return` | start a terminal (`tinywl:*terminal-command*`) |
+| `Alt+left` drag | move the window under the pointer |
+| `Alt+right` drag | resize it from the edge under the pointer |
+| `Alt+F1` | send the bottom window to the front and focus it |
+| `Alt+Esc` | ask every client to close, then quit |
 
 From a REPL, the same session is three forms:
 

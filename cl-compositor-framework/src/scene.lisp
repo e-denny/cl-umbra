@@ -135,8 +135,8 @@ phase 5)."))
 ;;; ---------------------------------------------------------------------------
 
 (defclass scene ()
-  ((width :initarg :width :reader scene-width)
-   (height :initarg :height :reader scene-height)
+  ((width :initarg :width :accessor scene-width)
+   (height :initarg :height :accessor scene-height)
    (root :initarg :root :reader scene-root)
    ;; Drawn after everything else, at the pointer's position.  It is a node so
    ;; that it has a position and a drawing rule like every other node, but it is

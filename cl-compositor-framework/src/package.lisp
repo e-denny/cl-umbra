@@ -215,6 +215,7 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:compositor-display
    #:compositor-width
    #:compositor-height
+   #:resize-compositor
    #:compositor-surfaces
    #:compositor-shells
    #:compositor-seat
@@ -313,6 +314,7 @@ owns, and the presentation step is attach + damage + commit.")
                 #:compositor-display
                 #:compositor-width
                 #:compositor-height
+                #:resize-compositor
                 #:compositor-surfaces
                 #:compositor-shells
                 #:compositor-seat
@@ -393,6 +395,7 @@ docs/framework.md §1 follow.")
    #:compositor-display
    #:compositor-width
    #:compositor-height
+   #:resize-compositor
    #:compositor-surfaces
    #:compositor-shells
    #:compositor-seat

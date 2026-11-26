@@ -27,8 +27,11 @@
 ;;;; ours.
 ;;;;
 ;;;; v0 limits, stated so they are not mistaken for bugs:
-;;;;   * the nested output's size is fixed at start; a parent configure offering a
-;;;;     different size is accepted and ignored (a client may choose its own size)
+;;;;   * a parent configure that carries a size *is* honoured (RESIZE-OUTPUT): the
+;;;;     output, its scene and its buffers become that size, because a tiling parent
+;;;;     is telling us how much space we were given.  Inner clients are not resized
+;;;;     -- a client's size is its own statement -- so a window can end up larger
+;;;;     than the output, exactly as on a tiny screen
 ;;;;   * two shm buffers, no more: a frame that finds no free buffer is deferred
 ;;;;     until the parent releases one
 ;;;;   * the two reactors are polled, not merged into one epoll set
@@ -48,8 +51,8 @@
 (defclass nested-backend ()
   ((display :initarg :display :reader nested-display)
    (compositor :initarg :compositor :reader nested-compositor)
-   (width :initarg :width :reader nested-width)
-   (height :initarg :height :reader nested-height)
+   (width :initarg :width :accessor nested-width)
+   (height :initarg :height :accessor nested-height)
    (parent-compositor :initform nil :accessor nested-parent-compositor)
    (surface :initform nil :accessor nested-surface)
    (shm :initform nil :accessor nested-shm)
@@ -254,6 +257,35 @@ parent stopped offering one -- it will not be sent events either way."
               (wc:proxy-hooks (wc:client-buffer-proxy buffer)))
         (push slot (nested-buffers backend))))))
 
+(defun resize-output (backend width height)
+  "Make the nested output WIDTH x HEIGHT: new buffers, new scene size, new frame.
+
+The parent's `xdg_toplevel.configure' is the only way a nested session learns how much
+space it was given, and v0 used to ignore it: a tiling parent then drew a 1024x640
+window inside a much larger slot and the manual test looked "too small" (D37).  The
+buffers belong to the old size, so they are destroyed first and made again; inner
+clients are not resized, and the scene keeps every node where it was.
+
+A configure that arrives while the parent still holds our last buffer cannot destroy
+the buffer being presented -- but it does not need to: presenting happens
+synchronously inside a frame, and a configure is dispatched between frames, so the
+buffer in `nested-current' is ours again by the time this runs."
+  (unless (and (= width (nested-width backend)) (= height (nested-height backend)))
+    (setf (nested-width backend) width
+          (nested-height backend) height)
+    (dolist (slot (nested-buffers backend))
+      (ignore-errors (wc:destroy-client-buffer (buffer-slot-buffer slot))))
+    (setf (nested-buffers backend) nil
+          (nested-current backend) nil)
+    (when (nested-pool backend)
+      (ignore-errors (wc:destroy-client-pool (nested-pool backend)))
+      (setf (nested-pool backend) nil))
+    (create-buffers backend)
+    (headless:resize-compositor (nested-compositor backend) width height)
+    (srv:log-message :info "nested: the parent gave us ~Dx~D" width height)
+    (headless:request-frame (nested-compositor backend)))
+  backend)
+
 (defun create-parent-toplevel (backend)
   "Give our parent surface the toplevel role and wait for the initial configure.
 
@@ -275,6 +307,17 @@ the configure is acknowledged and its size ignored (see the header)."
               ;; pretend the surface is still there.
               (setf (nested-closing-p backend) t)
               (headless:stop-compositor (nested-compositor backend))))
+          (wc:proxy-hooks toplevel))
+    ;; xdg_toplevel.configure carries the size the parent offers.  A tiling parent
+    ;; offers the slot we were given; 0x0 is "choose for yourself", which is what the
+    ;; first configure says and what our fixed size already answered.
+    (push (lambda (event &rest arguments)
+            (when (eq event :configure)
+              (destructuring-bind (width height &rest states) arguments
+                (declare (ignore states))
+                (when (and (integerp width) (plusp width)
+                           (integerp height) (plusp height))
+                  (resize-output backend width height)))))
           (wc:proxy-hooks toplevel))
     ;; xdg_surface.configure arrives on the xdg_surface object, not the toplevel.
     (push (lambda (event &rest arguments)

@@ -41,8 +41,8 @@ SLOT-VALUE shows a different one."))
 
 (defclass headless-compositor ()
   ((display :initarg :display :reader compositor-display)
-   (width :initarg :width :reader compositor-width)
-   (height :initarg :height :reader compositor-height)
+   (width :initarg :width :accessor compositor-width)
+   (height :initarg :height :accessor compositor-height)
    (background :initarg :background :initform #xFF000000 :reader compositor-background)
    (target :initarg :target :accessor compositor-target)
    ;; A backend supplies the frame's destination and its presentation.  NIL is the
@@ -663,11 +663,26 @@ press on the bare output changes nothing: v0 has no click-to-dismiss policy."
 (defun inject-pointer-axis (compositor axis value)
   (srv:send-pointer-axis (compositor-seat compositor) axis value))
 
+(defun client-output (compositor client)
+  "The wl_output CLIENT bound, or NIL when it has released it.
+
+A client may release the output -- toytoolkit does, after reading the scale -- and the
+id is then free to be reused for anything the client creates next.  Remembering the
+resource is not enough: sending `wl_surface.enter' with a released output's id is an
+object reference to whatever now holds it, which is how weston-terminal reported
+\"invalid object (3), type (wl_shm_pool), message enter(uoff)\" and exited."
+  (let ((output (gethash client (compositor-outputs compositor))))
+    (cond
+      ((null output) nil)
+      ((srv:resource-destroyed-p output)
+       (remhash client (compositor-outputs compositor))
+       nil)
+      (t output))))
+
 (defun enter-surface (compositor surface)
   "Tell the client its surface is on the output, once, before the first frame."
   (unless (surface-entered-p surface)
-    (let ((output (gethash (srv:resource-client surface)
-                           (compositor-outputs compositor))))
+    (let ((output (client-output compositor (srv:resource-client surface))))
       (when output
         (setf (surface-entered-p surface) t)
         (wl-surface.enter surface output)))))
@@ -743,6 +758,27 @@ drawn (D25)."
       (setf (compositor-surfaces compositor)
             (remove-if #'srv:resource-destroyed-p (compositor-surfaces compositor)))
       target)))
+
+(defun resize-compositor (compositor width height)
+  "Make COMPOSITOR a WIDTH x HEIGHT output; returns it.
+
+The scene and the compositor's own memory target are rebuilt, because both are sized
+by the output.  A backend with a frame preparer keeps its own destination -- the
+nested backend's is the parent's shm buffer, which that backend rebuilds itself -- so
+only the parts the framework owns change here."
+  (unless (and (= width (compositor-width compositor))
+               (= height (compositor-height compositor)))
+    (setf (compositor-width compositor) width
+          (compositor-height compositor) height
+          (scene:scene-width (compositor-scene compositor)) width
+          (scene:scene-height (compositor-scene compositor)) height)
+    (unless (compositor-frame-preparer compositor)
+      (render:destroy-target (compositor-target compositor))
+      (setf (compositor-target compositor) (render:make-target width height))
+      (render:fill-target (compositor-target compositor)
+                          (compositor-background compositor)))
+    (setf (compositor-dirty-p compositor) t))
+  compositor)
 
 (defun write-frame-png (compositor path)
   "Write the current target to PATH as a PNG: the screenshot, and the gate's artefact."

@@ -30,6 +30,8 @@
 ;;; Fixtures
 ;;; ---------------------------------------------------------------------------
 
+(defparameter *background* #xFF000000 "The compositor's background, as a pixel.")
+
 (defvar *directory-counter* 0)
 
 (defun make-test-directory ()
@@ -233,10 +235,17 @@ connection would make this a gate rather than a test."
   (with-tinywl (tinywl)
     (let* ((table (cf:compositor-keybindings tinywl))
            (bindings (kb:keybinding-table-bindings table)))
-      (ok (= 2 (length bindings)) "exactly two bindings")
-      (ok (equal '("cycle windows" "quit")
+      (ok (= 3 (length bindings)) "exactly three bindings")
+      (ok (equal '("cycle windows" "quit" "terminal")
                  (sort (mapcar #'kb:keybinding-description bindings) #'string<))
           "with tinywl's descriptions")
+      (ok (every #'identity
+                 (mapcar (lambda (binding)
+                           (= input:+modifier-mod1+
+                              (logand input:+modifier-mod1+
+                                      (kb:keybinding-modifiers binding))))
+                         bindings))
+          "all of them on Alt")
       (ok (= 0 (tinywl:close-toplevels tinywl))
           "and closing a session with no windows asks nobody"))))
 
@@ -251,6 +260,27 @@ connection would make this a gate rather than a test."
       (cf:inject-key tinywl "Alt_L" :released)
       (ok (null (cf:compositor-consumed-keys tinywl))
           "nothing is left marked as consumed"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Resizing the output
+;;; ---------------------------------------------------------------------------
+
+(deftest resizing-an-output-resizes-the-scene-and-the-target
+  ;; The nested backend follows a parent's configure by calling this (D37): the
+  ;; output, the scene that hit-tests in its space, and the memory target all change
+  ;; size together, because a target that did not would be written past its end.
+  (with-tinywl (tinywl :width 100 :height 80)
+    (let ((before (cf.backend.headless:compositor-target tinywl)))
+      (cf:resize-compositor tinywl 200 120)
+      (ok (= 200 (cf:compositor-width tinywl)) "the output reports its new width")
+      (ok (= 120 (cf:compositor-height tinywl)) "and height")
+      (ok (= 200 (scene:scene-width (cf:compositor-scene tinywl)))
+          "the scene is sized with it, so hit testing stays in bounds")
+      (ok (not (eq before (cf.backend.headless:compositor-target tinywl)))
+          "the target was replaced, not resized in place")
+      (cf:render-frame tinywl)
+      (ok (= *background* (cf:frame-pixel tinywl 199 119))
+          "a pixel only the new target has is readable"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Finding the parent

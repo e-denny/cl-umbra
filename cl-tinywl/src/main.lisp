@@ -17,7 +17,9 @@
   --headless            render into memory; input must be injected (a test backend)
   --nested              run as a window inside the compositor in WAYLAND_DISPLAY
   --parent PATH         the parent's socket (implies --nested)
-  --size WxH            output size in pixels (default 512x512)
+  --size WxH            output size in pixels (default 1280x800)
+  --launch CMD          start CMD (default weston-terminal) as a client of ours:
+                        immediately, and again on Alt+Shift+Return
   --display NAME        the name of our own socket (default wayland-0 headless,
                         tinywl-1 nested)
   --runtime-dir DIR     where the socket goes (default XDG_RUNTIME_DIR)
@@ -25,8 +27,8 @@
 
 With neither --headless nor --nested, tinywl nests when WAYLAND_DISPLAY names a
 live compositor and runs headless otherwise.  Press Alt+Esc to quit, Alt+F1 to send
-the bottom window to the front, Alt+left-drag to move a window and Alt+right-drag
-to resize it from the edge under the pointer.
+the bottom window to the front, Alt+Shift+Return to start a terminal, Alt+left-drag
+to move a window and Alt+right-drag to resize it from the edge under the pointer.
 ")
 
 (defun parse-size (text)
@@ -65,6 +67,9 @@ is the one interface that must not need a library to read."
                     (setf options (list* :width width :height height options)))
                   (skip))
                  ((string= argument "--display") (setf options (list* :display-name (value) options)) (skip))
+                 ;; One executable, not a shell command line: what to launch is policy, and a
+                 ;; compositor's policy is the running image's (D14) -- set TINYWL:*TERMINAL-COMMAND*.
+                 ((string= argument "--launch") (setf options (list* :launch (list (value)) options)) (skip))
                  ((string= argument "--runtime-dir") (setf options (list* :runtime-dir (value) options)) (skip))
                  ((string= argument "--help") (setf help t))
                  (t (error "unknown option ~S" argument)))))

@@ -55,7 +55,7 @@ state tinywl.c keeps (the view list, the grabbed toplevel, the grab x/y) is the
 framework's scene, grab and seat already, and a second copy is a second thing that
 can disagree."))
 
-(defun make-tinywl (&key (width 512) (height 512) (background #xFF000000)
+(defun make-tinywl (&key (width 1280) (height 800) (background #xFF000000)
                          (display-name "wayland-0")
                          (runtime-dir (uiop:getenv "XDG_RUNTIME_DIR"))
                          (reactor nil))
@@ -235,6 +235,71 @@ its compositor wants click-to-raise."
                (cf:request-frame tinywl)))))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Starting a client
+;;; ---------------------------------------------------------------------------
+;;
+;; A compositor that cannot start anything is a compositor you look at.  tinywl.c has
+;; no launcher (you start clients against it from elsewhere), but a nested session is
+;; exactly the case where that is awkward: the environment's WAYLAND_DISPLAY names the
+;; *parent*, so a client started from the shell lands outside the window you meant.
+
+(defparameter *terminal-command* '("weston-terminal")
+  "What Alt+Shift+Return starts.
+
+weston-terminal by default because it is the terminal that works on a renderer this
+small: it is toytoolkit over wl_shm, no EGL, no X.  kitty needs an EGL surface and
+xterm needs XWayland, so neither can appear here yet; foot, alacritty and the like
+work if they are installed and use shm.  Change this from the REPL -- it is a normal
+special variable, and the running image is this compositor's control surface (D14).")
+
+(defvar *clients* '()
+  "Processes LAUNCH started, newest first, so they can be stopped with the session.")
+
+(defun launch (tinywl &key (command *terminal-command*))
+  "Start COMMAND as a client of THIS compositor's own display.
+
+The child inherits our environment with one thing changed: WAYLAND_DISPLAY is our
+socket, because in a nested session the environment names the parent and a client
+started against the parent would appear outside the window it was asked for.  The
+exec goes through /bin/sh so HOME, PATH, TERM and the locale survive -- passing
+:environment to RUN-PROGRAM would replace all of it, and a terminal with no HOME is
+a terminal that cannot read its own config."
+  (let* ((display (cf:compositor-display tinywl))
+         (socket (srv:display-socket-path display))
+         (name (pathname-name (pathname socket)))
+         (process
+           (handler-case
+               (sb-ext:run-program
+                "/bin/sh"
+                (append (list "-c"
+                              "WAYLAND_DISPLAY=$1; export WAYLAND_DISPLAY; shift; exec \"$@\""
+                              "tinywl-launch" name)
+                        command)
+                ;; The child's diagnostics come back to whoever is watching this
+                ;; compositor: a launcher that swallows "cannot connect" is a
+                ;; launcher whose failures look like nothing happening.
+                :wait nil :search t :error *error-output*)
+             (error (condition)
+               (srv:log-message :warn "could not start ~S: ~A" (first command) condition)
+               nil))))
+    (when process
+      (srv:log-message :info "started ~S (pid ~D) on ~A"
+                       (first command) (sb-ext:process-pid process) name)
+      (push process *clients*))
+    process))
+
+(defun stop-clients ()
+  "Stop the clients LAUNCH started; they have already been told goodbye.
+
+Called from STOP after the display is closed, so a client that honours EOF has
+already gone; a client that does not is asked with SIGTERM rather than left behind."
+  (dolist (process *clients*)
+    (when (sb-ext:process-alive-p process)
+      (ignore-errors (sb-ext:process-kill process 15)))
+    (ignore-errors (sb-ext:process-close process)))
+  (setf *clients* '()))
+
+;;; ---------------------------------------------------------------------------
 ;;; Keybindings
 ;;; ---------------------------------------------------------------------------
 
@@ -272,6 +337,12 @@ not choose is one whose behaviour cannot be read off its own source."
                      (lambda () (cf:cycle-views tinywl))
                      :modifiers input:+modifier-mod1+
                      :description "cycle windows")
+  ;; Mod1+Shift+Return rather than Mod1+Return: the latter is every compositor's
+  ;; "open a terminal", so a parent session would take the key before we saw it.
+  (cf:add-keybinding tinywl "Return"
+                     (lambda () (launch tinywl))
+                     :modifiers (logior input:+modifier-mod1+ input:+modifier-shift+)
+                     :description "terminal")
   tinywl)
 
 ;;; ---------------------------------------------------------------------------
@@ -299,11 +370,12 @@ not choose is one whose behaviour cannot be read off its own source."
              (cf:compositor-display (session-compositor session))))))
 
 (defun start (&key (mode :headless)
-                   (width 512) (height 512)
+                   (width 1280) (height 800)
                    (background #xFF000000)
                    display-name
                    runtime-dir
                    parent-path
+                   launch
                    pump)
   "Start tinywl and return its SESSION.
 
@@ -317,14 +389,13 @@ When the parent's socket is not there, that is an error worth reporting before a
 window appears."
   (ecase mode
     (:headless
-     (make-instance 'session
-                    :mode :headless
-                    :compositor (make-tinywl
-                                 :width width :height height
-                                 :background background
-                                 :display-name (or display-name "wayland-0")
-                                 :runtime-dir (or runtime-dir
-                                                  (uiop:getenv "XDG_RUNTIME_DIR")))))
+     (let ((tinywl (make-tinywl
+                    :width width :height height
+                    :background background
+                    :display-name (or display-name "wayland-0")
+                    :runtime-dir (or runtime-dir (uiop:getenv "XDG_RUNTIME_DIR")))))
+       (when launch (launch tinywl :command launch))
+       (make-instance 'session :mode :headless :compositor tinywl)))
     (:nested
      (let* ((parent (parent-socket-path (or parent-path (uiop:getenv "WAYLAND_DISPLAY"))))
             (backend (progn
@@ -343,6 +414,8 @@ WAYLAND_DISPLAY in the environment"))
                         :compositor-class 'tinywl-compositor
                         :pump pump))))
        (install-keybindings (nested:nested-compositor backend))
+       (when launch
+         (launch (nested:nested-compositor backend) :command launch))
        (make-instance 'session
                       :mode :nested
                       :compositor (nested:nested-compositor backend)
@@ -387,5 +460,6 @@ both a signal handler and the caller's UNWIND-PROTECT can reach this."
       ((not (srv:display-closed-p (cf:compositor-display compositor)))
        (cf:stop-compositor compositor)
        (ignore-errors
-         (srv:close-display (cf:compositor-display compositor))))))
+         (srv:close-display (cf:compositor-display compositor)))))
+    (stop-clients))
   session)

@@ -250,7 +250,7 @@ a nested window on a foreign compositor are open below.
 - [x] parent `wl_surface.frame` → our frame clock; a frame with no free buffer is deferred, not
       queued; `wl_buffer.release` re-arms
 - [x] teardown: destroy the parent's window, unmap, close both displays, no descriptor leak
-- [ ] resize when the parent configures (the nested output's size is fixed at start in v0)
+- [x] resize when the parent configures (D37: output, scene and buffers follow it)
 - [ ] scale from the parent output; more than two buffers; a merged reactor wait
 
 `cl-tinywl` (the exit slice, D36)

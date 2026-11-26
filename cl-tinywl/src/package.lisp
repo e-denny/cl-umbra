@@ -30,6 +30,10 @@ compositor, and how a session starts and stops.")
    #:install-keybindings
    #:close-toplevels
    #:parent-socket-path
+   #:launch
+   #:stop-clients
+   #:*terminal-command*
+   #:*clients*
    ;; a session: headless, or nested inside another compositor
    #:session
    #:session-mode
