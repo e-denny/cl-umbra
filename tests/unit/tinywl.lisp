@@ -108,6 +108,21 @@ connection would make this a gate rather than a test."
       (ok (= 806 (nth-value 2 (tinywl:pointer-reach node)))
           "a client with no input region reaches to its buffer's edge (806)"))))
 
+(deftest a-window-with-no-geometry-is-its-own-buffer
+  ;; Resize arithmetic is in window-geometry coordinates, because that is what an
+  ;; xdg_toplevel.configure's size means.  A client that sets no geometry (no
+  ;; client-side decoration) is its own buffer, which is every test client here.
+  (with-tinywl (tinywl)
+    (let* ((surface (fake-window tinywl :width 200 :height 150 :x 100 :y 50))
+           (node (cf:surface-scene-node surface)))
+      (multiple-value-bind (x y width height) (grab:node-geometry node)
+        (ok (equal (list x y width height) '(0 0 200 150))
+            (format nil "no geometry, so the buffer is the window (~S)"
+                    (list x y width height))))
+      (let ((resize (grab:begin-resize-grab node 295 125 grab:+edge-right+)))
+        (ok (= 300 (grab:resize-grab-anchor-right resize))
+            "and the anchored edge is the buffer's right edge")))))
+
 (deftest edges-at-finds-the-side-the-pointer-is-on
   (let ((node (scene:make-rect-node 200 150 #xFF000000)))
     (scene:set-node-position node 100 50)

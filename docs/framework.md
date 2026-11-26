@@ -213,6 +213,11 @@ space, a visibility flag and a parent.
   puts the node back so that edge stays still, using the size the client actually came back with
   (`grab-anchored`, D42). And an edge is where the pointer can reach — a client-side decoration's
   input region, not its surface's bounding box (D42, `tinywl:pointer-reach`).
+- **Resize arithmetic speaks window geometry, and a move has bounds**: `node-geometry` reads
+  `xdg_surface.set_window_geometry`, so a configure asks for the size a client means rather than
+  its buffer (a decorated window is otherwise off by its decoration); and `clamp-to-output` keeps
+  a dragged window inside its output — fully inside if it fits, always covering it if it does not —
+  while a pointer that leaves the output ends the grab rather than dragging unseen (D43).
 - **Retained, not immediate**: the tree survives frames, which is what makes rules,
   workspaces, animations and overview possible without a rewrite (D10).
 - **Damage propagation**, clip rectangles and **culling** are open (2b): v0 repaints the whole

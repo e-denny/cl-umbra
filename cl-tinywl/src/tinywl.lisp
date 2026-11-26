@@ -208,7 +208,9 @@ it and not on some other click during it."
     (when node
       (ecase mode
         (:move
-         (cf:start-grab tinywl (grab:begin-move-grab node x y :button button)))
+         (cf:start-grab tinywl (grab:begin-move-grab node x y :button button
+                                                     :output-width (cf:compositor-width tinywl)
+                                                     :output-height (cf:compositor-height tinywl))))
         (:resize
          (cf:start-grab tinywl (grab:begin-resize-grab node x y
                                                        (edges-at node x y)

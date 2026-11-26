@@ -341,6 +341,36 @@ different states, and only the first is acceptable for a cursor image."
     (ok (= 100 (scene:node-x node))
         "a right-edge resize leaves the left edge alone")))
 
+(deftest a-move-is-clamped-so-the-window-cannot-be-lost
+  ;; A window narrower than the output is kept fully inside it; one wider than the
+  ;; output may be pushed as far as the output's other edge and no further, so it
+  ;; always covers the output rather than sliding off it (D43).
+  (ok (= 312 (grab:clamp-to-output 900 200 512))
+      "a window that fits stops with its far edge at the output's (800 -> 312)")
+  (ok (= 0 (grab:clamp-to-output -50 200 512))
+      "and one dragged the other way stops at the near edge")
+  (ok (= 100 (grab:clamp-to-output 100 200 512))
+      "a position inside the range is left alone")
+  (ok (= 0 (grab:clamp-to-output 400 900 512))
+      "a window wider than the output stops when its far edge reaches the output's")
+  (ok (= -388 (grab:clamp-to-output -900 900 512))
+      "and when its near edge does (512 - 900)"))
+
+(deftest a-grab-motion-clamps-a-move-to-the-output
+  (with-compositor (compositor :width 512 :height 512)
+    (let* ((scene (cf:compositor-scene compositor))
+           (node (scene:scene-add-node scene (scene:make-rect-node 200 150 #xFF00FF00)))
+           (grab (grab:begin-move-grab node 100 100 :button #x110
+                                       :output-width 512 :output-height 512)))
+      (setf (cf:compositor-grab compositor) grab)
+      (cf:inject-pointer-motion compositor 500 500)
+      (ok (equal (list (scene:node-x node) (scene:node-y node)) '(312 362))
+          (format nil "a drag past the corner leaves the window at the output's edge (~S)"
+                  (list (scene:node-x node) (scene:node-y node))))
+      ;; The pointer itself is not clamped: it is wherever the device says.
+      (ok (= 500 (cf:compositor-cursor-x compositor))
+          "the pointer is still where the device put it"))))
+
 (deftest the-scene-draws-over-the-background-in-stacking-order
   (with-compositor (compositor :width 32 :height 32)
     (let* ((scene (cf:compositor-scene compositor))

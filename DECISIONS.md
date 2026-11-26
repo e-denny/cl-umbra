@@ -1626,3 +1626,70 @@ a client can be squeezed past its own minimum until it clamps itself), and keep 
 is applied while the grab is active and on the commits that arrive during it, which is the whole
 drag. The lesson is the one this slice keeps teaching: **"the body" and "the border" are decisions
 that need the same geometry the pointer does, and a client's decoration is part of its geometry.**
+
+## D43 — A window is dragged inside its output, and a resize speaks geometry
+
+**Status:** accepted
+
+**Context.** The seventh manual test found two things, both about a drag not matching the
+pointer. Resizing a `weston-terminal` from its frame jumped by a large amount on the first small
+motion and then tracked 1:1. And a window could be dragged out of the nested output entirely,
+where it could not be seen or clicked again — worse, with the outer pointer off the window the
+grab outlived its pointer, so the session kept moving a window nobody was dragging.
+
+The jump had one cause. `xdg_toplevel.configure`'s size is the surface's **window geometry**, and
+`xdg_surface.set_window_geometry` is where a client declares it. `cf.grab` did its arithmetic in
+*buffer* coordinates: a client with client-side decorations answers a buffer-size request with a
+window 68 pixels wider than asked (weston-terminal's geometry is `(32 32 742 499)` inside an
+806x563 buffer), so the first configure already moved the edge by the decoration and every motion
+after it moved it by the drag. The server has stored the geometry since the xdg-shell slice, with
+a note that nothing read it yet.
+
+The lost window had two causes as well: nothing clamped a move, and a grab only ended on the
+button that started it — a button that a nested session never sees released once the outer pointer
+has left its surface.
+
+**Decision.**
+
+1. **Resize arithmetic is in window geometry.** `CF.GRAB:NODE-GEOMETRY` returns a node's geometry
+   `(x y width height)` from its surface's `xdg_surface.set_window_geometry`, falling back to the
+   node's own size for a surface that sets none. `begin-resize-grab` starts from the geometry size
+   and anchors the *geometry's* opposite edge in output space; `grab-anchored` places the node so
+   that edge stays where it was; `grab-resize` asks for a geometry size, which is what a configure
+   means.
+2. **A move is clamped to the output it lives in.** `CLAMP-TO-OUTPUT` keeps a window that fits
+   fully inside the output and lets a window larger than the output be moved only as far as the
+   output's opposite edge, so it always covers part of the output rather than sliding off it.
+   `begin-move-grab` takes the output size (`:output-width`/`:output-height`, both NIL meaning
+   "unbounded"), and both call sites — the framework's `toplevel-move-requested` and cl-tinywl's
+   `begin-interactive` — pass their compositor's size. The *pointer* is deliberately not clamped:
+   it is where the device says, and the point is that the window stops while the pointer may not.
+3. **A pointer that leaves the output ends the grab.** `cf:inject-pointer-motion` ends an active
+   grab when the position is outside the output, with reason `:pointer-left-output`. A drag whose
+   pointer is gone is a drag nobody is making, and a nested session receives exactly that as a
+   `wl_pointer.leave` from its parent. (A grab that outlives its pointer also leaves the *next*
+   press going to a grab instead of to the window, which is the failure this prevents.)
+
+**Evidence.** A probe with a real `weston-terminal`: a left-edge drag of 50 pixels asks for a
+geometry of 692 (from 742) rather than the buffer's 806, the client answers 688 (its own 2-pixel
+frame rounds the request), and the *visible* right edge — node x + geometry x + geometry width —
+is 774 before and after. Dragging the window far past the output's corner leaves it at (312, 362)
+in a 512x512 output, i.e. flush with the corner, with the pointer itself still at 511. A pointer
+moved to (-1,-1) during a drag leaves `compositor-grab` NIL. Gate clause 16 grew by eight checks
+across the two runs: the clamp and the pointer position, the leaving-the-output release, and on a
+decorated window "it has client-side decorations", "alt+right just inside the visible left border
+grabs the left edge", "the visible right edge did not move (774 -> 774)", "and its geometry shrank
+by the drag (742 -> 688)". 48 checks headless, 60 nested, 108 in two runs; the gate is 16/16 and
+the suite is 221 tests in 10 suites, adding `a-move-is-clamped-so-the-window-cannot-be-lost` (both
+branches of the clamp), `a-grab-motion-clamps-a-move-to-the-output` (and that the pointer is not
+clamped) and `a-window-with-no-geometry-is-its-own-buffer`.
+
+**Consequences.** Dragging and resizing now match the pointer, for decorated and undecorated
+clients alike, and a window cannot be dragged out of reach. What this does not do: clamp a *resize*
+to the output (a window may grow past the edge, which is a different decision — some compositors
+allow it, some do not), keep the node inside on an output that shrinks under it (a configure that
+shrinks the output leaves windows where they are, as D37 says), or account for a client that
+changes its window geometry mid-drag (the anchor is recomputed from the geometry as it is now, so
+it follows the client's own statement). The lesson: **a compositor that speaks buffer coordinates
+to a client is speaking a different language than the one the client answers in — and a drag is
+only as good as its bounds.**

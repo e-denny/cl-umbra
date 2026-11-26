@@ -494,7 +494,44 @@ of lines of protocol."
              (check (eq (cf:surface-scene-node surface-b) node)
                     "alt+F1 raised the window that was at the back")
              (check (eq surface-b (keyboard-focus *inner*))
-                    "and gave it the keyboard"))))
+                    "and gave it the keyboard"))
+
+           ;; 6b. A move is clamped to the output (D43): a window dragged past the
+           ;;     edge stops there, because a window you cannot see is a window you
+           ;;     cannot get back.
+           (moves 300 225)
+           (pump 0.1)
+           (key "Alt_L" :pressed)
+           (button :left :pressed)
+           (settle)
+           (moves 511 511)
+           (pump 0.4)
+           (let ((node (cf:surface-scene-node surface-b)))
+             (check (equal (list (cf.scene:node-x node) (cf.scene:node-y node))
+                           (list (- 512 (cf.scene:node-width node))
+                                 (- 512 (cf.scene:node-height node))))
+                    "a drag past the corner stops at the output's edge (~S)"
+                    (list (cf.scene:node-x node) (cf.scene:node-y node)))
+             (check (= 511 (cf:compositor-cursor-x *inner*))
+                    "while the pointer itself is where the device put it (~D)"
+                    (cf:compositor-cursor-x *inner*)))
+           (button :left :released)
+           (key "Alt_L" :released)
+           (pump 0.3)
+           ;; And a drag whose pointer leaves the output ends there rather than
+           ;; dragging on unseen (D43) -- which is what a nested session does when
+           ;; the outer pointer walks off its window.
+           (key "Alt_L" :pressed)
+           (button :left :pressed)
+           (settle)
+           (check (typep (cf:compositor-grab *inner*) 'cf.grab:move-grab)
+                  "a second drag started from the window's corner")
+           (moves -1 -1)
+           (pump 0.3)
+           (check (null (cf:compositor-grab *inner*))
+                  "and the pointer leaving the output ended it")
+           (button :left :released)
+           (key "Alt_L" :released)))
 
          ;; 7. The parent decides how much space we have and we follow it (D37).
          ;;    Nested only: a headless output has nobody to configure it.
@@ -676,6 +713,50 @@ of lines of protocol."
                   (length images) (length surfaces))
            (check (null drawn) "and none of it is drawn (~D with a scene node)"
                   (length drawn)))
+
+         ;; 12b. A decorated window resizes about its *visible* edge (D43).
+         ;;
+         ;;      An xdg_toplevel.configure's size is the window geometry, not the
+         ;;      buffer, so a buffer-size request makes a client with client-side
+         ;;      decorations answer 68 pixels wider than asked -- a jump on the
+         ;;      first motion and a 1:1 drag afterwards.  Measured on the terminal,
+         ;;      whose geometry is 32 pixels inside its buffer on every side.
+         (let* ((node (top-window *inner*))
+                (before (multiple-value-list (cf.grab:node-geometry node)))
+                (geometry-x (first before))
+                (geometry-y (second before))
+                (geometry-width (third before))
+                (geometry-height (fourth before))
+                (right-before (+ (cf.scene:node-x node) geometry-x geometry-width))
+                (pointer-x (+ (cf.scene:node-x node) geometry-x 2))
+                (pointer-y (+ (cf.scene:node-y node) geometry-y
+                              (floor geometry-height 2))))
+           (check (and before (< geometry-width (cf.scene:node-width node)))
+                  "the terminal has client-side decorations (geometry ~Dx~D in a ~D-wide buffer)"
+                  geometry-width geometry-height (cf.scene:node-width node))
+           (moves pointer-x pointer-y)
+           (settle)
+           (key "Alt_L" :pressed)
+           (button :right :pressed)
+           (settle)
+           (let ((grabbed (cf:compositor-grab *inner*)))
+             (check (and (typep grabbed 'cf.grab:resize-grab)
+                         (= cf.grab:+edge-left+ (cf.grab:resize-grab-edges grabbed)))
+                    "alt+right just inside the visible left border grabs the left edge"))
+           (moves (+ pointer-x 50) pointer-y)
+           (pump 0.8)
+           (button :right :released)
+           (key "Alt_L" :released)
+           (pump 0.8)
+           (multiple-value-bind (new-x new-y new-width new-height)
+               (cf.grab:node-geometry node)
+             (declare (ignore new-y new-height))
+             (check (= right-before (+ (cf.scene:node-x node) new-x new-width))
+                    "the visible right edge did not move (~D -> ~D)"
+                    right-before (+ (cf.scene:node-x node) new-x new-width))
+             (check (< (abs (- geometry-width 50 new-width)) 12)
+                    "and its geometry shrank by the drag (~D -> ~D)"
+                    geometry-width new-width)))
 
          ;; 13. Alt+Esc asks the clients to close and stops the loop.
          ;;

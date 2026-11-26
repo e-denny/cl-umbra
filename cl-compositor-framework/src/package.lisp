@@ -123,7 +123,8 @@ nothing about seats, toplevels or focus.")
 
 (defpackage #:cf.grab
   (:use #:cl)
-  (:local-nicknames (#:scene #:cf.scene))
+  (:local-nicknames (#:scene #:cf.scene)
+                    (#:srv #:wayland.server))
   (:documentation
    "Grabs: an interaction that owns the pointer until it ends (docs/framework.md
 §5).  Move and resize are the two a window manager cannot do without; a grab knows
@@ -154,6 +155,10 @@ two hooks.")
    #:resize-grab-anchor-right
    #:resize-grab-anchor-bottom
    #:grab-anchored
+   #:clamp-to-output
+   #:node-geometry
+   #:move-grab-output-width
+   #:move-grab-output-height
    #:resize-target-size
    #:resize-grab-requested-width
    #:resize-grab-requested-height

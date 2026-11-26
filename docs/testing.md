@@ -281,9 +281,14 @@ twice*:
     moves the node by the pointer's delta and stops on the release, Alt+right at the corner
     produces `resize width: 240, height: 180` in the *client's* output and a 240x180 buffer, a
     second drag grabbed at the window's *left* border asks for `resize width: 220` and leaves the
-    right edge where it was while the left one follows the pointer (D42), Alt+F1 raises the
-    bottom window, and Alt+Esc sends `xdg_toplevel.close` to both clients and stops the loop with
-    no `wl_display.error` anywhere. One client runs with
+    right edge where it was while the left one follows the pointer (D42), a drag past the output's
+    corner stops with the window flush against it while the pointer goes where the device says, and
+    a drag whose pointer leaves the output ends instead of dragging on unseen (D43), Alt+F1 raises
+    the bottom window, and Alt+Esc sends `xdg_toplevel.close` to both clients and stops the loop
+    with no `wl_display.error` anywhere. On the decorated window both runs then require a resize
+    to be arithmetic in *window geometry*: a 50-pixel left drag asks for 692 of 742, the visible
+    right edge (node x + geometry x + geometry width) is unchanged, and the client's own 2-pixel
+    frame is the only difference left (D43). One client runs with
     `WAYLAND_DEBUG=1` and its coloured log (ANSI escapes stripped) is checked for an ordered
     `get_registry` → `configure` → `ack_configure`. The whole scenario then runs a second
     time with tinywl *nested* inside a headless parent, injecting input into the parent, which

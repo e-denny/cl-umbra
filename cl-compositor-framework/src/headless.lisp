@@ -611,12 +611,19 @@ only then the focused client."
   "Move the pointer to (X, Y) in output space and let the scene decide who hears it.
 
 While a grab holds the pointer the grab decides: the client under the pointer is
-not sent motion events for a drag it is not doing."
+not sent motion events for a drag it is not doing.  A pointer that leaves the output
+ends the grab instead: nobody is dragging anything any more, and a grab that outlives
+its pointer is a compositor that has swallowed the mouse -- which is what a nested
+session does when the outer pointer walks off its window (D43)."
   (scene:set-node-position (scene:scene-cursor (compositor-scene compositor)) x y)
   (let ((grab (compositor-grab compositor)))
-    (if grab
-        (grab:grab-motion grab x y)
-        (update-pointer compositor)))
+    (cond
+      ((null grab) (update-pointer compositor))
+      ((or (minusp x) (minusp y)
+           (>= x (compositor-width compositor))
+           (>= y (compositor-height compositor)))
+       (end-active-grab compositor :reason :pointer-left-output))
+      (t (grab:grab-motion grab x y))))
   ;; The cursor moved, so the frame changed even if no client did anything.
   (mark-dirty compositor))
 
@@ -699,7 +706,11 @@ grab instead of to the window."
                    (grab:begin-move-grab node
                                          (compositor-cursor-x compositor)
                                          (compositor-cursor-y compositor)
-                                         :button button))
+                                         :button button
+                                         ;; A move is clamped to the output: a window
+                                         ;; dragged out of reach is a window lost (D43).
+                                         :output-width (compositor-width compositor)
+                                         :output-height (compositor-height compositor)))
        (srv:log-message :debug "toplevel ~D: interactive move (serial ~D)"
                         (srv:resource-id toplevel) serial)
        t))))
