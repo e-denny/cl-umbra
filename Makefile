@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame
+check: test fuzz fuzz-client loads purity server c-probe frame xdg
 
 test:
 	./scripts/run-tests.sh
@@ -32,6 +32,10 @@ c-probe:
 # A libwayland shm client draws through the headless compositor; pixels checked.
 frame:
 	./scripts/headless-frame.sh
+
+# weston-simple-shm, a real xdg-shell client, draws a window through us.
+xdg:
+	./scripts/xdg-shell-gate.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:

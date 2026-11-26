@@ -85,9 +85,16 @@ offset % 4 == 0
   its buffer and then attached a buffer we had already destroyed.
 - `wl_buffer.release` is sent when the compositor is finished with the buffer for a frame.
   Release must never happen for a buffer that is still referenced by a queued frame, and must
-  happen promptly or clients stall. Phase 2a releases the *previous* buffer when a commit
-  replaces it, which is safe because a frame is rendered once per cycle, before the next
-  cycle's commits.
+  happen promptly or clients stall. Since phase 3 the release happens at **presentation**: the
+  renderer copies the buffer into the target, then releases it, then fires the frame callbacks
+  (D25). A buffer replaced by a later commit before it was presented is released at that
+  commit, so a burst of commits in one batch cannot strand one. Phase 2a released only at the
+  next commit, which is a claim about our scheduling rather than the protocol's, and
+  `weston-simple-shm` deadlocked on it after two frames.
+- Claiming matters as much as releasing: `wl_surface.attach` with a non-nil buffer sets
+  `released-p` to NIL (`claim-shm-buffer`), which is what makes the release a real event rather
+  than a no-op. Before that fix every release was silently skipped, including the phase-2a
+  one.
 - Buffer reuse without release is the single most common client-vs-compositor bug; the test
   suite has explicit cases (`attach` while still in use, `attach` then immediate `destroy`,
   commit with no buffer, damage-only commit).

@@ -894,7 +894,7 @@ nested flet, and the unwind-protect is easier to get right in one place."
                  (ok (srv:resource-destroyed-p buffer))
                  (let ((events (read-events socket)))
                    (ok (= 1 (length events)) "and one more delete_id, for the buffer"))))
-        (ffi:close-fd socket)))))
+        (ffi:close-fd socket))))))
 
 (deftest destroying-a-pool-with-no-buffers-unmaps-at-once
   (with-shm-display (display)
@@ -914,20 +914,366 @@ nested flet, and the unwind-protect is easier to get right in one place."
         (ffi:close-fd socket)))))
 
 (deftest a-client-that-disappears-leaves-no-mapping-or-descriptor
+  ;; The descriptor count is only meaningful if the test holds nothing of its
+  ;; own: the memfd is closed as soon as the server has its duplicate, so what is
+  ;; compared before and after is the *server's* copy and the accepted socket.
   (with-shm-display (display)
-    (let ((before (fd-count)))
-      (let ((socket (raw-connect display)))
-        (bind-shm display socket)
-        (multiple-value-bind (fd size) (make-client-pool 8 4 #xFF0000FF)
-          (send-create-pool socket 4 fd size)
-          (run-server display))
-        (let* ((client (only-client display))
-               (pool (wayland.object:object-table-ref (srv:client-objects client) 4)))
-          (ffi:close-fd socket)
-          (run-server display)
-          (ok (null (srv:display-clients display)))
-          (ok (null (srv:shm-pool-mapping pool)))
-          (ok (= -1 (srv:shm-pool-fd pool)))))
+    (let ((before (fd-count))
+          (socket nil))
+      (unwind-protect
+           (progn
+             (setf socket (raw-connect display))
+             (bind-shm display socket)
+             (multiple-value-bind (fd size) (make-client-pool 8 4 #xFF0000FF)
+               (send-create-pool socket 4 fd size)
+               (run-server display)
+               (ffi:close-fd fd))
+             (let* ((client (only-client display))
+                    (pool (wayland.object:object-table-ref (srv:client-objects client) 4)))
+               (ffi:close-fd socket)
+               (setf socket nil)
+               (run-server display)
+               (ok (null (srv:display-clients display)))
+               (ok (null (srv:shm-pool-mapping pool)))
+               (ok (= -1 (srv:shm-pool-fd pool)))))
+        (when socket (ffi:close-fd socket)))
       (ok (= before (fd-count))
           (format nil "descriptors before ~D, after ~D" before (fd-count))))))
-)
+
+;;; ---------------------------------------------------------------------------
+;;; xdg-shell: the toplevel handshake
+;;;
+;;; Raw messages again, for the same reason as the shm tests: only a client that
+;;; can make the *wrong* request can prove that we refuse it.  Opcodes used here
+;;; are the schema's: wl_compositor.create_surface 0, xdg_wm_base.get_xdg_surface
+;;; 2, .create_positioner 1, .destroy 0, .pong 3, xdg_surface.get_toplevel 1,
+;;; .ack_configure 4, .destroy 0, wl_surface.destroy 0, .attach 1, .damage 2,
+;;; .frame 3, .commit 6, xdg_toplevel.set_title 2, .set_app_id 3.
+;;; ---------------------------------------------------------------------------
+
+(defmacro with-xdg-display ((display) &body body)
+  "A display offering wl_shm (global 1), wl_compositor (2) and xdg_wm_base (3)."
+  `(with-display (,display)
+     (srv:add-global ,display
+                     :interface "wl_shm"
+                     :version 1
+                     :resource-class 'srv:shm
+                     :bind #'srv:send-shm-formats)
+     (srv:add-global ,display
+                     :interface "wl_compositor"
+                     :version 1
+                     :resource-class 'srv:compositor)
+     (srv:add-global ,display
+                     :interface "xdg_wm_base"
+                     :version 1
+                     :resource-class 'srv:xdg-wm-base)
+     (locally ,@body)))
+
+(defun bind-xdg (display socket)
+  "get_registry (2), then bind wl_shm as 5, wl_compositor as 3, xdg_wm_base as 4."
+  (send-get-registry socket 2)
+  (run-server display)
+  (read-events socket)                          ; the three global announcements
+  (send-bind socket 2 1 "wl_shm" 1 5)
+  (send-bind socket 2 2 "wl_compositor" 1 3)
+  (send-bind socket 2 3 "xdg_wm_base" 1 4)
+  (run-server display)
+  (read-events socket)                          ; the two shm formats
+  socket)
+
+(defun server-object (display id)
+  "The resource the server holds for the client-chosen object id ID."
+  (wayland.object:object-table-ref (srv:client-objects (only-client display)) id))
+
+(defun make-toplevel (display socket)
+  "create_surface (10), get_xdg_surface (11), get_toplevel (12); nothing committed."
+  (send-message socket 3 0 (lambda (buffer) (wire:put-new-id buffer 10)))
+  (send-message socket 4 2 (lambda (buffer)
+                             (wire:put-new-id buffer 11)
+                             (wire:put-object buffer 10)))
+  (send-message socket 11 1 (lambda (buffer) (wire:put-new-id buffer 12)))
+  (run-server display))
+
+(defun commit-surface (display socket &optional (surface-id 10))
+  "wl_surface.commit, then give the server the cycle it needs to answer it."
+  (send-message socket surface-id 6 nil)
+  (run-server display))
+
+(defun ack-configure (socket serial &optional (shell-id 11))
+  (send-message socket shell-id 4 (lambda (buffer) (wire:put-uint buffer serial))))
+
+(defun attach-buffer (socket buffer-id &optional (surface-id 10))
+  "wl_surface.attach is opcode 1: opcode 0 is destroy, which is how this test
+first proved that opcodes are worth looking up rather than assuming."
+  (send-message socket surface-id 1
+                (lambda (buffer)
+                  (wire:put-object buffer buffer-id)
+                  (wire:put-int buffer 0)
+                  (wire:put-int buffer 0))))
+
+(defun make-buffer-on-the-shm-global (display socket &key (pool-id 20) (buffer-id 21))
+  "A real 8x4 ARGB8888 buffer; the wl_shm global is object 5 (see BIND-XDG)."
+  (multiple-value-bind (fd size) (make-client-pool 8 4 #xFF00FF00)
+    (send-create-pool socket pool-id fd size :shm-id 5)
+    (run-server display)
+    (send-create-buffer socket pool-id buffer-id 0 8 4 32
+                        srv:+wl-shm-format-argb8888+)
+    (run-server display)))
+
+(defun read-configure (socket)
+  "Decode an initial configure pair; returns (values width height states serial)."
+  (let ((events (read-events socket)))
+    (ok (= 2 (length events))
+        (format nil "a toplevel configure and a surface configure, got ~D message~:P"
+                (length events)))
+    (destructuring-bind ((toplevel-id toplevel-opcode toplevel-reader)
+                         (shell-id shell-opcode shell-reader))
+        events
+      (ok (= 12 toplevel-id) "xdg_toplevel.configure arrives on the toplevel")
+      (ok (= 0 toplevel-opcode) "xdg_toplevel.configure is opcode 0")
+      (ok (= 11 shell-id) "xdg_surface.configure arrives on the xdg_surface")
+      (ok (= 0 shell-opcode) "xdg_surface.configure is opcode 0")
+      (let ((width (wire:read-int toplevel-reader))
+            (height (wire:read-int toplevel-reader))
+            (states (wire:read-array toplevel-reader)))
+        (values width height states (wire:read-uint shell-reader))))))
+
+(deftest the-initial-commit-is-answered-with-a-zero-by-zero-configure
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (send-message socket 12 2 (lambda (buffer) (wire:put-string buffer "hello")))
+             (send-message socket 12 3 (lambda (buffer)
+                                         (wire:put-string buffer "org.example.test")))
+             (commit-surface display socket)
+             (multiple-value-bind (width height states serial) (read-configure socket)
+               (ok (= 0 width) "0x0 means: you choose (docs/protocol-layer.md §8)")
+               (ok (= 0 height))
+               (ok (null states) "the state array is empty, not absent")
+               (let* ((shell (server-object display 11))
+                      (toplevel (server-object display 12))
+                      (surface (srv:xdg-surface-surface shell)))
+                 (ok (eq surface (server-object display 10))
+                     "the xdg_surface points at the wl_surface it was made for")
+                 (ok (srv:xdg-surface-configured-p shell) "a configure was sent")
+                 (ok (not (srv:xdg-surface-acknowledged-p shell))
+                     "but not yet acknowledged")
+                 (ok (equal (list serial) (srv:xdg-surface-pending-serials shell))
+                     "the serial is kept for the ack to match")
+                 (ok (equal "hello" (srv:xdg-toplevel-title toplevel)))
+                 (ok (equal "org.example.test" (srv:xdg-toplevel-app-id toplevel)))
+                 (ok (not (srv:surface-mapped-p surface))
+                     "a configure does not map anything by itself"))
+               (ack-configure socket serial)
+               (run-server display)
+               (let ((shell (server-object display 11)))
+                 (ok (srv:xdg-surface-acknowledged-p shell))
+                 (ok (= 1 (srv:xdg-surface-ack-count shell)))
+                 (ok (null (srv:xdg-surface-pending-serials shell))
+                     "acking consumes the serial"))))
+        (ffi:close-fd socket)))))
+
+(deftest a-buffer-attached-before-the-first-ack-is-refused
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (commit-surface display socket)
+             (read-configure socket)                     ; received, not acked
+             (make-buffer-on-the-shm-global display socket)
+             (attach-buffer socket 21)
+             (commit-surface display socket)
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 11 object-id) "the error names the xdg_surface")
+               (ok (= 3 code) "xdg_surface.error.unconfigured_buffer")
+               (ok (search "before the initial configure" message)))
+             (ok (null (srv:display-clients display)) "the client is disconnected"))
+        (ffi:close-fd socket)))))
+
+(deftest an-ack-for-a-serial-we-never-sent-is-refused
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (commit-surface display socket)
+             (multiple-value-bind (width height states serial) (read-configure socket)
+               (declare (ignore width height states))
+               (ack-configure socket (+ serial 1000))
+               (run-server display)
+               (destructuring-bind (object-id code message)
+                   (error-reply (read-events socket))
+                 (ok (= 11 object-id))
+                 (ok (= 4 code) "xdg_surface.error.invalid_serial")
+                 (ok (search "never sent" message)))))
+        (ffi:close-fd socket)))))
+
+(deftest a-second-role-or-a-second-xdg-surface-is-refused
+  (with-xdg-display (display)
+    ;; One wl_surface, two roles.
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (send-message socket 11 1 (lambda (buffer) (wire:put-new-id buffer 13)))
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 11 object-id))
+               (ok (= 2 code) "xdg_surface.error.already_constructed")
+               (ok (search "already has the toplevel role" message))))
+        (ffi:close-fd socket)))
+    ;; One wl_surface, two xdg_surfaces.
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (send-message socket 4 2 (lambda (buffer)
+                                        (wire:put-new-id buffer 14)
+                                        (wire:put-object buffer 10)))
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 4 object-id) "this one is xdg_wm_base's error")
+               (ok (= 0 code) "xdg_wm_base.error.role")
+               (ok (search "already has the toplevel role" message))))
+        (ffi:close-fd socket)))))
+
+(deftest role-destruction-order-is-enforced
+  (with-xdg-display (display)
+    ;; An xdg_surface may not outlive the role it created.
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (send-message socket 11 0 nil)                ; xdg_surface.destroy
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 11 object-id))
+               (ok (= 6 code) "xdg_surface.error.defunct_role_object")
+               (ok (search "outlives" message))))
+        (ffi:close-fd socket)))
+    ;; And xdg_wm_base may not outlive its surfaces.
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (send-message socket 4 0 nil)                 ; xdg_wm_base.destroy
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 4 object-id))
+               (ok (= 1 code) "xdg_wm_base.error.defunct_surfaces")
+               (ok (search "still alive" message))))
+        (ffi:close-fd socket)))))
+
+(deftest popups-and-positioners-are-not-implemented-yet
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (send-message socket 4 1 (lambda (buffer) (wire:put-new-id buffer 15)))
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 4 object-id))
+               (ok (= 3 code) "wl_display.error.implementation: not built yet")
+               (ok (search "not implemented" message)
+                   "an unsupported request says so instead of pretending"))
+             (ok (null (srv:display-clients display))))
+        (ffi:close-fd socket)))))
+
+(deftest a-toplevel-maps-unmaps-and-gets-its-buffer-back
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (make-toplevel display socket)
+             (commit-surface display socket)
+             (multiple-value-bind (width height states serial) (read-configure socket)
+               (declare (ignore width height states))
+               (ack-configure socket serial))
+             (make-buffer-on-the-shm-global display socket)
+             ;; The frame callback is asked for in the same commit as the buffer;
+             ;; it must not fire until the frame is presented.
+             (send-message socket 10 3 (lambda (buffer) (wire:put-new-id buffer 22)))
+             (attach-buffer socket 21)
+             (send-message socket 10 2 (lambda (buffer)
+                                         (wire:put-int buffer 0)
+                                         (wire:put-int buffer 0)
+                                         (wire:put-int buffer 8)
+                                         (wire:put-int buffer 4)))
+             (commit-surface display socket)
+             (run-server display)
+             (let* ((shell (server-object display 11))
+                    (toplevel (server-object display 12))
+                    (surface (srv:xdg-surface-surface shell))
+                    (buffer (server-object display 21)))
+               (ok (srv:surface-mapped-p surface) "a committed buffer maps the surface")
+               (ok (srv:xdg-surface-mapped-p shell))
+               (ok (srv:xdg-toplevel-mapped-p toplevel))
+               (ok (eq buffer (srv:surface-current-buffer surface)))
+               (ok (not (srv:shm-buffer-released-p buffer))
+                   "an attached buffer belongs to the compositor")
+               (let ((events (read-events socket :timeout 0.05)))
+                 (ok (notany (lambda (event) (= 22 (first event))) events)
+                     "the frame callback waits for presentation"))
+               ;; Presentation is the compositor's job; do what a render does.
+               ;; Nothing dispatched, so nothing flushed: flush by hand.
+               (srv:fire-frame-callbacks surface)
+               (srv:flush-all display)
+               (let* ((events (read-events socket))
+                      (done (find-if (lambda (event) (= 22 (first event))) events)))
+                 (ok done "wl_callback.done arrives once the frame is presented")
+                 (when done
+                   (ok (= 0 (second done)))
+                   (ok (integerp (wire:read-uint (third done)))
+                       "done carries a msec timestamp")))
+               ;; attach(nil) unmaps, and the replaced buffer goes back to the client.
+               (attach-buffer socket nil)
+               (commit-surface display socket)
+               (run-server display)
+               (ok (not (srv:surface-mapped-p surface)) "attach(nil) unmaps")
+               (ok (not (srv:xdg-toplevel-mapped-p toplevel)))
+               (let ((events (read-events socket)))
+                 (ok (find-if (lambda (event) (= 21 (first event))) events)
+                     "the unmapped buffer is released")
+                 (ok (srv:shm-buffer-released-p buffer)))))
+        (ffi:close-fd socket)))))
+
+(deftest a-ping-is-answered-with-its-own-serial
+  (with-xdg-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-xdg display socket)
+             (let* ((wm-base (server-object display 4))
+                    (serial (srv:ping-xdg-wm-base wm-base)))
+               ;; The event is queued in our output buffer, not on the socket
+               ;; yet: nothing was dispatched, so no cycle flushed it.
+               (srv:flush-all display)
+               (destructuring-bind (object-id opcode reader) (first (read-events socket))
+                 (ok (= 4 object-id))
+                 (ok (= 0 opcode) "xdg_wm_base.ping is opcode 0")
+                 (ok (= serial (wire:read-uint reader))
+                     "the ping carries the serial the pong must repeat"))
+               (send-message socket 4 3 (lambda (buffer) (wire:put-uint buffer serial)))
+               (run-server display)
+               (ok (null (srv:xdg-wm-base-pending-pings wm-base)))
+               (ok (= 1 (srv:xdg-wm-base-pong-count wm-base)))))
+        (ffi:close-fd socket)))))

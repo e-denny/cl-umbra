@@ -22,6 +22,7 @@ Not a libwayland-server binding: the wire format and the object model are ours."
                (:file "src/global")
                (:file "src/shm")
                (:file "src/surface")
+               (:file "src/xdg-shell")
                (:file "src/events")
                (:file "src/registry")
                (:file "src/dispatch")

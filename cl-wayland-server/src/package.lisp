@@ -173,6 +173,58 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:+wl-shm-error-invalid-fd+
                 #:+wl-shm-pool-error-invalid-format+
                 #:+wl-shm-pool-error-invalid-stride+)
+  ;; xdg-shell is a separate generated package (it is a separate protocol), and
+  ;; this server implements the v1 subset of it: see XDG-SHELL.LISP.
+  (:import-from #:xdg-shell
+                #:xdg-wm-base.destroy
+                #:xdg-wm-base.get-xdg-surface
+                #:xdg-wm-base.pong
+                #:xdg-wm-base.ping
+                #:xdg-surface.destroy
+                #:xdg-surface.get-toplevel
+                #:xdg-surface.get-popup
+                #:xdg-surface.set-window-geometry
+                #:xdg-surface.ack-configure
+                #:xdg-surface.configure
+                #:xdg-toplevel.destroy
+                #:xdg-toplevel.set-parent
+                #:xdg-toplevel.set-title
+                #:xdg-toplevel.set-app-id
+                #:xdg-toplevel.show-window-menu
+                #:xdg-toplevel.move
+                #:xdg-toplevel.resize
+                #:xdg-toplevel.set-max-size
+                #:xdg-toplevel.set-min-size
+                #:xdg-toplevel.set-maximized
+                #:xdg-toplevel.unset-maximized
+                #:xdg-toplevel.set-fullscreen
+                #:xdg-toplevel.unset-fullscreen
+                #:xdg-toplevel.set-minimized
+                #:xdg-toplevel.configure
+                #:xdg-toplevel.close
+                ;; opcodes of the events the server sends
+                #:+xdg-wm-base-ping+
+                #:+xdg-surface-configure+
+                #:+xdg-toplevel-configure+
+                #:+xdg-toplevel-close+
+                ;; xdg_wm_base.error
+                #:+xdg-wm-base-error-role+
+                #:+xdg-wm-base-error-defunct-surfaces+
+                ;; xdg_surface.error
+                #:+xdg-surface-error-not-constructed+
+                #:+xdg-surface-error-already-constructed+
+                #:+xdg-surface-error-unconfigured-buffer+
+                #:+xdg-surface-error-invalid-serial+
+                #:+xdg-surface-error-invalid-size+
+                #:+xdg-surface-error-defunct-role-object+
+                ;; xdg_toplevel.error
+                #:+xdg-toplevel-error-invalid-resize-edge+
+                #:+xdg-toplevel-error-invalid-parent+
+                #:+xdg-toplevel-error-invalid-size+
+                ;; xdg_toplevel.state
+                #:+xdg-toplevel-state-maximized+
+                #:+xdg-toplevel-state-fullscreen+
+                #:+xdg-toplevel-state-activated+)
   (:export
    ;; conditions
    #:server-error
@@ -225,6 +277,7 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:client-input
    #:client-output
    #:client-registries
+   #:client-resources
    #:client-closed-p
    #:client-congested-p
    #:teardown-client
@@ -260,6 +313,10 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:surface-current-x
    #:surface-current-y
    #:surface-frame-callbacks
+   #:surface-shell-surface
+   #:surface-shell-check-commit
+   #:surface-shell-committed
+   #:surface-shell-lost
    #:surface-committed
    #:surface-presented
    #:fire-frame-callbacks
@@ -282,6 +339,8 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:shm-pool-mapping
    #:shm-pool-buffers
    #:release-shm-pool-mapping
+   #:release-shm-buffer
+   #:claim-shm-buffer
    #:send-shm-formats
    #:shm-format-supported-p
    #:+wl-shm-format-argb8888+
@@ -292,6 +351,48 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:+wl-shm-pool-error-invalid-format+
    #:+wl-shm-pool-error-invalid-stride+
    #:resource-destroy-function
+   ;; xdg-shell (v1): the objects, their state, and the policy hooks
+   #:xdg-wm-base
+   #:xdg-surface
+   #:xdg-toplevel
+   #:xdg-wm-base-shell-surfaces
+   #:xdg-wm-base-pending-pings
+   #:xdg-wm-base-ping-count
+   #:xdg-wm-base-pong-count
+   #:xdg-surface-surface
+   #:xdg-surface-wm-base
+   #:xdg-surface-role
+   #:xdg-surface-role-name
+   #:xdg-surface-configured-p
+   #:xdg-surface-acknowledged-p
+   #:xdg-surface-configure-serial
+   #:xdg-surface-pending-serials
+   #:xdg-surface-last-acked-serial
+   #:xdg-surface-ack-count
+   #:xdg-surface-window-geometry
+   #:xdg-surface-mapped-p
+   #:xdg-surface-live-p
+   #:xdg-toplevel-shell-surface
+   #:xdg-toplevel-title
+   #:xdg-toplevel-app-id
+   #:xdg-toplevel-parent
+   #:xdg-toplevel-min-width
+   #:xdg-toplevel-min-height
+   #:xdg-toplevel-max-width
+   #:xdg-toplevel-max-height
+   #:xdg-toplevel-maximized-p
+   #:xdg-toplevel-fullscreen-p
+   #:xdg-toplevel-minimized-p
+   #:xdg-toplevel-configure-count
+   #:xdg-toplevel-configure-width
+   #:xdg-toplevel-configure-height
+   #:xdg-toplevel-configure-states
+   #:xdg-toplevel-mapped-p
+   #:xdg-toplevel-closed-p
+   #:send-configure
+   #:ping-xdg-wm-base
+   #:close-toplevel
+   #:set-toplevel-activated
    ;; globals
    #:global
    #:global-name

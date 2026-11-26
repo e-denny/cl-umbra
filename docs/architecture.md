@@ -28,7 +28,8 @@ cl-wayland-project/
 │   ├── cl-wayland-server.asd        (also the demo system)
 │   ├── src/  package.lisp  conditions.lisp  objects.lisp  socket.lisp
 │   │         resource.lisp  messages.lisp  client.lisp  display.lisp
-│   │         global.lisp  events.lisp  registry.lisp  dispatch.lisp  demo.lisp
+│   │         global.lisp  events.lisp  registry.lisp  dispatch.lisp
+│   │         surface.lisp  xdg-shell.lisp  demo.lisp
 │   └── demo/ server-demo.lisp
 ├── cl-compositor-framework/
 │   ├── cl-compositor-framework.asd
@@ -53,7 +54,9 @@ cl-wayland-project/
 ├── tests/           cl-wayland-tests.asd  runner.lisp  unit/  fuzz/  interop/
 │                    golden/  perf/  scripts/
 ├── scripts/         gate.sh  gate-protocols.lisp  wayland-info-server.sh  soak.sh
-│                    soak.lisp  run-tests.sh  fuzz.sh  check-loads.sh
+│                    soak.lisp  run-tests.sh  fuzz.sh  fuzz-client.sh
+│                    c-probe.sh  headless-frame.sh  headless-gate.lisp
+│                    xdg-shell-gate.sh  xdg-shell-gate.lisp  check-loads.sh
 │                    purity-check.sh  lib.sh  capture.sh  run-nested.sh  run-tty.sh
 └── qlfile           local Quicklisp/qlot project set
 ```
@@ -76,8 +79,10 @@ the error policy, flush batching with backpressure, and teardown, plus a demo se
 validation, the pool/buffer lifetime rule) and the `wl_compositor`/`wl_surface` state machine
 (attach, damage, frame, commit, destroy, regions stored and ignored), and the framework gained
 its first code: a pixman renderer, a headless compositor that draws committed surfaces into an
-in-memory target, `read-pixels`/`frame-pixel`, and a PNG writer. `cl-tinywl` and `cl-umbra`
-are still their plan.
+in-memory target, `read-pixels`/`frame-pixel`, and a PNG writer. Phase 3a added `xdg-shell` v1
+(`xdg_wm_base`, `xdg_surface`, `xdg_toplevel`) and the three `wl_surface` commit hooks a shell
+role needs, so a real client can open a window; seats, input, the nested backend, tinywl and
+`cl-umbra` are still their plan.
 
 ## 2. Packages
 
@@ -147,9 +152,15 @@ Roles are mixins rather than a `union` in `wlr_surface`:
 (defclass cf-subsurface (cf-surface) ((parent ...) (synchronized-p ...) (sublayer ...)))
 ```
 
-A role change (xdg-surface → toplevel) is a class change (`change-class`), which preserves
-the object identity that the client's object id refers to. In C, that same transition is
-the source of a whole category of "role not yet set" crashes.
+A role change (xdg-surface → toplevel) was planned as a class change (`change-class`), which
+preserves the object identity that the client's object id refers to; in C, that same transition
+is the source of a whole category of "role not yet set" crashes. Phase 3a did something
+simpler and less clever (D26): the role is its own *resource* — `xdg_surface` owns the
+configure handshake, `xdg_toplevel` owns the window state — and the `wl_surface` holds one link
+(`surface-shell-surface`) that the commit path consults through three generic hooks with
+do-nothing defaults. The `wl_surface` object never changes class, the client's id never moves,
+and a bare surface (every phase-2a client) runs none of the role code. `change-class` stays on
+the shelf until two roles genuinely share a class hierarchy worth changing into.
 
 ## 4. Dispatch
 

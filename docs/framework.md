@@ -34,7 +34,7 @@ decomposition is the part worth copying.
 | `cf.types.compositor`, `.surface`, `.region` | `wlr_compositor`, `wlr_surface` | 2 | core protocol objects + surface state machine |
 | `cf.types.output` | `wlr_output` protocol side | 2 | `wl_output`, `zxdg_output_v1` |
 | `cf.types.seat`, `.cursor` | `wlr_seat`, `wlr_cursor` | 3 | focus, capabilities, pointer/keyboard/touch, cursor |
-| `cf.types.xdg-shell` | `wlr_xdg_shell` | 3 | toplevel/popup state machines |
+| `cf.types.xdg-shell` | `wlr_xdg_shell` | 3 | policy over the v1 state machine in `cl-wayland-server`; popups in 6 |
 | `cf.types.subcompositor` | `wlr_subcompositor` | 3 | subsurfaces, sync/desync, sublayers |
 | `cf.types.layer-shell` | `wlr_layer_shell_v1` | 6 | panels, notifications, exclusive zones |
 | `cf.types.data-device` | `wlr_data_device_manager` | 6 | clipboard, primary selection, DnD |
@@ -182,14 +182,33 @@ animated transforms (phase 7).
 These are the modules where "looks done" and "correct" diverge most, so the contracts are
 written down and tested:
 
-**xdg-shell**
+**xdg-shell** — *v1 implemented in phase 3, in `cl-wayland-server/src/xdg-shell.lisp`.* The
+protocol state machine lives with the protocol, next to `wl_surface` and `wl_shm`, because it is
+wire semantics and every compositor built on the server needs it; `cf.types.xdg-shell` is the
+part still to come, and it will hold *policy* (map/unmap events, layout, activation) as a
+subclass that specialises the same hooks. What is implemented:
+
 - `xdg_surface.configure` is sent only after the initial commit; a toplevel that commits a
-  buffer before acking its initial configure is a protocol error.
+  buffer before acking its initial configure is a protocol error (`unconfigured_buffer`).
 - `xdg_toplevel.configure` carries the size the client should use (0×0 = "you choose") and a
   *complete* state array; states are recomputed, never patched.
-- `ack_configure` must match the most recent configure serial; stale acks are ignored per spec.
+- `ack_configure` consumes the serial it names and every older one; a serial we never sent, or
+  one already consumed, is `invalid_serial` (the XML says this is an error, so we do not ignore
+  it — see D26).
+- Role and object destruction are ordered and enforced: `defunct_role_object` for an
+  `xdg_surface` destroyed before its role, `defunct_surfaces` for an `xdg_wm_base` destroyed
+  with surfaces alive, `already_constructed` for a second role, `role` for a second
+  `xdg_surface` on one `wl_surface`.
 - `set_activated`, `set_maximized`, `set_fullscreen`, `set_tiled`, `set_suspended` are driven
-  by compositor policy, not by the client's request alone.
+  by compositor policy, not by the client's request alone — and today the policy is "record the
+  request, send nothing": there is no seat and no layout. `close-toplevel` and
+  `set-toplevel-activated` are the hooks a window manager will call.
+- Titles, app ids, parents and min/max size hints are stored and validated (`invalid_size`,
+  `invalid_parent`, `invalid_resize_edge`), so a rule engine or taskbar has something true to
+  read.
+- **Not yet**: popups and positioners (no method → `implementation`), decorations, grabs
+  (`move`/`resize` are accepted and ignored until there is a seat), configure bounds and
+  `wm_capabilities` (v4/v5, so the global advertises v1).
 - Popups: parent-relative positioning via the positioner, `reposition` (v3+), grab semantics
   (dismiss on outside click, honour `popup_done`), and **nested popup stacks**.
 - `move`/`resize` requests start grabs only if the serial is valid and the surface has focus.

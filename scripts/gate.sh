@@ -39,6 +39,13 @@
 #      compositor, gets its frame callback, and the captured frame matches pixel
 #      for pixel -- plus a valid PNG screenshot
 #
+# Phase 3 (xdg-shell toplevels):
+#
+#  11. weston-simple-shm -- a real xdg-shell client -- binds xdg_wm_base, is
+#      configured, acks our serial, commits a buffer and draws; the frame is
+#      checked for content inside the window and nothing outside it, ping/pong is
+#      answered, and the client is still connected at the end
+#
 # Logs land in a temporary directory that is printed when something fails.
 
 set -uo pipefail
@@ -163,6 +170,15 @@ else
   fail 'headless frame' 'the shm client did not draw what it asked for' "$log_dir/headless-frame.log"
 fi
 
+# 11. A real xdg-shell client ------------------------------------------------
+printf '\nphase 3 gate: xdg-shell toplevels\n\n'
+
+if gb "$log_dir/xdg-shell.log" "$repo_root/scripts/xdg-shell-gate.sh"; then
+  pass 'xdg-shell toplevel' "$(grep -a '^xdg-shell-gate: buffer' "$log_dir/xdg-shell.log" | sed 's/^xdg-shell-gate: //' | cut -c1-44)"
+else
+  fail 'xdg-shell toplevel' 'weston-simple-shm did not draw through our compositor' "$log_dir/xdg-shell.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -182,7 +198,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, phase 1 and phase 2a clauses)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a and 3 clauses)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

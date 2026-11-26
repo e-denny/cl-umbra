@@ -246,6 +246,9 @@ not four) and pool/buffer lifetime (`wl_shm_pool.destroy` may precede the buffer
 buffer keeps the mapping). Damage tracking, regions, transforms, pool resize and the scene
 graph are the 2b slice.
 
+**Status (phase 2b, not started):** damage regions with buffer age, `wl_region` objects,
+buffer scale/transform, `wl_shm_pool.resize`, `cf.scene` v0.
+
 ### Phase 3 — `cl-tinywl`, nested (3-4 weeks)
 
 **Build**
@@ -273,6 +276,26 @@ graph are the 2b slice.
 
 **Demo:** `cl-tinywl` running as a window inside the current desktop, with kitty inside
 it, moved and resized by mouse.
+
+**Status (phase 3a — xdg-shell toplevels — met; the rest of the phase is not started):**
+`xdg-shell` v1 is implemented in `cl-wayland-server/src/xdg-shell.lisp`: `xdg_wm_base`
+(ping/pong, `defunct_surfaces`), `xdg_surface` (initial configure after the first commit,
+serial bookkeeping, `ack_configure`, `invalid_serial`, `defunct_role_object`,
+`already_constructed`, window geometry, `unconfigured_buffer`), and `xdg_toplevel`
+(configure with a complete state array, title, app id, parent, min/max size with
+`invalid_size`, `move`/`resize`/`set_maximized`/`set_fullscreen` recorded and ignored until
+there is a seat, `close`). The role is a separate resource linked from `wl_surface` and
+reached through three commit hooks, so a bare `wl_surface` is unaffected (D26). Gate clause
+11: `weston-simple-shm` binds, is configured, acks our serial, commits a buffer and draws a
+window through the headless compositor; the gate checks the frame's pixels, ping/pong and
+object lifetimes (`scripts/xdg-shell-gate.sh`).
+
+Two bugs were found by the first double-buffered client, and both are decisions now: buffers
+were never released at all (the ownership flag was never cleared on attach), and releasing only
+at the next commit is a claim about our scheduling rather than the protocol's (D25). Not in
+this slice, and needed before tinywl: seats and input, the nested backend, `xdg_popup` +
+`xdg_positioner`, and any window management or layout at all — a mapped toplevel is drawn
+where its buffer offset puts it, which is (0,0).
 
 ### Phase 4 — Real hardware: DRM dumb buffers + libinput (6-8 weeks)
 

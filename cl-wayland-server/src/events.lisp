@@ -131,3 +131,24 @@ that catch *our* bugs: a wrong type is an error in this image, not in the wire."
 
 (defmethod wl-output.description ((output output) description)
   (send-event output +wl-output-description+ description))
+
+;;; ---------------------------------------------------------------------------
+;;; xdg-shell
+;;;
+;;; Two events and a ping.  xdg_toplevel.configure's state list travels as an
+;;; :array of little-endian u32s; SEND-CONFIGURE (XDG-SHELL.LISP) builds it, and
+;;; an empty list is encoded as a zero-length array, which is not the same thing
+;;; as "no configure" and must not be omitted.
+;;; ---------------------------------------------------------------------------
+
+(defmethod xdg-surface.configure ((shell xdg-surface) serial)
+  (send-event shell +xdg-surface-configure+ serial))
+
+(defmethod xdg-toplevel.configure ((toplevel xdg-toplevel) width height states)
+  (send-event toplevel +xdg-toplevel-configure+ width height states))
+
+(defmethod xdg-toplevel.close ((toplevel xdg-toplevel))
+  (send-event toplevel +xdg-toplevel-close+))
+
+(defmethod xdg-wm-base.ping ((wm-base xdg-wm-base) serial)
+  (send-event wm-base +xdg-wm-base-ping+ serial))

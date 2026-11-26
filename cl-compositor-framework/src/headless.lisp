@@ -44,13 +44,17 @@ SLOT-VALUE shows a different one."))
    (target :initarg :target :reader compositor-target)
    ;; In commit order, which is also draw order: back to front.
    (surfaces :initform nil :accessor compositor-surfaces)
+   ;; The xdg_wm_base globals this compositor created, one per client that bound
+   ;; it, newest first: the gate asks them whether the ping/pong round trip and
+   ;; the configure handshake really happened.
+   (shells :initform nil :accessor compositor-shells)
    ;; client -> the wl_output resource that client bound, for wl_surface.enter.
    (outputs :initform (make-hash-table) :reader compositor-outputs)
    (dirty-p :initform t :accessor compositor-dirty-p)
    (frame-count :initform 0 :accessor compositor-frame-count))
   (:documentation
-   "A headless compositor: a display with wl_compositor, wl_shm and wl_output, a
-pixman target, and the surfaces committed to it."))
+   "A headless compositor: a display with wl_compositor, wl_shm, wl_output and
+xdg_wm_base, a pixman target, and the surfaces committed to it."))
 
 (defun send-output-events (output width height)
   "The initial events of the headless output, done last (docs/protocol-layer.md §8)."
@@ -66,7 +70,8 @@ pixman target, and the surfaces committed to it."))
                                       (runtime-dir (uiop:getenv "XDG_RUNTIME_DIR"))
                                       (background #xFF000000)
                                       (reactor nil))
-  "A display offering wl_compositor, wl_shm and wl_output, rendering into memory.
+  "A display offering wl_compositor, wl_shm, wl_output and xdg_wm_base, rendering
+into memory.
 
 Returns the compositor; the display is `(compositor-display ...)`, and
 `(render-frame ...)` draws the current state."
@@ -105,6 +110,14 @@ Returns the compositor; the display is `(compositor-display ...)`, and
                                                       (compositor-outputs compositor))
                                              resource)
                                        (send-output-events resource width height)))
+    (srv:add-global display
+                               :interface "xdg_wm_base"
+                               :version 1
+                               :resource-class 'srv:xdg-wm-base
+                               :bind (lambda (resource)
+                                       (setf (compositor-shells compositor)
+                                             (cons resource
+                                                   (compositor-shells compositor)))))
     (render:fill-target (compositor-target compositor) background)
     compositor))
 
@@ -160,9 +173,20 @@ allows (docs/framework.md §3)."
     (dolist (surface (compositor-surfaces compositor))
       (when (render:render-surface target surface)
         (enter-surface compositor surface)
+        ;; The pixels are in the target now, so the client may have its buffer
+        ;; back -- before the frame callback, so a client that redraws on the
+        ;; callback already knows which buffer is free.  A double-buffered client
+        ;; deadlocks without this (D25).
+        (srv:release-surface-buffer surface)
         (srv:surface-presented surface)))
     (incf (compositor-frame-count compositor))
     (setf (compositor-dirty-p compositor) nil)
+    ;; A client that closed its window leaves a destroyed surface behind.  Drop it
+    ;; here, not at destroy time: the destroy happens mid-dispatch, while this
+    ;; list is being walked by nobody -- but the list is also the draw order, and
+    ;; a session must not accumulate tombstones (D26).
+    (setf (compositor-surfaces compositor)
+          (remove-if #'srv:resource-destroyed-p (compositor-surfaces compositor)))
     target))
 
 (defun write-frame-png (compositor path)

@@ -433,7 +433,12 @@ libwayland for behaviour not defined in the spec" — is adopted here without re
 | `wl_display.error` | signals a Lisp condition (`display-error`); the connection is finished, as in libwayland, rather than left half-usable |
 | event to an unknown object | refused (`unknown-object`), not ignored: an event for an object we do not have is a protocol mismatch worth seeing |
 | initial `xdg_toplevel.configure` | size 0×0, states empty, before first buffer commit |
-| `xdg_surface.configure` | only after the initial commit |
+| configure ordering | the role's configure (`xdg_toplevel.configure`) first, then `xdg_surface.configure` with the serial that ends the sequence |
+| configure serials | from the display-wide monotonic counter, recorded on the `xdg_surface` until acked; `ack_configure` consumes its serial *and every older one*, and any other serial is `invalid_serial` |
+| `xdg_surface.configure` | only after the initial commit, never at `get_toplevel` time |
+| ping serials | the same counter as configures, so a pong cannot answer a configure by accident |
+| role destruction | `xdg_toplevel` may die first and the surface unmaps; `xdg_surface` before its role, or `xdg_wm_base` before its surfaces, are protocol errors (`defunct_role_object`, `defunct_surfaces`) |
+| `wl_surface.attach` of a buffer before the initial ack | `xdg_surface.error.unconfigured_buffer`, never a best guess |
 | `wl_pointer.frame` | one frame per input event batch, always last |
 
 Regression protection: recorded `WAYLAND_DEBUG=1` traces from a real compositor (sway or

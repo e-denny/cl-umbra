@@ -661,8 +661,93 @@ is repainted.
 - The flush is load-bearing: the read loop flushes before the idle runs, so a `done` queued by
   the render would otherwise sit in the buffer while the client waited forever. Found by the
   gate client hanging; fixed by flushing after presenting.
-- Releasing a replaced buffer at the next commit is safe *because* rendering happens before the
-  next cycle's commits; a buffer is never released while a frame that used it is still queued.
+- Releasing a replaced buffer at the next commit was safe *because* rendering happens before
+  the next cycle's commits, but it is not enough for a real client: see D25, which moved the
+  release to presentation after `weston-simple-shm` deadlocked on it.
 - A real output clock (timer for headless, page flip for DRM) replaces the idle without
   touching the renderer or the surface objects, which is why the renderer never learned about
   time.
+
+---
+
+## D25 — A buffer is released when the frame using it is presented
+
+**Status:** accepted (corrects D24's release rule)
+
+**Context.** D24 released a *replaced* buffer at the next commit. The phase-2a gate client
+attaches one buffer, commits once and exits, so nothing noticed. The first double-buffered
+client — `weston-simple-shm`, in phase 3 — printed `Both buffers busy at redraw(). Server bug?`
+after two frames and then hung, because it waits for `wl_buffer.release` before redrawing into a
+buffer it already committed, and we never sent one.
+
+The root cause was subtler than the timing rule: `released-p` started true ("the client has
+it") and was never cleared, because nothing claimed a buffer on attach. Every `release` call
+was therefore a no-op, including the one D24 believed it was making.
+
+**Decision.** `wl_surface.attach` with a non-nil buffer *claims* it (`claim-shm-buffer`: the
+client no longer owns it). The compositor releases the buffer it drew **after compositing that
+frame into the target**, before the frame callback fires. A buffer replaced by a later commit
+before it was presented is still released at that commit, so a burst of commits in one batch
+cannot strand one.
+
+**Evidence.** `./scripts/xdg-shell-gate.sh`: `weston-simple-shm` now runs for as long as the
+gate pumps it, drawing 570 distinct colours, and exits only when signalled. The phase-2a pixel
+gate (`./scripts/headless-frame.sh`) still passes unchanged.
+
+**Consequences.**
+
+- Release is no longer tied to "the next commit", which was a claim about *our* scheduling; it
+  is tied to presentation, which is the protocol's own rule and survives a real output clock.
+- Because rendering copies into our own target synchronously, releasing immediately after the
+  copy is correct; a GPU renderer with queued frames must keep the buffer until the fence
+  signals. That is written down here so the change is deliberate when the renderer changes.
+- `shm-buffer-released-p` now means what its name says at every moment, and the double-release
+  guard still holds (a released buffer's second release is a no-op).
+
+---
+
+## D26 — xdg-shell is offered at version 1, with roles linked by three commit hooks
+
+**Status:** accepted
+
+**Context.** Phase 3 needs `xdg_wm_base`, `xdg_surface` and `xdg_toplevel`. Two design questions
+had to be answered before writing them: how much of the interface to advertise, and where the
+role state lives relative to `wl_surface`.
+
+**Decision.**
+
+1. **Version 1 only.** The generated schema knows v7; we advertise v1 because v1 is what we
+   implement. Advertising v4+ would promise `xdg_toplevel.configure_bounds` and v5+ would
+   promise `wm_capabilities`, and a compositor that stays silent about an event it advertised
+   is worse than one that never offered it. Bumping the version is a slice of its own: the
+   event must be sent, and the version gate in `send-event` will not lie about it.
+2. **Roles are separate resources, linked from `wl_surface`.** `xdg_surface` (the configure
+   handshake) and `xdg_toplevel` (the window) are ordinary resources; the `wl_surface` keeps a
+   `surface-shell-surface` pointer. The commit path asks the role three questions through
+   generic functions with do-nothing defaults: `surface-shell-check-commit` (may refuse: a
+   buffer before the first ack), `surface-shell-committed` (produces what the commit implies:
+   the initial configure) and `surface-shell-lost` (the surface died under the role). A bare
+   `wl_surface`, which is what every phase-2a client creates, runs none of it.
+3. **What is absent says so.** `xdg_popup`, `xdg_positioner` and decoration negotiation have no
+   methods, so the dispatch layer answers `wl_display.error` with `implementation` — the same
+   honest "not built yet" the plan asks for.
+4. **Policy hooks exist but do nothing yet.** `close-toplevel` and `set-toplevel-activated`
+   are the two things a window manager will call; with no seat and no layout they are unused by
+   the compositor, and the configure they would send carries a complete state array computed
+   from scratch, never patched.
+5. **The compositor prunes destroyed surfaces from its draw list** at render time rather than
+   at destroy time, because destroy happens mid-dispatch while the list is owned by the frame.
+
+**Consequences.**
+
+- Client-chosen ids for `xdg_surface`/`xdg_toplevel` are `delete_id`-ed like any other, and the
+  objects unlink themselves from the surface and the `wm_base` when destroyed, so no id can be
+  reached after it is gone.
+- The configure handshake is enforced, not decorative: `unconfigured_buffer`,
+  `invalid_serial`, `already_constructed`, `defunct_role_object` and `defunct_surfaces` are all
+  reachable and all tested (`wayland.test.server`, 8 tests).
+- `xdg_toplevel.configure` carries an empty state array and 0×0 on the initial configure,
+  matching `docs/protocol-layer.md` §8; a real client chooses its own size and the gate asserts
+  that it did.
+- Popups will arrive with a slice that can also position and grab them; a positioner that
+  positions nothing would be the lie this decision avoids.

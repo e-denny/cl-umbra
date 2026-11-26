@@ -86,12 +86,28 @@ unmaps, so a buffer that exists has a mapping."
     (+ (* stride (1- height)) (* width 4))))
 
 (defun release-shm-buffer (buffer)
-  "Tell the client it may reuse BUFFER's pixels.  Never twice."
+  "Tell the client it may reuse BUFFER's pixels.  Never twice per attachment.
+
+RELEASED-P starts true: a buffer nobody attached is the client's.  ATTACH makes
+it the compositor's (CLAIM-SHM-BUFFER clears the flag), and this function is the
+one place that gives it back."
   (unless (resource-destroyed-p buffer)
     (unless (shm-buffer-released-p buffer)
       (setf (shm-buffer-released-p buffer) t)
       (setf (shm-buffer-in-use-p buffer) nil)
       (wl-buffer.release buffer)))
+  buffer)
+
+(defun claim-shm-buffer (buffer)
+  "BUFFER is being attached: from now until RELEASE-SHM-BUFFER it is ours.
+
+Without this the compositor never releases anything: the flag would still say
+that the client has a buffer we are drawing from, the release would be a no-op,
+and a double-buffered client would wait forever for a wl_buffer.release it can
+never receive (phase 3 found exactly that with weston-simple-shm)."
+  (unless (resource-destroyed-p buffer)
+    (setf (shm-buffer-released-p buffer) nil
+          (shm-buffer-in-use-p buffer) t))
   buffer)
 
 ;;; ---------------------------------------------------------------------------

@@ -58,7 +58,7 @@ The scripts go through `wayland.test.runner`, which names the eight suites inste
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 155 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 163 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -77,6 +77,14 @@ other end:
   budget, a half-written message kept as a partial tail, 50 connect/disconnect cycles with a
   flat descriptor count, and backpressure: queue more than a socket buffer, check the interest
   dropped to write-only, drain it, check reading came back.
+- **The shell's refusals.** Eight `xdg-shell` tests drive the same raw peer through the v1
+  handshake and through every way a client can get it wrong: a second role, a second
+  `xdg_surface` on one `wl_surface`, a buffer before the initial ack, an ack for a serial we
+  never sent, both destruction-order errors, and a request we deliberately do not implement
+  (positioners). Two more follow the happy path: map, frame callback after presentation rather
+  than at commit, `attach(nil)` unmapping, and the buffer coming back; and a ping answered with
+  its own serial. A test that found nothing to read also found something: `wl_surface.attach`
+  is opcode 1, not 0 — opcode 0 is `destroy`.
 
 Those fixtures bind `wayland.server:*log-level*` to `:warn`: the assertions are the evidence,
 and 50 connect/disconnect log lines are not.
@@ -138,11 +146,25 @@ Phase 2a (shared memory and the first pixels) adds one clause:
     frame callback and commits. The driver runs the compositor's reactor until the client
     exits — which it only does when the callback arrives, i.e. after the frame is presented —
     then checks nine pixels: the pattern, its four edges and the background. It also writes a
-    PNG and validates its chunks and CRCs. `weston-simple-shm` is not the client here: it
-    needs `xdg-shell`, which arrives with the shell state machines, and a gate is not the
-    place to pretend otherwise.
+    PNG and validates its chunks and CRCs. `weston-simple-shm` is not the client here -- it
+    needs `xdg-shell`, and the place for a client that needs a window is clause 11.
 
-All ten clauses pass. Two details worth knowing: the protocol clause
+Phase 3 (xdg-shell toplevels) adds one clause:
+
+11. **A real xdg-shell client** (`scripts/xdg-shell-gate.sh`, `scripts/xdg-shell-gate.lisp`).
+    `weston-simple-shm` -- the client the phase-2 plan always wanted, with its own libwayland
+    and its own idea of a window -- binds `xdg_wm_base`, creates an `xdg_surface` and an
+    `xdg_toplevel`, commits without a buffer, receives our `xdg_toplevel.configure` (0×0, empty
+    states) and `xdg_surface.configure`, acks the serial, attaches a shm buffer and draws. The
+    driver asserts: a configure was sent *and acked*; the toplevel mapped; a title arrived; the
+    initial configure was 0×0 with no states; `xdg_wm_base.ping` we sent came back as `pong`;
+    the client is still connected (no `wl_display.error` in either direction); the frame has
+    more than a thousand drawn pixels and more than eight distinct colours inside the window
+    rect and none outside it; and teardown leaves no clients or objects. A PNG is written and
+    validated. The client is a redraw loop, so the gate *ends* it with `SIGTERM` and checks
+    that it stopped -- "exits 0 by itself" would be a claim about weston, not about us.
+
+All eleven clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs
@@ -238,7 +260,7 @@ scale, pool resize), and anything that needs `xdg-shell`.
 | server | `wayland-info` | every advertised global, version and event is valid — **passes** (`scripts/wayland-info-server.sh`) |
 | server | our own C probe (`tests/c-client`) | bind, destroy, re-bind across versions; `delete_id` at the right time — **passes** (`scripts/c-probe.sh`) |
 | server | the peer fuzzer | no crash, wedge, leak or malformed reply under 10⁶ adversarial connections — **passes** (`scripts/fuzz-client.sh`) |
-| server | `weston-simple-shm` | buffer attach/commit/release, damage, frame callbacks |
+| server | `weston-simple-shm` | buffer attach/commit/release, damage, frame callbacks, `xdg-shell` v1 -- **passes** (`scripts/xdg-shell-gate.sh`) |
 | server | `kitty` | keyboard, clipboard-adjacent paths, resize, popups |
 | server | GTK4 app | subsurfaces, buffer scale, fractional scale, decoration negotiation |
 | server | Qt app | buffer formats, `xdg_popup`, activation |

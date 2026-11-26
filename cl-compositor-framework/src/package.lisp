@@ -58,9 +58,9 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:compositor-width
    #:compositor-height
    #:compositor-surfaces
+   #:compositor-shells
    #:compositor-target
    #:compositor-frame-count
-   #:compositor-target
    #:write-frame-png
    #:cf-surface
    #:cf-compositor))
@@ -77,6 +77,7 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
                 #:compositor-width
                 #:compositor-height
                 #:compositor-surfaces
+                #:compositor-shells
                 #:compositor-frame-count
                 #:cf-surface
                 #:cf-compositor)
@@ -105,6 +106,7 @@ docs/framework.md §1 follow.")
    #:compositor-width
    #:compositor-height
    #:compositor-surfaces
+   #:compositor-shells
    #:compositor-frame-count
    #:write-png
    #:write-frame-png

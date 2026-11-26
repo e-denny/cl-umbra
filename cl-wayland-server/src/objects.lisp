@@ -190,7 +190,11 @@ mode on bind so that wayland-info has something true to print."))
    (committed-p :initform nil :accessor surface-committed-p)
    ;; The wl_compositor resource that created this surface.  A framework
    ;; subclasses the compositor and puts its own state behind this.
-   (owner :initform nil :accessor surface-owner))
+   (owner :initform nil :accessor surface-owner)
+   ;; The shell object that gave this surface a role (an XDG-SURFACE today), or
+   ;; NIL for a bare surface with no role at all.  A wl_surface has at most one,
+   ;; and the shell object -- not this slot -- is where the role's state lives.
+   (shell-surface :initform nil :accessor surface-shell-surface))
   (:documentation
    "wl_surface: the pending/current double buffer of everything a client draws.
 
@@ -198,7 +202,101 @@ Phase 2a implements the part a shm client needs -- attach, damage, frame, commit
 destroy -- and stores the opaque/input regions without acting on them: with no
 input and an opaque-by-construction target, ignoring them is correct, not lazy.
 Scale, transform and buffer-scale are later slices, and a version-1 binding means
-a client never sends them."))
+a client never sends them.
+
+SHELL-SURFACE is the one hook a role needs: when set, the commit path calls the
+role's hooks (see SURFACE.LISP), and the role object owns the protocol state
+machine.  A bare surface -- everything phase 2a's clients create -- has none, and
+none of the role checks run."))
+
+;;; ---------------------------------------------------------------------------
+;;; xdg-shell, version 1
+;;;
+;;; Three objects, three jobs:
+;;;
+;;;   XDG-WM-BASE    the global; makes xdg_surfaces and remembers them so that
+;;;                  destroying it early can be called what it is (defunct).
+;;;   XDG-SURFACE    the configure/ack handshake shared by every role: serials
+;;;                  sent, serials acked, whether a buffer was ever legal yet.
+;;;   XDG-TOPLEVEL   the window: title, app id, size hints, requested states, and
+;;;                  the configure that tells the client what to draw.
+;;;
+;;; The role is a pointer (XDG-SURFACE-ROLE -> toplevel), not a class change: the
+;;; wl_surface is the same object before and after, and docs/architecture.md §4's
+;;; CHANGE-CLASS idea only pays off once roles share a class hierarchy worth
+;;; changing into.  Popups and positioners are deliberately absent.
+;;; ---------------------------------------------------------------------------
+
+(defclass xdg-wm-base (resource)
+  ((shell-surfaces :initform nil :accessor xdg-wm-base-shell-surfaces)
+   ;; Serials of pings sent and not yet ponged, newest first.
+   (pending-pings :initform nil :accessor xdg-wm-base-pending-pings)
+   (ping-count :initform 0 :accessor xdg-wm-base-ping-count)
+   (pong-count :initform 0 :accessor xdg-wm-base-pong-count))
+  (:documentation
+   "xdg_wm_base: the global a client binds to make windows.
+
+Its only state is bookkeeping the protocol asks for: the live xdg_surfaces (so
+that destroying it early is reported as defunct_surfaces) and the pings it is
+waiting on (so that a pong can be matched to a ping)."))
+
+(defclass xdg-surface (resource)
+  ((surface :initarg :surface :initform nil :accessor xdg-surface-surface)
+   (wm-base :initarg :wm-base :initform nil :accessor xdg-surface-wm-base)
+   ;; :TOPLEVEL once a role object exists; the role object itself in ROLE.
+   (role :initform nil :accessor xdg-surface-role)
+   (role-name :initform nil :accessor xdg-surface-role-name)
+   ;; The handshake.  CONFIGURED-P: a configure has been sent.  ACKNOWLEDGED-P:
+   ;; one has been acked, which is the first moment a buffer is legal.
+   (configured-p :initform nil :accessor xdg-surface-configured-p)
+   (acknowledged-p :initform nil :accessor xdg-surface-acknowledged-p)
+   (configure-serial :initform nil :accessor xdg-surface-configure-serial)
+   ;; Serials sent and not yet consumed by ACK-CONFIGURE, newest first.
+   (pending-serials :initform nil :accessor xdg-surface-pending-serials)
+   (last-acked-serial :initform nil :accessor xdg-surface-last-acked-serial)
+   (ack-count :initform 0 :accessor xdg-surface-ack-count)
+   (window-geometry :initform nil :accessor xdg-surface-window-geometry)
+   (mapped-p :initform nil :accessor xdg-surface-mapped-p)
+   ;; NIL once the wl_surface it was created for is gone: the role outliving its
+   ;; surface makes every configure a no-op rather than a write to a dead id.
+   (live-p :initform t :accessor xdg-surface-live-p))
+  (:documentation
+   "xdg_surface: the configure/ack_configure handshake, independent of the role.
+
+A client's first commit (no buffer) is answered with a configure; it must ack
+that serial before attaching a buffer.  PENDING-SERIALS is what makes a stale or
+invented ack a protocol error instead of a shrug."))
+
+(defclass xdg-toplevel (resource)
+  ((shell-surface :initarg :shell-surface :initform nil
+                  :accessor xdg-toplevel-shell-surface)
+   (title :initform nil :accessor xdg-toplevel-title)
+   (app-id :initform nil :accessor xdg-toplevel-app-id)
+   (parent :initform nil :accessor xdg-toplevel-parent)
+   (min-width :initform 0 :accessor xdg-toplevel-min-width)
+   (min-height :initform 0 :accessor xdg-toplevel-min-height)
+   (max-width :initform 0 :accessor xdg-toplevel-max-width)
+   (max-height :initform 0 :accessor xdg-toplevel-max-height)
+   ;; What the client asked for.  Phase 3 has no seat and no output policy, so
+   ;; these are recorded and ignored; the configure states are computed by the
+   ;; compositor, never echoed back from here.
+   (maximized-p :initform nil :accessor xdg-toplevel-maximized-p)
+   (fullscreen-p :initform nil :accessor xdg-toplevel-fullscreen-p)
+   (minimized-p :initform nil :accessor xdg-toplevel-minimized-p)
+   ;; The last configure, for tests and for the REPL (D14).
+   (configure-count :initform 0 :accessor xdg-toplevel-configure-count)
+   (configure-width :initform 0 :accessor xdg-toplevel-configure-width)
+   (configure-height :initform 0 :accessor xdg-toplevel-configure-height)
+   (configure-states :initform nil :accessor xdg-toplevel-configure-states)
+   (mapped-p :initform nil :accessor xdg-toplevel-mapped-p)
+   (closed-p :initform nil :accessor xdg-toplevel-closed-p))
+  (:documentation
+   "xdg_toplevel: a window.
+
+TITLE, APP-ID and the size hints are what a taskbar or a rule engine reads; the
+configure event is what the client reads.  Nothing here decides layout: with a
+headless output and no scene graph, a mapped toplevel is drawn where its buffer
+offset puts it, and that is a documented limit, not an oversight."))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Shared memory

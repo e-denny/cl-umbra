@@ -169,6 +169,9 @@ the captured frame matches, pixel for pixel.
 
 **Gate:** `weston-simple-shm` renders into the headless backend and the PNG matches the
 reference within tolerance; surface-state trace tests pass; malicious-pool tests pass.
+Done in phase 3a for the first half (a real client draws through us; the pixel assertions are
+structural rather than a golden image, which arrives with 2b's damage work); surface-state
+trace tests and the malicious-pool cases are in `wayland.test.server`.
 
 **Demo:** a client's pixels in a PNG, produced with no libwayland in the process.
 
@@ -176,12 +179,25 @@ reference within tolerance; surface-state trace tests pass; malicious-pool tests
 
 ## Phase 3 — `cl-tinywl`, nested (3-4 weeks)
 
+**Status: phase 3a landed (xdg-shell toplevels).** The v1 state machine is in
+`cl-wayland-server/src/xdg-shell.lisp`; `cf.types.xdg-shell` (map/unmap events, layout,
+activation policy) is still to come. Gate clause 11: `weston-simple-shm` draws a window through
+our headless compositor (`./scripts/xdg-shell-gate.sh`). Seats, the nested backend, tinywl and
+popups are open below.
+
 `cf.types.xdg-shell` (core)
-- [ ] `xdg_wm_base` ping/pong; error conditions
-- [ ] `xdg_surface.get_toplevel`, initial configure after initial commit, `ack_configure`
-- [ ] `xdg_toplevel` configure size/states, title, app_id, min/max, activated, close
-- [ ] `move`/`resize` requests with serial validation
+- [x] `xdg_wm_base` ping/pong; error conditions (`role`, `defunct_surfaces`)
+- [x] `xdg_surface.get_toplevel`, initial configure after initial commit, `ack_configure`
+      (serial bookkeeping, `invalid_serial`, `unconfigured_buffer`, `already_constructed`,
+      `defunct_role_object`)
+- [x] `xdg_toplevel` configure size/states, title, app_id, min/max, close
+      (`configure_bounds`/`wm_capabilities` wait for a version bump; the global is v1)
+- [ ] `move`/`resize` requests with serial validation (accepted, validated for the enum, and
+      ignored: no seat yet)
+- [ ] `set_activated` driving a configure with the `activated` state (the hook exists:
+      `set-toplevel-activated`; nothing calls it without focus)
 - [ ] basic `xdg_popup` + `xdg_positioner` (needed by menus; polish in phase 6)
+- [ ] `cf.types.xdg-shell`: map/unmap events, layout placement, activation policy
 
 `cf.types.seat`
 - [ ] capabilities; keyboard/pointer objects; enter/leave; frame events

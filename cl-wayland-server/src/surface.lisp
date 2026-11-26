@@ -45,6 +45,45 @@ current time, which is right for a compositor that renders synchronously.")
   (:method ((surface surface))
     (fire-frame-callbacks surface (frame-timestamp))))
 
+;;; ---------------------------------------------------------------------------
+;;; Shell role hooks
+;;; ---------------------------------------------------------------------------
+;;
+;; A wl_surface draws; what it *is* -- a toplevel, a popup, a layer surface -- is
+;; a role, and in this server the role is a separate protocol object linked from
+;; SURFACE-SHELL-SURFACE.  Three hooks are all the commit path needs to offer:
+;;
+;;   CHECK-COMMIT  before the pending state becomes current: the role may refuse
+;;                 the commit (xdg_surface: a buffer before the first ack).
+;;   COMMITTED     after it: the role may produce events the commit implies
+;;                 (xdg_surface: the initial configure).
+;;   LOST          the surface died under the role, so the role must stop
+;;                 pointing at it.
+;;
+;; The defaults do nothing, so a bare wl_surface keeps working exactly as it did
+;; in phase 2a, and a role only pays for the hooks it defines.
+
+(defgeneric surface-shell-check-commit (shell-surface surface)
+  (:documentation
+   "SURFACE is committing; SHELL-SURFACE may reject it with a protocol error.")
+  (:method (shell-surface surface)
+    (declare (ignore shell-surface surface))
+    nil))
+
+(defgeneric surface-shell-committed (shell-surface surface damage)
+  (:documentation
+   "SURFACE's pending state became current; SHELL-SURFACE sees the commit.")
+  (:method (shell-surface surface damage)
+    (declare (ignore shell-surface surface damage))
+    nil))
+
+(defgeneric surface-shell-lost (shell-surface surface)
+  (:documentation
+   "SURFACE is being destroyed while SHELL-SURFACE still describes it.")
+  (:method (shell-surface surface)
+    (declare (ignore shell-surface surface))
+    nil))
+
 (defun frame-timestamp ()
   "Milliseconds, wrapped at 32 bits: the unit wl_callback.done carries."
   (logand (round (* 1000 (monotonic-now))) #xFFFFFFFF))
@@ -82,7 +121,13 @@ wl_display.delete_id and the id becomes reusable."
   "Finish the surface's buffers and callbacks, then let the pool go.
 
 A callback that will never fire is destroyed rather than leaked: the client's id
-comes back, and the client's event loop stops waiting for it."
+comes back, and the client's event loop stops waiting for it.  A shell role that
+describes this surface is told it has lost it, so that no later request can write
+to an id that no longer exists."
+  (let ((shell (surface-shell-surface surface)))
+    (when shell
+      (setf (surface-shell-surface surface) nil)
+      (surface-shell-lost shell surface)))
   (release-surface-buffer surface)
   (dolist (callback (append (surface-committed-callbacks surface)
                             (surface-pending-frame-callbacks surface)))
@@ -122,6 +167,10 @@ comes back, and the client's event loop stops waiting for it."
 ;;; ---------------------------------------------------------------------------
 
 (defmethod wl-surface.attach ((surface surface) buffer x y)
+  ;; Attaching transfers the pixels to us until we present (and release) them;
+  ;; an attach of NIL is an unmap and claims nothing.
+  (when buffer
+    (claim-shm-buffer buffer))
   (setf (surface-pending-attach-p surface) t
         (surface-pending-buffer surface) buffer
         (surface-pending-x surface) (or x 0)
@@ -161,7 +210,12 @@ old one cannot be mistaken for the new one's; then the frame callbacks move to
 the committed set, because a callback committed *with* a buffer must not fire
 before that buffer was presented."
   (let ((attached-p (surface-pending-attach-p surface))
-        (damage (nreverse (surface-pending-damage surface))))
+        (damage (nreverse (surface-pending-damage surface)))
+        (shell (surface-shell-surface surface)))
+    ;; The role gets its veto before anything becomes visible: an xdg_surface
+    ;; refuses a buffer attached before its first configure was acked.
+    (when shell
+      (surface-shell-check-commit shell surface))
     (when attached-p
       (let ((old (surface-current-buffer surface))
             (new (surface-pending-buffer surface)))
@@ -171,8 +225,10 @@ before that buffer was presented."
               (surface-mapped-p surface) (and new t)
               (surface-pending-attach-p surface) nil
               (surface-pending-buffer surface) nil)
-        ;; The compositor rendered the old frame in an earlier cycle (rendering is
-        ;; per cycle, not per commit), so it is safe to say so now.
+        ;; A buffer replaced without ever being presented (two commits in one
+        ;; batch) is released here, or the client would wait for it forever.  A
+        ;; buffer that *was* presented has been released already and this is a
+        ;; no-op.
         (when (and old (not (eq old new)))
           (release-shm-buffer old))))
     (setf (surface-pending-damage surface) nil)
@@ -186,6 +242,10 @@ before that buffer was presented."
                  (resource-id surface)
                  (surface-mapped-p surface)
                  (length damage))
+    ;; The role's turn, before the compositor's: a configure has to be queued
+    ;; before the render that might satisfy it.
+    (when shell
+      (surface-shell-committed shell surface damage))
     (surface-committed surface damage)
     surface))
 
