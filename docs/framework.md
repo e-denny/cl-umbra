@@ -191,7 +191,9 @@ space, a visibility flag and a parent.
   and its surface's `attach` offset are *different* things and are added at draw time: the
   compositor says where the window is, the client says where its content sits inside it. A
   surface with no shell role keeps the origin of the scene and is drawn at its attach offset —
-  the phase-2a behaviour, unchanged.
+  the phase-2a behaviour, unchanged — **except** a surface a client has named as the pointer's
+  image (`wl_pointer.set_cursor`), which is never drawn: it is a cursor picture, not a window,
+  and a roleless surface given a node puts it at the output's origin for good (D40).
 - **Stacking** is the order nodes were placed in, not the order they committed in: committing
   is not raising (D31.3). `scene:node-raised` is the call a click-to-raise policy makes.
 - **Placement** is a policy hook, not a framework rule:

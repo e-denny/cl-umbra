@@ -1421,3 +1421,70 @@ for pointer lock — neither is in the plan's phase 3). The general lesson: **a 
 reader is a bug report waiting to be written.** This one was exported, documented in the package
 and read by nobody, which is exactly how a backend ends up drawing a second cursor because there
 was no supported way not to.
+
+## D40 — A surface a client names as its cursor image is never drawn, in either order
+
+**Status:** accepted
+
+**Context.** The fourth manual test, of the build with D38 and D39 in it, found two pointer
+images again — but a different pair: the parent's cursor, which follows the mouse, and a *second*
+one stuck in the nested window's top-left corner that changed shape as the pointer crossed the
+inner terminal's borders (an arrow in the body, a left-edge resize cursor on the border). A
+shape that changes when the *client* changes it is the client's own cursor image: weston-terminal
+installs one with `wl_pointer.set_cursor`.
+
+A cursor surface has no shell role, so it takes the framework's roleless path, which exists so
+that phase 2a could draw a bare `wl_surface`: a scene node at the scene origin, drawn where the
+client's attach offset says. `cursor-surface-p` was supposed to keep cursor surfaces off that
+path, and it asks the seat a narrow question — *is this surface the pointer's image now?* — which
+leaves two holes.
+
+1. **Ordering.** `wl_pointer.set_cursor`'s image takes effect at the surface's *next* commit, so
+   both "name then commit" and "commit then name" are legal. In the second order the commit sees
+   a surface that is not yet anybody's cursor, gets a node, and keeps it: the image then sits at
+   the output's origin and updates whenever the client changes it. That is the stray cursor.
+2. **Nothing could take a node back.** `ensure-scene-node` gave a roleless surface a node but
+   never recorded it in `SURFACE-SCENE-NODE` — only `on-new-toplevel` did that, and that runs for
+   shell surfaces. A roleless node was therefore invisible to everything that finds a surface's
+   node by looking at the surface: `prune-surfaces` could not remove it when the surface unmapped
+   (a latent leak of nodes for bare surfaces, found while fixing this), and a cursor image that
+   had been given one could not be withdrawn.
+
+**Decision.**
+
+1. **A roleless surface records its node.** `ensure-scene-node` sets `SURFACE-SCENE-NODE` for the
+   bare-surface case as well, so "the node this surface is drawn through" is a fact for every
+   surface that has one. A consequence worth stating: a node whose surface unmaps is now removed,
+   which is what `prune-surfaces` always meant to do.
+2. **Being named as a cursor image is durable.** A new hook, `WAYLAND.SERVER:SEAT-CURSOR-CHANGED`
+   (default: do nothing, the `seat-focus-changed` pattern), is called by `wl_pointer.set_cursor`.
+   The framework's method sets `SURFACE-POINTER-IMAGE-P` for good and withdraws any node the
+   surface already has. The protocol gives a surface no way back to another role, so a mark that
+   never clears is the honest model.
+3. **Two guards, two questions.** `cursor-surface-p` keeps answering "is it the cursor *now*"
+   (cheap, and it stops the node being created at all in the ordinary order); the flag answers
+   "has any client ever named it". `ensure-scene-node` refuses on either.
+4. **Client cursor images are still not drawn** — phase 5. What a person sees is the
+   compositor's own cursor, or, in a nested session, the parent's (D39). This decision is only
+   about never drawing one by accident, at the wrong place.
+
+**Evidence.** A probe with a real headless compositor and a hand-made cursor surface, in both
+orders: committed-then-named created a node (`node T`, no flag) before the fix, and after it the
+same sequence leaves `node NIL` with the flag set, while named-then-committed never creates one.
+The unit test `a-surface-named-as-the-pointer-image-is-never-drawn` asserts the node *slot* rather
+than the return value of the creating call — "the commit created nothing" and "the surface is
+still drawn through the node it had" are different states — and deleting the withdrawal makes it
+fail, which is how the assertion earned its place. Gate clause 16 grew by two checks in both runs:
+a real `weston-terminal` names two cursor surfaces out of five, and none of them has a scene node.
+35 checks headless, 42 nested, 77 in two runs; the gate is 16/16 and the suite is 215 tests in 10
+suites.
+
+**Consequences.** The stray cursor is gone for both orderings, and it goes away on the next
+`set_cursor` in a session that already has one. Bare surfaces' nodes are now pruned when they
+unmap, which is a behaviour change worth knowing when reading the shm gate's expectations
+(`surface-scene-node` is no longer NIL for a roleless surface). What this does not do: draw a
+client's cursor image (phase 5 — it needs the hotspot the seat already records and the
+`wl_surface`-as-cursor path this decision deliberately keeps out of the scene), or make a nested
+session able to change the parent's cursor shape. The lesson, recorded because it took four manual
+tests to surface: **a role object whose state is only ever added is a state machine missing its
+exit, and a guard that asks "is it X now" cannot defend a surface that will become X later.**

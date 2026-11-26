@@ -524,6 +524,7 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:touch-seat
    #:touch-surface
    #:seat-focus-changed
+   #:seat-cursor-changed
    #:set-keyboard-focus
    #:set-pointer-focus
    #:send-key-event

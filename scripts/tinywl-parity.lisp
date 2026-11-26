@@ -575,6 +575,19 @@ of lines of protocol."
                   "the pointer image at (~D, ~D) is #x~8,'0X: ~:[drawn by this session~;left to the parent~]"
                   x y (cf:frame-pixel *inner* x y) (and *parent* t)))
 
+         ;; 10b. A client's cursor image is a surface the client names, and naming it
+         ;;      keeps it out of the scene for good (D40).  The terminal started in
+         ;;      clause 8 sets one as soon as the pointer is over it, which the park
+         ;;      above arranged -- so this is about a real client, not a stub.
+         (let* ((surfaces (cf:compositor-surfaces *inner*))
+                (images (remove-if-not #'cf.backend.headless:surface-pointer-image-p
+                                       surfaces))
+                (drawn (remove-if-not #'cf:surface-scene-node images)))
+           (check images "a client named a cursor surface (~D of ~D surface(s))"
+                  (length images) (length surfaces))
+           (check (null drawn) "and none of it is drawn (~D with a scene node)"
+                  (length drawn)))
+
          ;; 11. Alt+Esc asks the clients to close and stops the loop.
          ;;
          ;; Every client is connected *before* the quit: nothing before this point

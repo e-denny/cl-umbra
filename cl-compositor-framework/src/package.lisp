@@ -232,6 +232,7 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:on-pointer-button
    #:window-node-p
    #:surface-scene-node
+   #:surface-pointer-image-p
    #:compositor-grab
    #:compositor-keybindings
    #:compositor-consumed-keys

@@ -240,6 +240,62 @@ into it; it failed 100% of the time before targets moved to foreign memory (D35)
     (ok (= #xFF000000 (cf:frame-pixel compositor 6 8))
         "the arrow's white pixel is background when the cursor is hidden")))
 
+;;; ---------------------------------------------------------------------------
+;;; A client's cursor image is not a window
+;;;
+;; A cursor surface has no shell role, so it takes the roleless path: a node at the
+;; scene origin, drawn where the client's attach offset says, hit-testable and first
+;; in stack order.  It must not be: that is a stray cursor stuck at the output's
+;; origin, updating whenever the client changes it (D40).
+
+(defun cursor-image-surface (&key (width 16) (height 16))
+  "A cf-surface with a buffer and no role: what a client's cursor image looks like."
+  (let ((surface (make-instance 'cf.backend.headless:cf-surface
+                                :client nil :id 9 :interface nil :version 1))
+        (buffer (make-instance 'srv:shm-buffer
+                               :pool nil :offset 0
+                               :width width :height height
+                               :stride (* 4 width) :format 0)))
+    (setf (srv:surface-current-buffer surface) buffer
+          (srv:surface-mapped-p surface) t)
+    surface))
+
+(defun node-for (compositor surface)
+  "The node SURFACE is drawn through after a mapped commit: NIL when it has none.
+
+The slot, not the return value of the step that creates it -- "the commit created no
+node" and "the surface is still drawn through the node it already had" are
+different states, and only the first is acceptable for a cursor image."
+  (cf.backend.headless::ensure-scene-node compositor surface)
+  (cf:surface-scene-node surface))
+
+(deftest a-surface-named-as-the-pointer-image-is-never-drawn
+  (with-compositor (compositor :width 64 :height 64)
+    (let* ((seat (cf:compositor-seat compositor))
+           (owner (make-instance 'cf.backend.headless:cf-compositor
+                                 :client nil :id 3 :interface nil :version 3
+                                 :surface-class 'cf.backend.headless:cf-surface
+                                 :headless compositor))
+           ;; Ordinary order: the client names its cursor surface, then commits it.
+           (named-first (cursor-image-surface))
+           ;; The order the protocol also allows: commit, then name.  This is the
+           ;; one that used to leave a node behind for good.
+           (committed-first (cursor-image-surface)))
+      (setf (srv:surface-owner named-first) owner
+            (srv:surface-owner committed-first) owner)
+      (srv:seat-cursor-changed seat nil named-first)
+      (ok (null (node-for compositor named-first))
+          "a surface named before it is committed gets no node")
+      (ok (node-for compositor committed-first)
+          "one committed before it is named does -- the roleless path")
+      (srv:seat-cursor-changed seat nil committed-first)
+      (ok (null (node-for compositor committed-first))
+          "and naming it takes the node back")
+      (ok (null (node-for compositor committed-first))
+          "and the next commit does not bring it back")
+      (ok (cf.backend.headless:surface-pointer-image-p committed-first)
+          "because the surface is recorded as a pointer image for good"))))
+
 (deftest the-scene-draws-over-the-background-in-stacking-order
   (with-compositor (compositor :width 32 :height 32)
     (let* ((scene (cf:compositor-scene compositor))

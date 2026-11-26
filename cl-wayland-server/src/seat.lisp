@@ -16,7 +16,7 @@
 ;;;;   the seat     capabilities, name, keymap, focus, and the four injectors a
 ;;;;                backend calls (key, pointer motion/button/axis)
 ;;;;   wl_seat      get_pointer / get_keyboard / get_touch, and the initial events
-;;;;   wl_pointer   set_cursor (recorded, not drawn: no software cursor yet)
+;;;;   wl_pointer   set_cursor (recorded, and announced: SEAT-CURSOR-CHANGED)
 ;;;;   wl_keyboard  keymap fd + repeat_info, enter/leave/key/modifiers
 ;;;;   wl_touch     created and released; nothing injects it
 ;;;;
@@ -155,6 +155,18 @@ specialises this to send `xdg_toplevel.configure` with the activated state, whic
 is the only way a client learns it is focused (docs/framework.md §5).")
   (:method (seat surface has-focus)
     (declare (ignore seat surface has-focus))
+    nil))
+
+(defgeneric seat-cursor-changed (seat pointer surface)
+  (:documentation
+   "POINTER's cursor image is now SURFACE, or NIL when the client hid it.
+
+The default does nothing: a transport-only server does not draw a cursor, and set_cursor
+is recorded whether or not anyone acts on it.  A compositor specialises this because the
+request is the only place a surface is named as the pointer's image -- and a surface with
+a buffer and no shell role is otherwise something a compositor composites (D40).")
+  (:method (seat pointer surface)
+    (declare (ignore seat pointer surface))
     nil))
 
 (defun seat-keyboard-for-client (seat client)
@@ -433,9 +445,12 @@ owns, not something a grab can infer from the event that started it."
 ;;; ---------------------------------------------------------------------------
 
 (defmethod wl-pointer.set-cursor ((pointer pointer) serial surface hotspot-x hotspot-y)
-  "Record the cursor image.  Accepted, stored, not drawn: there is no software
-cursor yet, and a cursor that silently did not appear would be worse than one
-that is documented as absent."
+  "Record the cursor image and announce it (SEAT-CURSOR-CHANGED).
+
+Accepted, stored with its hotspot, and not drawn by this layer: a transport-only
+server has no cursor to draw.  The announcement exists because this request is the
+only place a surface is named as the pointer's image, and a compositor has a reason
+to care -- such a surface must never be composited as if it were a window (D40)."
   (when (and surface (surface-shell-surface surface))
     (protocol-error (resource-client pointer) (resource-id pointer)
                     +wl-pointer-error-role+
@@ -446,6 +461,7 @@ that is documented as absent."
         (pointer-cursor-hotspot-x pointer) hotspot-x
         (pointer-cursor-hotspot-y pointer) hotspot-y
         (pointer-cursor-serial pointer) serial)
+  (seat-cursor-changed (pointer-seat pointer) pointer surface)
   (log-message :debug "client ~D: cursor ~:[hidden~;surface ~D at ~D,~D~] (serial ~D)"
                (client-id (resource-client pointer))
                surface (if surface (resource-id surface) 0) hotspot-x hotspot-y serial)

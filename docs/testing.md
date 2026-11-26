@@ -297,6 +297,9 @@ twice*:
     (D38). Finally, the pixel at the parked pointer has one expected answer per mode: the white
     cursor body in the headless run (this session draws it) and the background in the nested one
     (the parent draws the pointer, and a second arrow at the same spot is a wrong picture, D39).
+    The same point also asks the scene about the *client's* cursor image: a real `weston-terminal`
+    names two cursor surfaces, and neither may have a scene node — a roleless surface given one is
+    a stray cursor stuck at the output's origin (D40).
 
 All sixteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface

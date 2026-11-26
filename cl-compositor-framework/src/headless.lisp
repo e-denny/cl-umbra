@@ -25,7 +25,11 @@
   ((entered-p :initform nil :accessor surface-entered-p)
    ;; The scene node this surface is drawn and hit-tested through, once it maps.
    ;; NIL before the first mapped commit and after the surface is forgotten.
-   (scene-node :initform nil :accessor surface-scene-node))
+   (scene-node :initform nil :accessor surface-scene-node)
+   ;; Did a client ever name this surface as its pointer's image?  Then it is a
+   ;; cursor image for good: the protocol has no way to give the surface another
+   ;; role, and drawing it would put a cursor at the output's origin (D40).
+   (pointer-image-p :initform nil :accessor surface-pointer-image-p))
   (:documentation "A server surface with the framework's own state on top (D7)."))
 
 (defclass cf-compositor (srv:compositor)
@@ -242,18 +246,41 @@ node and remembering it stays the framework's job either way.")
         node))))
 
 (defun cursor-surface-p (compositor surface)
-  "Did a client install SURFACE as the pointer's image (wl_pointer.set_cursor)?
+  "Is SURFACE the pointer image some client has installed right now?
 
 v0 draws its own cursor and does not composite a client's -- cursor surfaces are
-phase 5 -- but the seat records which surface was offered, and that is enough to
-keep it out of the scene.  A cursor surface given a node is drawn at the top-left of
-the output, is hit-testable, and is first in the stack order, which is where a
-cycling or click-to-focus policy would find it and raise a tiny arrow instead of a
-window (the tinywl parity gate found it)."
+phase 5 -- so the seat's record of what was offered is what keeps it out of the
+scene.  Two things make that record necessary and neither is optional: such a
+surface has no shell role, so it takes the roleless path (a node at the scene
+origin, drawn where the client's attach offset says); and it is hit-testable and
+first in stack order, which is where a cycling or click-to-focus policy would find
+it and raise a tiny arrow instead of a window.
+
+This answers "is it the cursor *now*".  SURFACE-POINTER-IMAGE-P is the durable
+version, and the pair covers the ordering hole: a client may commit a cursor
+surface before it names it, at which point nothing here can know yet (D40)."
   (let ((seat (compositor-seat compositor)))
     (loop for binding in (srv:seat-bindings seat)
           thereis (loop for pointer in (srv:seat-resource-pointers binding)
                         thereis (eq (srv:pointer-cursor-surface pointer) surface)))))
+
+(defmethod srv:seat-cursor-changed ((seat srv:seat) pointer (surface cf-surface))
+  "Record that SURFACE is a cursor image, and take back any node it already has.
+
+wl_pointer.set_cursor is the only moment a surface is named as the pointer's
+image, and it can arrive *after* that surface's first mapped commit -- the protocol
+applies the image at the next commit, so both orders are legal.  A client that
+commits first gets a node from the roleless path, and a node is a permanent
+invitation to be drawn: the image then sits at the output's origin, updating
+whenever the client changes its cursor, which is the stray cursor the fourth manual
+test found (D40).  So the flag is set here, for good, and the node is withdrawn."
+  (declare (ignore pointer))
+  (setf (surface-pointer-image-p surface) t)
+  (let ((compositor (and (srv:surface-owner surface)
+                         (cf-compositor-headless (srv:surface-owner surface)))))
+    (when (and compositor (surface-scene-node surface))
+      (forget-surface compositor surface)))
+  nil)
 
 (defun ensure-scene-node (compositor surface)
   "The node SURFACE is drawn through, creating it on the first mapped commit.
@@ -263,13 +290,24 @@ no role and no compositor policy about where it goes, so its node stays at the
 scene origin and its attach offset -- the client's own statement about its
 content -- puts its pixels where the client asked.  That is exactly what phase 2a
 did, and the shm gate still checks it pixel by pixel.  A cursor surface gets no
-node at all (CURSOR-SURFACE-P)."
+node at all (CURSOR-SURFACE-P, SURFACE-POINTER-IMAGE-P)."
   (let ((node (surface-scene-node surface)))
-    (unless (or node (cursor-surface-p compositor surface))
-      (setf node (if (srv:surface-shell-surface surface)
-                     (on-new-toplevel compositor surface)
-                     (scene:scene-add-node (compositor-scene compositor)
-                                           (scene:make-buffer-node surface)))))
+    (unless node
+      (unless (or (surface-pointer-image-p surface)
+                  (cursor-surface-p compositor surface))
+        (setf node (if (srv:surface-shell-surface surface)
+                       ;; ON-NEW-TOPLEVEL records it: placement is policy, the
+                       ;; node is the framework's.
+                       (on-new-toplevel compositor surface)
+                       ;; A roleless surface records its own node here.  It used
+                       ;; not to, and the node was then invisible to everything
+                       ;; that finds a surface's node by looking at the surface:
+                       ;; PRUNE-SURFACES could not remove it when the surface
+                       ;; unmapped, and a cursor image that had been given one
+                       ;; could not be taken back (D40).
+                       (setf (surface-scene-node surface)
+                             (scene:scene-add-node (compositor-scene compositor)
+                                                   (scene:make-buffer-node surface)))))))
     ;; Committing is not raising.  Phase 2a used commit order as draw order, which
     ;; made two redrawing clients flip places several times a second; stacking is
     ;; the compositor's decision, and v0's decision is "the order windows were
