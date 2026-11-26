@@ -63,6 +63,11 @@ render, so this loop is the whole compositor lifecycle under test."
          (format t "compositor: 256x256 headless, socket ~A~%"
                  (wayland.server:display-socket-path (cf:compositor-display compositor)))
          (setf process (sb-ext:run-program client nil :wait nil :output t :error t))
+         ;; There is a softwar cursor now (D31) and it is drawn at the pointer.
+         ;; Park it away from every pixel asserted below -- the cursor's own
+         ;; pixels are what the scene gate checks; this clause is about the
+         ;; buffer's position and must not accidentally measure an arrow.
+         (cf:inject-pointer-motion compositor 128 128)
          (unless (wait-for-client compositor process 10)
            (format t "FAIL: the client did not finish within 10 s~%")
            (setf ok nil))

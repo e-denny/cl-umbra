@@ -160,8 +160,16 @@ steps."
                      (fail "no second configure was sent on the focus change")))))
 
            ;; 4. Pointer and keyboard input, in the order a person would make it.
+           ;;
+           ;; Two motions, because there are two things to prove and they are
+           ;; different events: the first *enters* the window (weston-eventdemo
+           ;; sets an input region inset by 32 pixels, and it is honoured now --
+           ;; D31 -- so (0,0) is not part of the window as far as input goes), and
+           ;; the second is the motion event a client sees once it has the
+           ;; pointer.
            (cf:inject-pointer-motion compositor 50 60)
            (expect-line "focus x: 0, y: 0")
+           (cf:inject-pointer-motion compositor 50 60)
            (expect-line "motion time: ")
            (expect-line "x: 50.000000, y: 60.000000")
 

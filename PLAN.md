@@ -246,8 +246,10 @@ not four) and pool/buffer lifetime (`wl_shm_pool.destroy` may precede the buffer
 buffer keeps the mapping). Damage tracking, regions, transforms, pool resize and the scene
 graph are the 2b slice.
 
-**Status (phase 2b, not started):** damage regions with buffer age, `wl_region` objects,
-buffer scale/transform, `wl_shm_pool.resize`, `cf.scene` v0.
+**Status (phase 2b, partly done elsewhere):** `wl_region` (phase 3b), `wl_shm_pool.resize`
+(phase 3b), input regions acted on and `cf.scene` v0 (phase 3c) landed early because real
+clients needed them. Still open: damage regions with buffer age, buffer scale/transform
+actually applied, opaque-region culling.
 
 ### Phase 3 — `cl-tinywl`, nested (3-4 weeks)
 
@@ -300,15 +302,26 @@ the backend seam, with `cf:inject-*` for tests; `wl_region` as a real rectangle 
 input events need because they are produced outside any client's readable event. Gate clause
 12: `weston-eventdemo` prints the motion, button, scroll and key events we inject — including
 keycode 16 translated to "Q" with the shift mask — and a libxkbcommon probe parses the keymap
-we sent (`scripts/seat-gate.sh`). Grabs, a drawn cursor, click-to-focus (needs hit-testing),
-`wl_pointer.frame` and `wl_seat.release` are the rest of the seat work.
+we sent (`scripts/seat-gate.sh`). `wl_pointer.frame`, `wl_seat.release`, grabs and touch are
+the rest of the seat work.
 
-Two bugs were found by the first double-buffered client, and both are decisions now: buffers
-were never released at all (the ownership flag was never cleared on attach), and releasing only
-at the next commit is a claim about our scheduling rather than the protocol's (D25). Not in
-these slices, and needed before tinywl: the nested backend, `xdg_popup` + `xdg_positioner`, any
-window management or layout at all (a mapped toplevel is drawn where its buffer offset puts it,
-which is (0,0)), grabs, and a cursor that is actually drawn.
+**Phase 3c** adds the scene (`cf.scene` v0): `buffer`, `rect` and `image` nodes with positions
+in parent space, stacking by placement order, a front-to-back hit test that honours the
+committed input region, a cascade placement policy behind `cf:on-new-toplevel`, pointer focus
+that follows the pointer, click-to-focus for the keyboard, and a built-in arrow cursor
+composited last and never hit-tested (D31, D32). Gate clause 13: two real
+`weston-simple-shm` clients are placed at (0,0) and (32,32); hovering one moves the pointer
+without moving the keys, clicking moves the keys and the `activated` configure, both windows
+are drawn where they were placed, and the cursor's own pixels are at the pointer's position
+(`scripts/scene-gate.sh`).
+
+Bugs this slice found, each now a decision: committing is not raising (two redrawing clients
+fought over the stacking order, D31.3); focus must be applied when a window *maps* rather than
+whenever an unfocused window commits (D32.3); and regions must be copied when
+`set_input_region` is handled, not at commit, because the client destroys the `wl_region`
+immediately (D31.5). Not in these slices, and needed before tinywl: the nested backend,
+`xdg_popup` + `xdg_positioner`, window management (grabs, move/resize, a focus stack) and
+layer-shell.
 
 ### Phase 4 — Real hardware: DRM dumb buffers + libinput (6-8 weeks)
 

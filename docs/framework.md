@@ -70,9 +70,9 @@ Events are generic functions on the compositor object:
 
 Phase 2a implements the headless case as one object rather than a backend/compositor pair:
 `cf:make-headless-compositor` creates a display with `wl_compositor`, `wl_shm` and `wl_output`
-globals, a pixman target, and a surface list in commit order. The split becomes real when
-there is a second backend to abstract (nested, phase 3; DRM, phase 4) — a `backend` class with
-one implementation is the speculative abstraction the roadmap forbids.
+globals, a pixman target, and a scene (§4). The split becomes real when there is a second
+backend to abstract (nested, phase 3; DRM, phase 4) — a `backend` class with one implementation
+is the speculative abstraction the roadmap forbids.
 
 Contracts:
 
@@ -121,33 +121,43 @@ better than magic, so the default is a flag, and autocreate is a convenience wra
 
 ## 4. Scene graph
 
+*Phase 3c implements v0, in `cl-compositor-framework/src/scene.lisp` (D31): nodes, positions,
+stacking, hit testing and the cursor. Damage, clipping, culling, layers and per-output layout
+are still ahead, and the ticks below say which.*
+
 ```
-scene (root)
-└── output (node)
-    ├── background
-    ├── bottom        ← layer-shell background layer
-    ├── content       ← toplevels, in stacking order
-    ├── top           ← layer-shell top layer
-    ├── overlay       ← layer-shell overlay, notifications
-    └── cursor
+scene
+├── root (tree-node)
+│   ├── buffer-node   ← a mapped toplevel, placed by the compositor
+│   └── rect-node     ← background, border, letterboxing
+└── cursor (image-node)   ← drawn after the root, never hit-tested
 ```
 
-Node types: `tree`, `buffer` (a mapped surface), `rect` (solid colour; backgrounds, borders,
-letterboxing), plus `offscreen` (phase 7 effects). Every node has a position, an optional
-clip, a visibility flag, a damage region, and a parent.
+Node types: `tree` (a group; the root is one), `buffer` (a mapped surface, sized by its
+buffer), `rect` (solid premultiplied colour) and `image` (pixels we own — today the cursor),
+with `offscreen` arriving with phase 7's effects. Every node has a position in its parent's
+space, a visibility flag and a parent.
 
-- **Coordinates**: node position is in parent space; output space is the parent of layers;
-  layout space is the output arrangement. Helpers convert and test containment; the renderer
-  only ever sees output-local pixels.
-- **Hit testing**: front-to-back walk with input-region clipping and popup awareness, returning
-  `(values surface local-x local-y)` — the same contract tinywl's `desktop_view_at` provides,
-  but layer-aware.
-- **Damage propagation**: a node's damage unions into its ancestors' damage, which unions
-  into the output's damage region. Moving a node damages old and new bounds.
+- **Coordinates**: a node's position is in its parent's space; a root child's is therefore
+  output-local, which is the space the renderer and hit testing both use. A node's own position
+  and its surface's `attach` offset are *different* things and are added at draw time: the
+  compositor says where the window is, the client says where its content sits inside it. A
+  surface with no shell role keeps the origin of the scene and is drawn at its attach offset —
+  the phase-2a behaviour, unchanged.
+- **Stacking** is the order nodes were placed in, not the order they committed in: committing
+  is not raising (D31.3). `scene:node-raised` is the call a click-to-raise policy makes.
+- **Placement** is a policy hook, not a framework rule:
+  `(defmethod cf:on-new-toplevel ((c my-compositor) surface) ...)`. The default is a cascade
+  at 32-pixel steps from the origin, which is enough to make two windows two windows.
+- **Hit testing**: `(cf.scene:scene-hit-test scene x y)` walks front to back and returns
+  `(values node local-x local-y)`; a `buffer-node` is hit only where it is mapped, inside its
+  buffer, and inside its committed **input region** (an empty region makes it click-through).
+  `cf:surface-under-cursor` is the framework's `desktop_view_at`: it turns the node into a
+  surface. Popups and their own coordinates arrive with `xdg_popup`.
 - **Retained, not immediate**: the tree survives frames, which is what makes rules,
   workspaces, animations and overview possible without a rewrite (D10).
-- **Culling**: nodes fully covered by an opaque node above them are not composited. Cheap,
-  and the main reason the pixman path stays viable.
+- **Damage propagation**, clip rectangles and **culling** are open (2b): v0 repaints the whole
+  target and lets pixman clip to it, and nothing is culled by an opaque node above it.
 
 `cl-tinywl` uses three node types. `cl-umbra` uses all of them plus per-workspace subtrees and
 animated transforms (phase 7).
@@ -160,14 +170,28 @@ animated transforms (phase 7).
    (pointer-focus …) (keymap …) (repeat …)))
 ```
 
-*Phase 3b implements the seat, the keymap, focus and the pointer/keyboard events; grabs, the
-cursor and touch are still ahead.*
+*Phase 3b implements the seat, the keymap, focus and the pointer/keyboard events. Phase 3c adds
+pointer focus that follows the pointer, click-to-focus and a drawn cursor (D32). Grabs, the
+focus stack, cursor shapes and touch are still ahead.*
 
 - **Focus** is explicit: `(set-keyboard-focus seat surface serial)`,
   `(set-pointer-focus seat surface x y serial)`. Enter/leave, `set_activated` on the toplevel,
   and keyboard `enter`/`leave` events all follow from one call, so they cannot drift apart.
-  `cf:focus-surface` is that call for a compositor, and the headless backend makes it when a
-  toplevel *maps* — not on every commit, because it re-places the pointer (D27).
+  `cf:focus-surface` is that call for a compositor, and the headless backend makes it **once per
+  map** — the condition is "this surface's node was just created", not "this surface is not
+  focused", because the second rule hands the keyboard to whichever of two redrawing clients
+  committed last (D32.3).
+- **Two focus questions, two answers.** Pointer focus follows the *pointer*: motion hit-tests
+  through the scene, enters the surface under it, leaves the one that had it, or sends motion if
+  it is the same surface, in surface-local coordinates. Keyboard focus moves on a **press**:
+  `cf:inject-pointer-button :pressed` focuses the window under the pointer before the button
+  event goes out, so the click lands on an already-activated window. A hover never steals the
+  keys and a press on the bare output changes nothing (D32.1–2).
+- **Coordinates**: the cursor node's position is output space; `seat-pointer-x/y` is
+  surface-local. `cf:compositor-cursor-x/y` read the node, so there is no second copy to drift.
+- **Injection** moves the pointer and marks the output dirty, because the frame changed even if
+  no client did. That is why `cf:inject-pointer-motion` produces a new frame with no commit
+  behind it.
 - **Serials** are validated: `(valid-serial-p seat serial)` for selections, popup grabs,
   move/resize requests. Unvalidated serials are the classic way a malicious client moves
   another client's window.
@@ -190,9 +214,13 @@ cursor and touch are still ahead.*
   asks for one is told `invalid_method`.
 - **Flushing**: the display's `run-once` flushes every client at the end of each cycle, because
   input is produced outside any client's readable event (D27).
-- **Cursor**: shape selection (client-provided surface or a theme image), hotspot, hardware
-  plane when available, software composite otherwise. `wp_cursor_shape_v1` clients name a
-  shape and the framework resolves it from the theme.
+- **Cursor**: v0 draws a built-in 16x16 arrow (`cf.scene:make-cursor-image`) as the scene's
+  `image-node`, composited **last** and after everything else, at the pointer's position, with
+  `PIXMAN_OP_OVER` so its transparent pixels do not erase what is under it. It is a sibling of
+  the root, not a child, so it can never be hit-tested: the pointer cannot stand on the pointer.
+  Client-provided cursor *surfaces* (`wl_pointer.set_cursor`, accepted and recorded since
+  phase 3b), hotspots, theme lookup via `wp_cursor_shape_v1` and a hardware plane are phase 5;
+  the node, the position and the composite-last rule do not change.
 
 ## 6. Shell state machines
 

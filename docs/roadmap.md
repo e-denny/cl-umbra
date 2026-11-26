@@ -135,10 +135,13 @@ the captured frame matches, pixel for pixel.
 
 `cf.types.compositor`
 - [x] `wl_compositor.create_surface`; the surface state machine's core
-- [ ] `create_region` and `wl_region` ops (2b: input and opaque optimisation need them)
+- [x] `create_region` and `wl_region` ops (phase 3b: real clients create regions before they
+      map; the set arithmetic is in `wayland.server` and tested)
 - [x] surface pending/current state: attach, damage, commit, frame callbacks
-- [ ] opaque and input regions *acted on* (stored and ignored in 2a, which is correct while
-      there is no input and the target is opaque by construction)
+- [x] input regions acted on: hit testing honours them, and an empty region makes a surface
+      click-through (phase 3c, D31.4)
+- [ ] opaque regions acted on (the opaque optimisation is 2b; the rectangles are stored and
+      snapshotted)
 - [ ] transform, scale, buffer scale (2b)
 - [x] `commit`: apply, release the replaced buffer, hand damage to the compositor
 - [x] `wl_surface.frame` → `done` after presentation, never at commit
@@ -160,7 +163,11 @@ the captured frame matches, pixel for pixel.
 - [x] pixman target, `OVER`/`SRC` chosen by format, premultiplied ARGB, buffers read in place
 - [ ] clip regions, scaling, transforms (2b)
 - [ ] damage region per output, buffer age, partial repaint (2b)
-- [ ] scene: `buffer` and `rect` nodes, per-output root, stacking order, hit test v0 (2b)
+- [x] scene v0: `buffer`, `rect` and `image` nodes, a root per output, stacking order and hit
+      test (phase 3c, D31); damage and culling stay 2b
+- [x] window placement: a cascade by default, `cf:on-new-toplevel` to replace it (D31.2)
+- [x] a drawn cursor: an arrow as an `image` node composited last, moved by injected motion,
+      never hit-tested (D31.6)
 - [x] `read-pixels` (`frame-pixel`, the target's octets) → PNG writer
 
 `cl-wayland-client` (complete)
@@ -179,11 +186,12 @@ trace tests and the malicious-pool cases are in `wayland.test.server`.
 
 ## Phase 3 — `cl-tinywl`, nested (3-4 weeks)
 
-**Status: phase 3a landed (xdg-shell toplevels), phase 3b landed (seats and input).** The v1 state machine is in
-`cl-wayland-server/src/xdg-shell.lisp`; `cf.types.xdg-shell` (map/unmap events, layout,
-activation policy) is still to come. Gate clause 11: `weston-simple-shm` draws a window through
-our headless compositor (`./scripts/xdg-shell-gate.sh`). Seats, the nested backend, tinywl and
-popups are open below.
+**Status: phase 3a landed (xdg-shell toplevels), 3b landed (seats and input), 3c landed (the
+scene: placement, hit testing, click-to-focus, a drawn cursor).** The v1 state machine is in
+`cl-wayland-server/src/xdg-shell.lisp` and the policy seam is `cf:on-new-toplevel`. Gates:
+clause 11 `./scripts/xdg-shell-gate.sh`, clause 12 `./scripts/seat-gate.sh`, clause 13
+`./scripts/scene-gate.sh`. Grabs, the focus stack, the nested backend, tinywl and popups are
+open below.
 
 `cf.types.xdg-shell` (core)
 - [x] `xdg_wm_base` ping/pong; error conditions (`role`, `defunct_surfaces`)
@@ -194,8 +202,8 @@ popups are open below.
       (`configure_bounds`/`wm_capabilities` wait for a version bump; the global is v1)
 - [ ] `move`/`resize` requests with serial validation (accepted, validated for the enum, and
       ignored: no seat yet)
-- [ ] `set_activated` driving a configure with the `activated` state (the hook exists:
-      `set-toplevel-activated`; nothing calls it without focus)
+- [x] `set_activated` driving a configure with the `activated` state (focus and click-to-focus
+      call `set-toplevel-activated`, and the gate asserts the state array either way)
 - [ ] basic `xdg_popup` + `xdg_positioner` (needed by menus; polish in phase 6)
 - [ ] `cf.types.xdg-shell`: map/unmap events, layout placement, activation policy
 
@@ -203,9 +211,11 @@ popups are open below.
 - [x] capabilities; keyboard/pointer objects; enter/leave (`wl_seat` v4, D27)
 - [x] keymap memfd + `repeat_info`; modifiers; key events (D28)
 - [x] pointer motion/button/axis; `set_cursor` accepted and recorded
-- [ ] a cursor actually drawn (needs the scene graph: 2b/5)
+- [x] a cursor actually drawn (phase 3c: the built-in arrow; client cursor *surfaces* and
+      theme shapes are phase 5)
 - [x] focus, and `set_activated` on focus change (`cf:focus-surface` → `seat-focus-changed`)
-- [ ] focus stack and click-to-focus (needs hit-testing: 2b)
+- [x] click-to-focus, and pointer focus that follows the pointer (phase 3c, D32)
+- [ ] focus stack (alt-tab order); v0 has "the window that mapped last" and nothing more
 - [ ] grabs: `begin-move`/`begin-resize` from `move`/`resize`, serial validation
 - [ ] `wl_pointer.frame` and `wl_seat.release` (a version bump, not a rewrite)
 

@@ -13,7 +13,7 @@
 #      for the clauses later phases will add)
 #
 # Clauses:
-#   1. the unit suite is green (Rove, six suites)
+#   1. the unit suite is green (Rove, nine suites)
 #   2. every vendored protocol XML generates Lisp that compiles (69 files)
 #   3. demo-globals prints the live session's globals, and they match
 #      wayland-info (skipped, not failed, when there is no session)
@@ -50,6 +50,14 @@
 #      activated), and prints the keys and pointer events we inject with the right
 #      keycodes, coordinates and modifier masks; a libxkbcommon probe parses the
 #      keymap we actually sent (no default includes)
+#
+# Phase 3c (the scene):
+#
+#  13. two weston-simple-shm windows are placed by the cascade at (0,0) and
+#      (32,32), hit testing says which one is under a point, hovering moves the
+#      pointer while the click moves the keyboard (and the losing toplevel is
+#      configured not activated), both windows are drawn where they were placed,
+#      and the cursor's own pixels are composited last at the pointer's position
 #
 # Logs land in a temporary directory that is printed when something fails.
 
@@ -193,6 +201,15 @@ else
   fail 'seats and input' 'the real client did not receive the input we injected' "$log_dir/seat.log"
 fi
 
+# 13. The scene: placement, hit testing, click to focus, cursor --------------
+printf '\nphase 3c gate: the scene, hit testing and a drawn cursor\n\n'
+
+if gb "$log_dir/scene.log" "$repo_root/scripts/scene-gate.sh"; then
+  pass 'scene and cursor' "$(grep -a '^scene-gate: cursor' "$log_dir/scene.log" | sed 's/^scene-gate: //' | cut -c1-44)"
+else
+  fail 'scene and cursor' 'placement, click to focus or the cursor did not work' "$log_dir/scene.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -212,7 +229,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 3a and 3b clauses)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 3a, 3b and 3c clauses)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

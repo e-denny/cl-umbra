@@ -37,7 +37,8 @@
     wayland.test.schema
     wayland.test.codegen
     wayland.test.client
-    wayland.test.server)
+    wayland.test.server
+    wayland.test.scene)
   "Test packages, in dependency order.  Each holds one file's tests.")
 
 (defun suite-result (suite style)

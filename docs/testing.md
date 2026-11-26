@@ -54,11 +54,11 @@ ASDF. Assertions are Rove's own: `(ok FORM "description")` for a predicate, and
 `(ok (signals FORM 'condition-type))` for an expected error; a failure prints the test name,
 the assertion, its source location and the arguments' values.
 
-The scripts go through `wayland.test.runner`, which names the eight suites instead of letting
+The scripts go through `wayland.test.runner`, which names the nine suites instead of letting
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 172 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 184 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -85,6 +85,14 @@ other end:
   coordinates and the serials a client needs for grabs; a region's union and difference; a
   region snapshotted at commit and outliving its object; and a pool that grows, refuses to
   shrink, and refuses to grow past its file.
+- **The scene.** Eleven tests: stacking and raising, node-local coordinates through a nested
+  group, an invisible node taking nothing, a buffer node being exactly its buffer (size, edges,
+  and "no buffer is not a window"), an input region deciding what a surface takes (`nil` for the
+  whole surface, `:empty` for click-through, a rectangle list with an exclusive far edge), node
+  removal and repositioning, and — against a real headless compositor — the cursor's pixels at
+  the pointer, the old place cleaned up after a move, the cursor not being hit-testable, a
+  hidden cursor not being drawn, and rectangles drawn in stacking order. Plus, in
+  `wayland.test.server`, a region that is destroyed before the commit it belongs to.
 - **The shell's refusals.** Eight `xdg-shell` tests drive the same raw peer through the v1
   handshake and through every way a client can get it wrong: a second role, a second
   `xdg_surface` on one `wl_surface`, a buffer before the initial ack, an ack for a serial we
@@ -190,7 +198,23 @@ Phase 3b (seats and input) adds one more:
     that the keymap descriptor we created is closed after it travelled, and that teardown
     leaves nothing behind.
 
-All twelve clauses pass. Two details worth knowing: the protocol clause
+Phase 3c (the scene) adds the thirteenth:
+
+13. **Two windows, hit testing, click to focus and a cursor** (`scripts/scene-gate.sh`,
+    `scripts/scene-gate.lisp`). Two independent `weston-simple-shm` clients — each with its own
+    libwayland and its own object ids — map a toplevel each. The gate asserts the cascade put
+    them at (0,0) and (32,32) with non-zero buffers; that the second one took the keyboard when
+    it mapped and the hover did *not* take it away; that hovering window A moved the pointer
+    focus while the keyboard stayed on B; that clicking A moved the keyboard, configured A
+    `activated` and B without states, and that clicking B moved both back; that hit testing
+    finds A at (5,5), B at (37,37) and nothing at (500,500); that both windows' pixels are drawn
+    where they were placed; and that the cursor's opaque black tip and opaque white body are the
+    exact pixels at the pointer's position, which is only true if it is composited last.
+    Hit-testing with two redrawing clients is also what proved stacking had to stop following
+    commit order, and the input region the client destroys immediately is what proved regions
+    are copied at request time (D31.3, D31.5).
+
+All thirteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs

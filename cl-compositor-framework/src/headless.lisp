@@ -22,7 +22,10 @@
 ;; (cf.types.*, cf.scene, cf.seat) arrive with the features that need them.
 
 (defclass cf-surface (srv:surface)
-  ((entered-p :initform nil :accessor surface-entered-p))
+  ((entered-p :initform nil :accessor surface-entered-p)
+   ;; The scene node this surface is drawn and hit-tested through, once it maps.
+   ;; NIL before the first mapped commit and after the surface is forgotten.
+   (scene-node :initform nil :accessor surface-scene-node))
   (:documentation "A server surface with the framework's own state on top (D7)."))
 
 (defclass cf-compositor (srv:compositor)
@@ -53,6 +56,18 @@ SLOT-VALUE shows a different one."))
    ;; have reported, which is why the seat is reachable from the compositor.
    (seat :initarg :seat :initform nil :accessor compositor-seat)
    (modifiers :initform (input:make-modifiers) :accessor compositor-modifiers)
+   ;; The scene: one root, one cursor, and a node per mapped surface (D31).
+   ;; Positions live in the nodes, not in the surface: moving a window is the
+   ;; compositor's statement, and the client's attach offset is its own.
+   (scene :initarg :scene :accessor compositor-scene)
+   ;; The pointer's position lives in the scene's cursor node, because that is
+   ;; where it is drawn; COMPOSITOR-CURSOR-X/Y read it from there rather than
+   ;; keeping a second copy that can disagree.  The seat's pointer position is
+   ;; surface-local, which is a different number by design (D32).
+   (cursor-visible-p :initform t :accessor compositor-cursor-visible-p)
+   ;; Where the next toplevel goes: a cascade, so two windows are two windows.
+   (placement-x :initform 0 :accessor compositor-placement-x)
+   (placement-y :initform 0 :accessor compositor-placement-y)
    ;; client -> the wl_output resource that client bound, for wl_surface.enter.
    (outputs :initform (make-hash-table) :reader compositor-outputs)
    (dirty-p :initform t :accessor compositor-dirty-p)
@@ -94,6 +109,7 @@ Returns the compositor; the display is `(compositor-display ...)`, and
                                     :height height
                                     :background background
                                     :seat seat
+                                    :scene (scene:make-scene width height)
                                     :target (render:make-target width height))))
     ;; wl_compositor version 3: weston's window.c clients bind 3 unconditionally
     ;; (they were the reason this was not v1), so v3 is the lowest honest version
@@ -143,67 +159,182 @@ Returns the compositor; the display is `(compositor-display ...)`, and
     compositor))
 
 ;;; ---------------------------------------------------------------------------
+;;; The scene: placement, stacking, and the node behind a surface
+;;; ---------------------------------------------------------------------------
+;;
+;; Phase 2a drew every committed surface at its attach offset, in commit order.
+;; That is not a scene: nothing could be moved, nothing could be hit-tested, and
+;; "on top" meant "committed last".  v0 keeps the commit-order *list* for
+;; reporting but makes the scene the thing that is drawn: a node per mapped
+;; surface, with a position the compositor chooses (D31).
+
+(defparameter +placement-step+ 32
+  "How far a new toplevel steps down and right from the previous one.
+
+tinywl places nothing at all -- every window lands on (0,0) -- and that makes
+hit testing impossible to demonstrate.  A cascade is the simplest placement that
+is obviously a cascade, and it starts at the origin so the first window is where
+both a client and a test expect it.  A real placement policy belongs to
+cl-tinywl/cl-umbra (on-new-toplevel), not to the framework's default.")
+
+(defun advance-placement (compositor)
+  "Move the cascade one step, wrapping so windows stay mostly on screen."
+  (let ((limit-x (max 1 (- (compositor-width compositor) 64)))
+        (limit-y (max 1 (- (compositor-height compositor) 64))))
+    (setf (compositor-placement-x compositor)
+          (mod (+ (compositor-placement-x compositor) +placement-step+) limit-x)
+          (compositor-placement-y compositor)
+          (mod (+ (compositor-placement-y compositor) +placement-step+) limit-y))))
+
+(defgeneric on-new-toplevel (compositor surface)
+  (:documentation
+   "SURFACE has just mapped with a shell role: give it a node and a place.
+
+The default gives it a cascade position and puts it on top of the stack, and is
+returned through as the surface's node.  A compositor specialises this for
+workspace, layout or rule-based placement (docs/framework.md §9); creating the
+node and remembering it stays the framework's job either way.")
+  (:method ((compositor headless-compositor) surface)
+    (let ((x (compositor-placement-x compositor))
+          (y (compositor-placement-y compositor)))
+      (advance-placement compositor)
+      (let ((node (scene:scene-add-node (compositor-scene compositor)
+                                        (scene:make-buffer-node surface)
+                                        :x x :y y)))
+        (setf (surface-scene-node surface) node)
+        (srv:log-message :debug "client ~D: surface ~D placed at (~D, ~D)"
+                         (srv:client-id (srv:resource-client surface))
+                         (srv:resource-id surface) x y)
+        node))))
+
+(defun ensure-scene-node (compositor surface)
+  "The node SURFACE is drawn through, creating it on the first mapped commit.
+
+A surface with a shell role is placed by ON-NEW-TOPLEVEL.  A bare wl_surface has
+no role and no compositor policy about where it goes, so its node stays at the
+scene origin and its attach offset -- the client's own statement about its
+content -- puts its pixels where the client asked.  That is exactly what phase 2a
+did, and the shm gate still checks it pixel by pixel."
+  (let ((node (surface-scene-node surface)))
+    (unless node
+      (setf node (if (srv:surface-shell-surface surface)
+                     (on-new-toplevel compositor surface)
+                     (scene:scene-add-node (compositor-scene compositor)
+                                           (scene:make-buffer-node surface)))))
+    ;; Committing is not raising.  Phase 2a used commit order as draw order, which
+    ;; made two redrawing clients flip places several times a second; stacking is
+    ;; the compositor's decision, and v0's decision is "the order windows were
+    ;; placed in".  SCENE:NODE-RAISED is the call a click-to-raise policy makes.
+    node))
+
+(defun mark-dirty (compositor)
+  "The output needs a frame; arrange one render at the end of this cycle.
+
+One render per cycle however many commits or pointer moves arrived in it (D24),
+and the flush after it, because frame callbacks and cursor moves produce events
+outside any client's readable event (D27)."
+  (setf (compositor-dirty-p compositor) t)
+  (reactor:add-idle
+   (srv:display-reactor (compositor-display compositor))
+   (lambda ()
+     (when (compositor-dirty-p compositor)
+       (render-frame compositor)
+       (srv:flush-all (compositor-display compositor))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Commit: what a compositor does about it
 ;;; ---------------------------------------------------------------------------
 
 (defmethod srv:surface-committed ((surface cf-surface) damage)
   "Mark the output dirty and arrange one render at the end of this cycle.
 
-The damage list is ignored for now -- phase 2a repaints the whole target, and
-damage tracking is the next slice's job (docs/memory-and-rendering.md §7)."
+The damage list is ignored for now -- v0 repaints the whole target, and damage
+tracking is 2b's job (docs/memory-and-rendering.md §7)."
   (declare (ignore damage))
   (let* ((compositor (cf-compositor-headless (srv:surface-owner surface))))
     (unless (member surface (compositor-surfaces compositor))
-      ;; Keep commit order: a surface committed again moves to the front, which is
-      ;; what a client raising its own window through a commit expects.
       (setf (compositor-surfaces compositor)
             (append (compositor-surfaces compositor) (list surface))))
-    (setf (compositor-dirty-p compositor) t)
-    ;; tinywl's policy, and the only one that can exist without a scene graph:
-    ;; a window that *maps* takes focus, so the client learns it is activated and
-    ;; the keys it asked for arrive (D27).
-    ;;
-    ;; Only on the transition, not on every commit: focus-surface sends
-    ;; enter/leave and re-places the pointer at (0,0), so calling it per commit
-    ;; teleports the cursor and sprays enter events at the client (found by the
-    ;; seat gate: the pointer position was back at 0,0 after its buttons).
-    (when (and (srv:surface-mapped-p surface)
-               (srv:surface-shell-surface surface)
-               (not (eq surface (srv:seat-keyboard-focus (compositor-seat compositor)))))
-      (focus-surface compositor surface))
-    ;; One render per cycle, however many commits arrived in it.  Frame callbacks
-    ;; are queued *by* the render, after SERVICE-CLIENT has already flushed this
-    ;; client, so the flush has to happen here: an event nobody writes is an event
-    ;; the client waits for forever.
-    (reactor:add-idle
-     (srv:display-reactor (compositor-display compositor))
-     (lambda ()
-       (when (compositor-dirty-p compositor)
-         (render-frame compositor)
-         (srv:flush-all (compositor-display compositor)))))
+    (when (srv:surface-mapped-p surface)
+      ;; Whether this is the surface's first *mapped* commit is what decides
+      ;; focus, not whether it happens to be focused now: with two windows, a
+      ;; "focus if not focused" rule hands the keyboard to whichever client
+      ;; committed last, which is a fight, not a policy (found by the scene gate
+      ;; with two real clients).
+      (let ((first-map (null (surface-scene-node surface))))
+        (ensure-scene-node compositor surface)
+        ;; tinywl's policy, and the only one that can exist without a focus
+        ;; stack: a window that *maps* takes the keyboard, so the client learns it
+        ;; is activated and the keys it asked for arrive (D27).  Once per map.
+        (when (and first-map (srv:surface-shell-surface surface))
+          (focus-surface compositor surface))))
+    (mark-dirty compositor)
     surface))
-
-;;; ---------------------------------------------------------------------------
-;;; Presenting
-;;; ---------------------------------------------------------------------------
 
 ;;; ---------------------------------------------------------------------------
 ;;; Focus and synthetic input
 ;;; ---------------------------------------------------------------------------
 ;;
-;; There is no libinput here and no cursor image: a *backend* reports what a device
-;; did, and a compositor decides who hears it.  These functions are that seam, and
-;; they are also how the gate drives real clients, which is why they are exported
-;; rather than kept behind a test-only door.
+;; There is no libinput here: a *backend* reports what a device did, and a
+;; compositor decides who hears it.  These functions are that seam, and they are
+;; also how the gate drives real clients, which is why they are exported rather
+;; than kept behind a test-only door.  The pointer's position is output space;
+;; the seat's is surface-local, and the scene converts one into the other (D32).
+
+(defun compositor-cursor-x (compositor)
+  "The pointer's X in output space: the cursor node's position."
+  (scene:node-x (scene:scene-cursor (compositor-scene compositor))))
+
+(defun compositor-cursor-y (compositor)
+  "The pointer's Y in output space: the cursor node's position."
+  (scene:node-y (scene:scene-cursor (compositor-scene compositor))))
+
+(defun surface-under-cursor (compositor)
+  "The surface under the pointer, and the position in its own coordinates.
+
+NIL when the pointer is over the bare output -- including over a RECT-NODE, since
+a background is not something that can be clicked.  This is the framework's
+`desktop_view_at' (docs/framework.md §4), one layer deep."
+  (multiple-value-bind (node x y)
+      (scene:scene-hit-test (compositor-scene compositor)
+                            (compositor-cursor-x compositor)
+                            (compositor-cursor-y compositor))
+    (when (and node (typep node 'scene:buffer-node))
+      (values (scene:buffer-node-surface node) x y))))
+
+(defun update-pointer (compositor)
+  "Point the seat at whatever is under the cursor.
+
+Pointer focus follows the *pointer*, not the keyboard: moving across a window
+sends it enter/motion without moving the keys, because a hover must not steal
+focus and a click must not require one (D32)."
+  (let ((seat (compositor-seat compositor)))
+    (multiple-value-bind (surface x y) (surface-under-cursor compositor)
+      (cond
+        ((null surface)
+         (when (srv:seat-pointer-focus seat)
+           (srv:set-pointer-focus seat nil 0 0)))
+        ((eq surface (srv:seat-pointer-focus seat))
+         (srv:send-pointer-motion seat x y))
+        (t
+         (srv:set-pointer-focus seat surface x y))))))
 
 (defun focus-surface (compositor surface)
-  "Give keyboard and pointer focus to SURFACE; NIL clears both.
+  "Give keyboard focus to SURFACE; NIL clears it.
 
-One call, because enter/leave, the pointer's position and the toplevel's activated
-configure must not drift apart (docs/framework.md §5)."
+One call, because keyboard enter/leave and the toplevel's activated configure
+must not drift apart (D27).  The pointer is moved onto SURFACE only when the
+cursor is actually over it: keyboard focus and pointer focus are different
+questions, and a window that maps under a resting pointer must not teleport it
+(D31).  A compositor that wants hover-to-focus calls UPDATE-POINTER from its
+motion handling instead."
   (let ((seat (compositor-seat compositor)))
     (srv:set-keyboard-focus seat surface)
-    (srv:set-pointer-focus seat surface 0 0)
+    (multiple-value-bind (under x y) (surface-under-cursor compositor)
+      (cond ((null surface)
+             (srv:set-pointer-focus seat nil 0 0))
+            ((eq under surface)
+             (srv:set-pointer-focus seat surface x y))))
     surface))
 
 (defmethod srv:seat-focus-changed ((seat srv:seat) surface has-focus)
@@ -232,15 +363,32 @@ computes and what we advertise agree by construction."
                         :group (input:modifiers-group modifiers))))
 
 (defun inject-pointer-motion (compositor x y)
-  (srv:send-pointer-motion (compositor-seat compositor) x y))
+  "Move the pointer to (X, Y) in output space and let the scene decide who hears it."
+  (scene:set-node-position (scene:scene-cursor (compositor-scene compositor)) x y)
+  (update-pointer compositor)
+  ;; The cursor moved, so the frame changed even if no client did anything.
+  (mark-dirty compositor))
 
 (defparameter +pointer-buttons+
   '((:left . #x110) (:right . #x111) (:middle . #x112)))
 
 (defun inject-pointer-button (compositor button state)
-  "SYNTHETIC pointer button (:left, :right, :middle), pressed or released."
-  (let ((code (or (cdr (assoc button +pointer-buttons+)) button)))
-    (srv:send-pointer-button (compositor-seat compositor) code state)))
+  "SYNTHETIC pointer button (:left, :right, :middle), pressed or released.
+
+A press is also the click that focuses: the window under the pointer takes the
+keyboard, which is what makes clicking another window work at all (D32).  A press
+on the bare output changes nothing -- there is no click-to-raise or
+click-to-dismiss policy in v0."
+  (let ((seat (compositor-seat compositor)))
+    (when (eq state :pressed)
+      (multiple-value-bind (surface x y) (surface-under-cursor compositor)
+        (when surface
+          (unless (eq surface (srv:seat-pointer-focus seat))
+            (srv:set-pointer-focus seat surface x y))
+          (unless (eq surface (srv:seat-keyboard-focus seat))
+            (focus-surface compositor surface)))))
+    (let ((code (or (cdr (assoc button +pointer-buttons+)) button)))
+      (srv:send-pointer-button seat code state))))
 
 (defun inject-pointer-axis (compositor axis value)
   (srv:send-pointer-axis (compositor-seat compositor) axis value))
@@ -254,28 +402,60 @@ computes and what we advertise agree by construction."
         (setf (surface-entered-p surface) t)
         (wl-surface.enter surface output)))))
 
+(defun forget-surface (compositor surface)
+  "Drop SURFACE's node and any focus it held.
+
+Called when a surface is destroyed or unmapped, from the render loop, because
+that is where the scene is walked.  Events are only sent when the client is still
+connected: a destroyed surface's client is on its way out, and enter/leave to it
+would be a message about an object it no longer has."
+  (let ((node (surface-scene-node surface)))
+    (when node
+      (scene:scene-remove-node node)
+      (setf (surface-scene-node surface) nil))
+    (let ((seat (compositor-seat compositor)))
+      (when (eq surface (srv:seat-keyboard-focus seat))
+        (if (srv:resource-destroyed-p surface)
+            (setf (srv:seat-keyboard-focus seat) nil)
+            (srv:set-keyboard-focus seat nil)))
+      (when (eq surface (srv:seat-pointer-focus seat))
+        (if (srv:resource-destroyed-p surface)
+            ;; The pointers that pointed here died with the client; dropping the
+            ;; seat's claim is all that is left to do.
+            (setf (srv:seat-pointer-focus seat) nil)
+            (srv:set-pointer-focus seat nil 0 0))))))
+
+(defun prune-surfaces (compositor)
+  "Forget surfaces that are gone or no longer mapped, before drawing.
+
+A client that closed its window leaves a destroyed surface behind.  Dropping it
+here, not at destroy time, keeps the destroy mid-dispatch from touching a scene
+that the render loop is walking; a session must not accumulate tombstones (D26)."
+  (dolist (surface (compositor-surfaces compositor))
+    (when (or (srv:resource-destroyed-p surface)
+              (not (srv:surface-mapped-p surface)))
+      (forget-surface compositor surface))))
+
 (defun render-frame (compositor)
-  "Draw every mapped surface and present the frame; returns the target.
+  "Draw the scene, cursor last, and present the frame; returns the target.
 
 Frame callbacks fire here, after the draw, which is the only moment the protocol
-allows (docs/framework.md §3)."
-  (let ((target (compositor-target compositor)))
+allows (docs/framework.md §3).  Buffers are released after compositing and before
+the callbacks, for the clients whose surfaces were actually drawn (D25)."
+  (let* ((target (compositor-target compositor))
+         (scene (compositor-scene compositor)))
     (render:fill-target target (compositor-background compositor))
-    (dolist (surface (compositor-surfaces compositor))
-      (when (render:render-surface target surface)
-        (enter-surface compositor surface)
-        ;; The pixels are in the target now, so the client may have its buffer
-        ;; back -- before the frame callback, so a client that redraws on the
-        ;; callback already knows which buffer is free.  A double-buffered client
-        ;; deadlocks without this (D25).
-        (srv:release-surface-buffer surface)
-        (srv:surface-presented surface)))
+    (prune-surfaces compositor)
+    (dolist (surface (scene:scene-render scene target))
+      (enter-surface compositor surface)
+      ;; The pixels are in the target now, so the client may have its buffer
+      ;; back -- before the frame callback, so a client that redraws on the
+      ;; callback already knows which buffer is free.  A double-buffered client
+      ;; deadlocks without this (D25).
+      (srv:release-surface-buffer surface)
+      (srv:surface-presented surface))
     (incf (compositor-frame-count compositor))
     (setf (compositor-dirty-p compositor) nil)
-    ;; A client that closed its window leaves a destroyed surface behind.  Drop it
-    ;; here, not at destroy time: the destroy happens mid-dispatch, while this
-    ;; list is being walked by nobody -- but the list is also the draw order, and
-    ;; a session must not accumulate tombstones (D26).
     (setf (compositor-surfaces compositor)
           (remove-if #'srv:resource-destroyed-p (compositor-surfaces compositor)))
     target))

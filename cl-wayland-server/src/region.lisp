@@ -75,9 +75,13 @@
   (null (region-rects region)))
 
 (defun region-contains-p (region x y)
-  "Is (X, Y) inside the region?  A real question for input regions in 2b."
+  "Is (X, Y) inside the region?  A real question for input regions in 2b.
+
+Half-open, as every rectangle in the protocol is: a 10-wide rectangle starting
+at 0 contains x = 0 .. 9, not 10."
   (loop for (rx ry width height) in (region-rects region)
-        thereis (and (<= rx x (+ rx width)) (<= ry y (+ ry height)))))
+        thereis (and (<= rx x) (< x (+ rx width))
+                     (<= ry y) (< y (+ ry height)))))
 
 (defun region-rectangles (region)
   "A snapshot of the region's rectangles, safe to keep after the region dies."

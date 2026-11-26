@@ -1628,6 +1628,42 @@ is exactly enough."
                    "and outlive the region object")))
         (ffi:close-fd socket)))))
 
+(deftest an-input-region-survives-being-destroyed-before-the-commit
+  ;; weston's own clients do this: set_input_region, destroy the wl_region, then
+  ;; commit.  Reading the rectangles at commit time would read a region that no
+  ;; longer has any (found by weston-eventdemo, whose window became
+  ;; input-transparent at (0,0) -- an inset input region is exactly the shape of
+  ;; thing that bug turns into silence).
+  (with-seat-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-seat display socket)
+             (send-bind socket 2 2 "wl_compositor" 1 3)
+             (run-server display)
+             (read-events socket)
+             (send-message socket 3 0 (lambda (buffer) (wire:put-new-id buffer 6)))
+             (send-message socket 3 1 (lambda (buffer) (wire:put-new-id buffer 7)))
+             (run-server display)
+             (send-message socket 7 1 (lambda (buffer)
+                                        (wire:put-int buffer 4)
+                                        (wire:put-int buffer 4)
+                                        (wire:put-int buffer 8)
+                                        (wire:put-int buffer 6)))
+             (run-server display)
+             ;; wl_surface.set_input_region is opcode 5; then destroy the region
+             ;; (opcode 0) *before* committing (opcode 6).
+             (send-message socket 6 5 (lambda (buffer) (wire:put-object buffer 7)))
+             (send-message socket 7 0 nil)
+             (send-message socket 6 6 nil)
+             (run-server display)
+             (let ((surface (server-object display 6)))
+               (ok (equal '((4 4 8 6)) (srv:surface-input-region surface))
+                   "the rectangles were copied when the request arrived")
+               (ok (not (eq :empty (srv:surface-input-region surface)))
+                   "and an empty region is not what a destroyed one becomes")))
+        (ffi:close-fd socket)))))
+
 (deftest a-pool-grows-but-never-shrinks
   (with-seat-display (display)
     (let ((socket (raw-connect display)))

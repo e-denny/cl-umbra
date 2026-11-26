@@ -186,8 +186,11 @@ mode on bind so that wayland-info has something true to print."))
    (committed-callbacks :initform nil :accessor surface-committed-callbacks)
    ;; Committed region state: a list of (x y width height) or NIL for "no region"
    ;; -- which means "infinitely large" for opaque (nothing is opaque) and that
-   ;; the whole surface takes input.  Regions are *copied* at commit, not held by
-   ;; reference: a client may destroy or mutate a wl_region right after setting it.
+   ;; the whole surface takes input.  The INPUT region has a third value, :EMPTY,
+   ;; for a wl_region with no rectangles (none of the surface takes input).  Both
+   ;; pending slots hold the same snapshot, taken when SET_*_REGION is handled:
+   ;; a client may destroy or mutate a wl_region right after sending that
+   ;; request, and weston's clients do (docs/memory-and-rendering.md §3).
    (opaque-region :initform nil :accessor surface-opaque-region)
    (input-region :initform nil :accessor surface-input-region)
    (pending-opaque-region :initform nil :accessor surface-pending-opaque-region)

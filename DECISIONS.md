@@ -839,9 +839,10 @@ version 3 unconditionally and calls `create_region` before it maps a window. Adv
    `subtract` is difference and produces up to four pieces per existing rectangle. It is not
    canonicalised — the protocol defines the *area*, and a minimal decomposition is not needed
    to be correct.
-2. **Regions are snapshotted at commit.** `set_opaque_region`/`set_input_region` store the
-   pending region; `commit` copies the rectangle list. A client may destroy the region object
-   the moment it has set it, and the surface must keep the area.
+2. **Regions are snapshotted when they are set.** `set_opaque_region`/`set_input_region` copy
+   the rectangle list immediately; `commit` publishes the copy. A client may destroy the region
+   object the moment it has set it, and the surface must keep the area. *(Corrected by D31.5:
+   this decision as first written copied at commit, which read a destroyed region as empty.)*
 3. **`wl_compositor` is offered at version 3.** v2 adds `set_buffer_transform`, v3 adds
    `set_buffer_scale` (and `damage_buffer` is v4, which we do not offer). Both requests are
    validated, stored and *not* applied: the headless output advertises transform 0 and scale 1,
@@ -875,3 +876,93 @@ than a SIGBUS. The remaining SIGBUS case (a client that *shrinks* its file after
 still open and still documented in `docs/memory-and-rendering.md` §4; `resize` no longer makes
 it worse.
 
+
+---
+
+## D31 — The scene is a retained node tree, and regions are copied when they are set
+
+**Status:** accepted
+
+**Context.** Phase 3a/3b drew every mapped surface at its attach offset, in commit order. That
+is not a scene: nothing could be placed, nothing could be hit-tested, "on top" meant "committed
+last", and `wl_pointer.set_cursor` was recorded but nothing was drawn. Phase 3c needs two
+windows, a pointer and a cursor before grabs or tinywl can exist.
+
+**Decision.**
+
+1. **`cf.scene` is a retained tree per output** with four node kinds: `tree-node` (a group;
+   the root is one, and layer-shell's layers will be more), `buffer-node` (a mapped
+   `wl_surface`, sized by its current buffer and never by a value the compositor chose),
+   `rect-node` (a solid premultiplied rectangle) and `image-node` (pixels we own). A node has a
+   position in its *parent's* space, a visibility flag and a parent; the root's parent is the
+   output, so a root child's position is output-local, which is the space both the renderer and
+   hit testing use.
+2. **Placement is the compositor's statement, the attach offset is the client's.** A node's
+   position is where the compositor put the window; `wl_surface.attach`'s x, y is the client's
+   own offset for its content inside the surface, and the two are added at draw time. A surface
+   with *no* shell role keeps a node at the origin and is therefore drawn exactly where phase 2a
+   drew it (its attach offset), which is why the phase-2a pixel assertions still mean what they
+   meant.
+3. **Stacking is placement order, not commit order.** A new window goes on top; committing is
+   not raising. Phase 2a's "commit order is draw order" made two redrawing clients flip places
+   several times a second (the scene gate found it: the hit test at (37,37) alternated between
+   the two windows). `scene:node-raised` exists for the click-to-raise policy that will use it.
+4. **Hit testing is a front-to-back walk** returning the node and the point in that node's own
+   space; the compositor turns a `buffer-node` into a surface. A `buffer-node` is hit only where
+   it is mapped, inside its buffer, and inside its committed **input region** — which is now
+   acted on, for the first time.
+5. **Regions are copied when they are *set*, not when the surface commits** (amending D29
+   item 2). A client is allowed to destroy the `wl_region` immediately after
+   `set_input_region`, and weston's clients do; reading the rectangles at commit time read an
+   empty region, so `weston-eventdemo`'s window became input-transparent at (0,0) while its
+   real input region was `(32 32 436 336)`. Three states are kept for input: `nil` (never set,
+   the whole surface), `:empty` (an empty region, click-through), and a list of rectangles.
+6. **The cursor is a node that is drawn last and never hit-tested.** It is
+   `scene:cursor`, a sibling of the root rather than a child of it, so the pointer can never be
+   standing on the pointer; its position *is* the pointer's position in output space, and the
+   default image is a 16x16 arrow generated from a table (no theme, no libxcursor until
+   phase 5).
+
+**Consequences.** `cf:compositor-scene`, `cf:scene-hit-test`, `cf:on-new-toplevel` and
+`cf.scene:set-node-position` are the surface a compositor author writes against. Damage,
+clipping, culling, layers, per-output roots and hit-testing of popups stay open; the node types
+and the coordinate rule do not change when they arrive.
+
+---
+
+## D32 — Pointer focus follows the pointer, a click focuses the keyboard, and focus follows the map once
+
+**Status:** accepted
+
+**Context.** D27 made focus one call and focused a toplevel when it mapped. With one client that
+was indistinguishable from a policy. With two, it is not: every commit by an unfocused window
+re-focused it, so two redrawing clients fought over the keyboard (found by the scene gate).
+
+**Decision.**
+
+1. **Pointer focus follows the pointer.** Motion hit-tests, then enters the surface under the
+   pointer, leaves the one that had it, or sends `wl_pointer.motion` if it is the same surface —
+   with *surface-local* coordinates computed by the scene. Hovering does not change the keyboard
+   focus, and does not send anything to a surface the pointer is not over.
+2. **A press focuses the window under the pointer.** `inject-pointer-button :pressed` hit-tests,
+   fixes the pointer focus if it somehow differs, and calls `focus-surface` for the keyboard
+   before the button event goes out, so the click is delivered to a window that is already
+   activated. A press on the bare output changes nothing.
+3. **Focus follows the *map*, once.** The condition is "this surface's node was just created",
+   not "this surface is not focused". An unmapped-then-remapped toplevel counts as a new map.
+4. **Two coordinate spaces, deliberately separate.** The cursor node's position is output space;
+   `seat-pointer-x/y` is surface-local. Conflating them is how a compositor ends up sending
+   output coordinates to a client that expects its own.
+5. **Injection keeps the seat honest.** `inject-pointer-motion` moves the cursor node, updates
+   pointer focus and marks the output dirty, because the frame changed even if no client did.
+
+**Consequences.** Click-to-focus, hover and the cursor are one slice because they are one
+question ("who is under the pointer?"). Grabs, click-to-raise, the focus stack, cursor shapes
+and client-provided cursor surfaces are the next slices and hang off the same calls:
+`focus-surface`, `surface-under-cursor`, `scene:node-raised`.
+
+**Evidence.** `scripts/scene-gate.sh`: two `weston-simple-shm` clients, placed at (0,0) and
+(32,32); hover moves the pointer to A while the keyboard stays on B; clicking A moves the
+keyboard and makes A's configure carry `activated` while B's carries nothing; clicking B moves
+it back; both windows' pixels are drawn where they were placed; the cursor's black tip and white
+body are the exact pixels at the pointer's position.

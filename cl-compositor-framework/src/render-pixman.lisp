@@ -171,3 +171,74 @@ client that only moves its buffer commits position without content."
       (composite-buffer target buffer
                         :x (wayland.server:surface-current-x surface)
                         :y (wayland.server:surface-current-y surface)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Solid rectangles and images we own
+;;; ---------------------------------------------------------------------------
+;;
+;; The scene needs two things the shm path does not: a solid rectangle (a
+;; background, a border) and a bitmap that is ours rather than a client's (the
+;; cursor).  Both are ordinary pixman operations; doing them through pixman
+;; rather than a Lisp pixel loop keeps the reference renderer one code path, and
+;; keeps the cost of a full-window background out of interpreted code.
+
+(cffi:defcstruct pixman-color
+  (red :uint16) (green :uint16) (blue :uint16) (alpha :uint16))
+
+(cffi:defcstruct pixman-box32
+  (x1 :int32) (y1 :int32) (x2 :int32) (y2 :int32))
+
+(cffi:defcfun ("pixman_image_fill_boxes" %fill-boxes) :int
+  (op :unsigned-int) (destination :pointer) (color :pointer)
+  (n-boxes :int) (boxes :pointer))
+
+(defun straight-channel (premultiplied alpha shift)
+  "One 8-bit straight channel from a premultiplied pixel.
+
+pixman_colour_t is *not* premultiplied (pixman_image_fill_boxes multiplies), and
+our targets and buffers are, so a translucent rectangle has to be divided back
+out.  An opaque colour -- every rectangle v0 draws -- passes through unchanged."
+  (if (zerop alpha)
+      0
+      (min 255 (round (* 255 (ldb (byte 8 shift) premultiplied)) alpha))))
+
+(defun fill-rect (target x y width height argb)
+  "Fill a X, Y, WIDTH x HEIGHT rectangle of TARGET with premultiplied ARGB.
+
+Clipped by pixman to the target, so a rectangle hanging off the edge is drawn as
+much as fits; a degenerate one draws nothing."
+  (when (and (plusp width) (plusp height))
+    (let ((alpha (ldb (byte 8 24) argb)))
+      (cffi:with-foreign-objects ((color '(:struct pixman-color))
+                                  (box '(:struct pixman-box32)))
+        (flet ((set-slot (name value)
+                 (setf (cffi:foreign-slot-value color '(:struct pixman-color) name)
+                       (* 257 value))))
+          (set-slot 'red (straight-channel argb alpha 16))
+          (set-slot 'green (straight-channel argb alpha 8))
+          (set-slot 'blue (straight-channel argb alpha 0))
+          (set-slot 'alpha alpha))
+        (setf (cffi:foreign-slot-value box '(:struct pixman-box32) 'x1) x
+              (cffi:foreign-slot-value box '(:struct pixman-box32) 'y1) y
+              (cffi:foreign-slot-value box '(:struct pixman-box32) 'x2) (+ x width)
+              (cffi:foreign-slot-value box '(:struct pixman-box32) 'y2) (+ y height))
+        (%fill-boxes +op-over+ (target-image target) color 1 box)
+        t))))
+
+(defun composite-bitmap (target octets width height &key (x 0) (y 0))
+  "Draw premultiplied ARGB8888 OCTETS (WIDTH x HEIGHT) over TARGET at X, Y.
+
+OVER, not SRC: a bitmap has transparent pixels and the thing underneath must
+survive them -- which is exactly what the cursor needs.  The octets are pinned
+for the duration of the call, so pixman never reads a moved vector."
+  (when (and (plusp width) (plusp height))
+    (cffi:with-pointer-to-vector-data (pointer octets)
+      (let ((image (%create-bits +format-a8r8g8b8+ width height pointer (* 4 width))))
+        (when (cffi:null-pointer-p image)
+          (return-from composite-bitmap nil))
+        (unwind-protect
+             (progn
+               (%composite32 +op-over+ image (cffi:null-pointer) (target-image target)
+                             0 0 0 0 x y width height)
+               t)
+          (%image-unref image))))))

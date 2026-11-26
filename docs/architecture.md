@@ -33,7 +33,8 @@ cl-wayland-project/
 │   └── demo/ server-demo.lisp
 ├── cl-compositor-framework/
 │   ├── cl-compositor-framework.asd
-│   └── src/  package.lisp  render-pixman.lisp  xkb.lisp  png.lisp  headless.lisp
+│   └── src/  package.lisp  render-pixman.lisp  scene.lisp  xkb.lisp  png.lisp
+│             headless.lisp
 │       ├── backend/   (phase 3+) protocol.lisp headless.lisp nested.lisp drm.lisp
 │       │              libinput.lisp multi.lisp session.lisp
 │       ├── render/    protocol.lisp pixman.lisp gles2.lisp target.lisp
@@ -56,7 +57,8 @@ cl-wayland-project/
 ├── scripts/         gate.sh  gate-protocols.lisp  wayland-info-server.sh  soak.sh
 │                    soak.lisp  run-tests.sh  fuzz.sh  fuzz-client.sh
 │                    c-probe.sh  headless-frame.sh  headless-gate.lisp
-│                    xdg-shell-gate.sh  xdg-shell-gate.lisp  check-loads.sh
+│                    xdg-shell-gate.sh  xdg-shell-gate.lisp  seat-gate.sh
+│                    seat-gate.lisp  scene-gate.sh  scene-gate.lisp  check-loads.sh
 │                    purity-check.sh  lib.sh  capture.sh  run-nested.sh  run-tty.sh
 └── qlfile           local Quicklisp/qlot project set
 ```
@@ -64,9 +66,9 @@ cl-wayland-project/
 One ASDF system per directory; each system declares the protocols it needs, so a build
 does not compile the world.
 
-The framework's phase-2a files are flat (`render-pixman.lisp`, `png.lisp`, `headless.lisp`)
-and will move into `render/` and `backend/` when there is more than one of each; the module
-tree drawn below the core is the plan for phases 2b-5.
+The framework's files are flat (`render-pixman.lisp`, `scene.lisp`, `xkb.lisp`, `png.lisp`,
+`headless.lisp`) and will move into `render/`, `scene/` and `backend/` when there is more than
+one of each; the module tree drawn below the core is the plan for phases 2b-5.
 
 What is built, so a reader can tell the shape from the plan: the core (`wayland.wire`,
 `wayland.ffi`, `wayland.object`, `wayland.io`, `wayland.reactor`, `wayland.protocol`,
@@ -84,8 +86,11 @@ in-memory target, `read-pixels`/`frame-pixel`, and a PNG writer. Phase 3a added 
 role needs, so a real client can open a window. Phase 3b added `wl_seat` v4 with `wl_pointer`
 and `wl_keyboard`, a generated keymap (`cf.input`), explicit focus with `set_activated` on
 focus change, `wl_region` with real set arithmetic, `wl_compositor` v3, `wl_shm_pool.resize`,
-and end-of-cycle flushing -- so a real client can be typed and clicked at. The nested backend,
-tinywl and `cl-umbra` are still their plan.
+and end-of-cycle flushing -- so a real client can be typed and clicked at. Phase 3c added
+`cf.scene` v0 -- buffer, rect and image nodes, positions in parent space, stacking by placement
+order, a front-to-back hit test that honours input regions, a cascade placement policy behind
+`cf:on-new-toplevel`, and a cursor composited last -- so two windows can be placed, hovered and
+clicked. The nested backend, tinywl and `cl-umbra` are still their plan.
 
 ## 2. Packages
 

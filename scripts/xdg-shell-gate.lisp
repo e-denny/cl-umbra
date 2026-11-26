@@ -197,6 +197,15 @@ Two numbers, because either alone can lie: a frame of one wrong colour is still
                  (fail "no buffer to measure")
                  (let* ((width (wayland.server:shm-buffer-width buffer))
                         (height (wayland.server:shm-buffer-height buffer)))
+                   ;; Put the cursor inside the window and off its edges: the
+                   ;; gate counts lit pixels outside the window, and a cursor
+                   ;; parked at the origin would be measuring the compositor's
+                   ;; cursor placement, which the scene gate does properly.
+                   (cf:inject-pointer-motion compositor (floor width 2) (floor height 2))
+                   (cf:render-frame compositor)
+                   (format t "cursor at (~D,~D)~%"
+                           (cf:compositor-cursor-x compositor)
+                           (cf:compositor-cursor-y compositor))
                    (multiple-value-bind (colours lit) (count-colours compositor)
                      (let ((outside (count-lit-outside compositor width height)))
                        (format t "buffer ~Dx~D, ~D pixel~:P drawn in the window, ~

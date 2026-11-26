@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene
 
 test:
 	./scripts/run-tests.sh
@@ -41,6 +41,10 @@ xdg:
 # keymap; a libxkbcommon probe parses the keymap we sent.
 seat:
 	./scripts/seat-gate.sh
+
+# Two real windows: placement, hit testing, click to focus, a drawn cursor.
+scene:
+	./scripts/scene-gate.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:

@@ -6,8 +6,8 @@ The repository is named for where the stack is going: `cl-umbra`, a daily-driver
 Everything that makes it possible is here too — the protocol implementation, the server, the
 compositor framework, and a tinywl port — as the six systems below.
 
-**Status: phase 0, phase 1, phase 2a, phase 3a and phase 3b gates passing.**
-`./scripts/gate.sh` checks twelve clauses. Phase 0: the unit suite (172 tests), every vendored protocol compiling,
+**Status: phase 0, phase 1, phase 2a, phase 3a, phase 3b and phase 3c gates passing.**
+`./scripts/gate.sh` checks thirteen clauses. Phase 0: the unit suite (184 tests), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections
@@ -21,7 +21,11 @@ answers our ping, and confirms the client never sees a protocol error. Phase 3b:
 `weston-eventdemo` is focused, sent a keymap and typed at — the gate requires the *client's own
 output* to show our injected motion, button, scroll and keys, including keycode 16 translated
 to "Q" with the shift mask, and a libxkbcommon probe parses the keymap we actually sent.
-Purity (no libwayland, no wlroots) runs over all of it. The gate exits 0.
+Phase 3c: two real windows are placed at (0,0) and (32,32); hovering one moves the pointer
+without moving the keys, clicking moves the keyboard and the `activated` configure, both
+windows are drawn where they were placed, and the cursor's own pixels are composited last at
+the pointer's position. Purity (no libwayland, no wlroots) runs over all of it. The gate exits
+0.
 
 Three roadmap quality items are still open and are not gate clauses: fixed-size in/out
 rings, `WAYLAND_DEBUG`-compatible tracing, and surplus-descriptor detection (which needs a
@@ -49,13 +53,16 @@ What exists:
   complete state array. Popups, positioners and decoration negotiation are deliberately absent
   and answer `implementation`. Phase 3b added `wl_seat` (v4) with `wl_pointer`, `wl_keyboard`
   and a generated XKB keymap, explicit focus that activates the focused toplevel, `wl_region`,
-  `wl_compositor` v3, and `wl_shm_pool.resize`. The demo server offers two dummy globals so
-  `wayland-info` has something true to print.
+  `wl_compositor` v3, and `wl_shm_pool.resize`. Phase 3c added the scene: nodes with positions
+  and stacking, hit testing that honours input regions, a cascade placement policy behind
+  `cf:on-new-toplevel`, and a built-in cursor composited last. The demo server offers two dummy
+  globals so `wayland-info` has something true to print.
 - `cl-compositor-framework` — a pixman renderer (the reference), a headless compositor that
   draws committed surfaces into an in-memory target and offers `wl_compositor`, `wl_shm`,
-  `wl_output`, `xdg_wm_base` and `wl_seat`, `read-pixels`, a PNG writer, and `cf.input`
-  (generated keymaps, keycodes, modifier state). Backends beyond headless, the scene graph and
-  the remaining seat work are phases 2b-5.
+  `wl_output`, `xdg_wm_base` and `wl_seat`, `read-pixels`, a PNG writer, `cf.input`
+  (generated keymaps, keycodes, modifier state) and `cf.scene` (buffer/rect/image nodes, hit
+  testing, a software cursor). Backends beyond headless, damage and the remaining seat work
+  (grabs, a focus stack) are phases 2b-5.
 
 ## What this is
 
@@ -216,6 +223,16 @@ The gate checks pixels, ping/pong and the object lifetimes.
 
 ```
 ./scripts/xdg-shell-gate.sh
+```
+
+## Hello, pointer
+
+The phase-3c gate, in one command: two `weston-simple-shm` windows are placed, the pointer is
+moved over one and clicked, the keyboard and the `activated` configure follow the click, and the
+frame contains the cursor's own pixels at the pointer's position.
+
+```
+./scripts/scene-gate.sh
 ```
 
 ## Hello, pixels

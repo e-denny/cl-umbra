@@ -229,13 +229,27 @@ to an id that no longer exists."
     callback))
 
 (defmethod wl-surface.set-opaque-region ((surface surface) region)
-  "Pending until commit, like every other piece of surface state."
-  (setf (surface-pending-opaque-region surface) region
+  "Pending until commit, and *copied now*.
+
+The rectangles are taken at request time, not at commit time, because the client
+is free to destroy the wl_region as soon as this request has been sent -- which
+is exactly what weston's own clients do.  Snapshotting later would read a region
+whose rectangles are already gone (found by weston-eventdemo, which sets an
+input region covering its window and destroys it immediately)."
+  (setf (surface-pending-opaque-region surface)
+        (and region (region-rectangles region))
         (surface-pending-opaque-region-p surface) t)
   surface)
 
 (defmethod wl-surface.set-input-region ((surface surface) region)
-  (setf (surface-pending-input-region surface) region
+  "Pending until commit, and copied now: NIL, :EMPTY, or the rectangles.
+
+Three states, and they are not two: NIL is \"no region was set\" (the whole
+surface takes input), :EMPTY is an empty wl_region (none of it does, which is how
+a client makes a window click-through), and a list is exactly those rectangles
+(D31)."
+  (setf (surface-pending-input-region surface)
+        (if region (or (region-rectangles region) :empty) nil)
         (surface-pending-input-region-p surface) t)
   surface)
 
@@ -269,19 +283,14 @@ before that buffer was presented."
         (when (and old (not (eq old new)))
           (release-shm-buffer old))))
     (setf (surface-pending-damage surface) nil)
-    ;; Regions are snapshotted, not referenced: the client may destroy the
-    ;; wl_region object as soon as the commit is sent (docs/memory-and-rendering.md
-    ;; §3 -- foreign state copied at the moment it becomes current).
+    ;; Regions were copied when they were set (the client may have destroyed the
+    ;; wl_region since), so committing only moves the pending copy to current.
     (when (surface-pending-opaque-region-p surface)
-      (setf (surface-opaque-region surface)
-            (let ((region (surface-pending-opaque-region surface)))
-              (and region (region-rectangles region)))
+      (setf (surface-opaque-region surface) (surface-pending-opaque-region surface)
             (surface-pending-opaque-region-p surface) nil
             (surface-pending-opaque-region surface) nil))
     (when (surface-pending-input-region-p surface)
-      (setf (surface-input-region surface)
-            (let ((region (surface-pending-input-region surface)))
-              (and region (region-rectangles region)))
+      (setf (surface-input-region surface) (surface-pending-input-region surface)
             (surface-pending-input-region-p surface) nil
             (surface-pending-input-region surface) nil))
     (setf (surface-committed-callbacks surface)

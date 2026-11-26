@@ -18,7 +18,9 @@ buffers, which are read in place: no copy, no texture, no upload.")
   (:export
    #:make-target
    #:fill-target
+   #:fill-rect
    #:composite-buffer
+   #:composite-bitmap
    #:render-surface
    #:pixman-format-for-shm
    #:+pixman-op-src+
@@ -56,6 +58,61 @@ already speak in keycodes and masks, so that change stays inside this package.")
    #:+modifier-mod1+
    #:+modifier-mod4+))
 
+(defpackage #:cf.scene
+  (:use #:cl)
+  (:local-nicknames (#:render #:cf.render.pixman))
+  (:import-from #:wayland.server
+                #:surface-current-buffer
+                #:surface-current-x
+                #:surface-current-y
+                #:surface-input-region
+                #:surface-mapped-p
+                #:shm-buffer-width
+                #:shm-buffer-height)
+  (:documentation
+   "The scene graph: nodes with positions, a stacking order, hit testing and
+compositing (docs/framework.md §4).  Policy stays outside; this package knows
+nothing about seats, toplevels or focus.")
+  (:export
+   ;; the scene and its two ends
+   #:scene
+   #:make-scene
+   #:scene-width
+   #:scene-height
+   #:scene-root
+   #:scene-cursor
+   #:scene-cursor-visible-p
+   #:scene-add-node
+   #:scene-remove-node
+   #:scene-hit-test
+   #:scene-render
+   ;; nodes
+   #:scene-node
+   #:node-parent
+   #:node-x
+   #:node-y
+   #:node-position
+   #:set-node-position
+   #:node-visible-p
+   #:node-width
+   #:node-height
+   #:node-raised
+   #:tree-node
+   #:node-children
+   #:buffer-node
+   #:make-buffer-node
+   #:buffer-node-surface
+   #:rect-node
+   #:make-rect-node
+   #:rect-node-color
+   #:image-node
+   #:make-image-node
+   #:image-node-octets
+   ;; the built-in cursor
+   #:+cursor-width+
+   #:+cursor-height+
+   #:make-cursor-image))
+
 (defpackage #:cf.backend.headless.png
   (:use #:cl)
   (:documentation
@@ -69,6 +126,7 @@ a debugging artefact and a test fixture, not a compression benchmark.")
   (:local-nicknames (#:render #:cf.render.pixman)
                     (#:png #:cf.backend.headless.png)
                     (#:input #:cf.input)
+                    (#:scene #:cf.scene)
                     (#:srv #:wayland.server)
                     (#:reactor #:wayland.reactor))
   (:import-from #:wayland
@@ -94,6 +152,16 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:compositor-shells
    #:compositor-seat
    #:compositor-modifiers
+   #:compositor-scene
+   #:compositor-cursor-x
+   #:compositor-cursor-y
+   #:compositor-cursor-visible-p
+   #:compositor-placement-x
+   #:compositor-placement-y
+   #:on-new-toplevel
+   #:surface-under-cursor
+   #:update-pointer
+   #:surface-scene-node
    #:focus-surface
    #:inject-key
    #:inject-pointer-motion
@@ -120,6 +188,16 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
                 #:compositor-shells
                 #:compositor-seat
                 #:compositor-modifiers
+                #:compositor-scene
+                #:compositor-cursor-x
+                #:compositor-cursor-y
+                #:compositor-cursor-visible-p
+                #:compositor-placement-x
+                #:compositor-placement-y
+                #:on-new-toplevel
+                #:surface-under-cursor
+                #:update-pointer
+                #:surface-scene-node
                 #:focus-surface
                 #:inject-key
                 #:inject-pointer-motion
@@ -131,7 +209,9 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
   (:import-from #:cf.render.pixman
                 #:make-target
                 #:fill-target
+                #:fill-rect
                 #:composite-buffer
+                #:composite-bitmap
                 #:render-surface
                 #:pixman-format-for-shm)
   (:import-from #:cf.backend.headless.png
@@ -156,6 +236,16 @@ docs/framework.md §1 follow.")
    #:compositor-shells
    #:compositor-seat
    #:compositor-modifiers
+   #:compositor-scene
+   #:compositor-cursor-x
+   #:compositor-cursor-y
+   #:compositor-cursor-visible-p
+   #:compositor-placement-x
+   #:compositor-placement-y
+   #:on-new-toplevel
+   #:surface-under-cursor
+   #:update-pointer
+   #:surface-scene-node
    #:focus-surface
    #:inject-key
    #:inject-pointer-motion
@@ -167,7 +257,9 @@ docs/framework.md §1 follow.")
    ;; the renderer
    #:make-target
    #:fill-target
+   #:fill-rect
    #:composite-buffer
+   #:composite-bitmap
    #:render-surface
    #:pixman-format-for-shm
    ;; protocol subclasses

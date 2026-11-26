@@ -103,8 +103,15 @@ offset % 4 == 0
   mmap succeeds past the end of a file and the mistake would arrive later as SIGBUS. Existing
   buffers keep working because they hold the pool, and their pointers are derived from the
   pool's current mapping rather than cached.
-- **Regions** (D29) are copied when a surface commits: a client may destroy the `wl_region` the
-  moment it has set it, and the surface keeps the area as a list of rectangles.
+- **Regions** (D29, corrected by D31.5): copied when `set_opaque_region`/`set_input_region` is
+  *handled*, not when the surface commits. A client may destroy the `wl_region` the moment it
+  has set it -- weston's clients do -- so the rectangles are taken at request time and both
+  pending slots hold the copy. Snapshotting at commit read a destroyed region's empty
+  rectangle list, which quietly made `weston-eventdemo`'s window input-transparent.
+- **The cursor image** (D31.6) is a 16x16 arrow generated from a character table into a plain
+  octet vector, held by an `image-node`. It is composited with `PIXMAN_OP_OVER` from a pixman
+  image over that vector, pinned for the call; the node keeps no pixman object between frames,
+  so there is nothing to invalidate when the scene changes.
 
 ## 4. The SIGBUS problem (honest version)
 
