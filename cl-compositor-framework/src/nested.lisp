@@ -75,11 +75,14 @@
    (configured-p :initform nil :accessor nested-configured-p)
    (mapped-p :initform nil :accessor nested-mapped-p)
    (awaiting-frame-p :initform nil :accessor nested-awaiting-frame-p)
-   ;; The parent's pointer: the serial of its last enter (set_cursor requires one)
-   ;; and what our session has told it about the pointer's picture.  See
+   ;; The parent's pointer: the serial of its last enter (set_cursor requires one),
+   ;; the picture we have asked it to show (:blank, or :default before we have asked),
+   ;; and the serial we last asked with -- a new enter is worth asking again, because
+   ;; a compositor may reset a client's cursor when the pointer comes back.  See
    ;; SYNC-PARENT-CURSOR (D41).
    (parent-pointer-serial :initform nil :accessor nested-parent-pointer-serial)
    (parent-cursor-state :initform :default :accessor nested-parent-cursor-state)
+   (parent-cursor-serial :initform nil :accessor nested-parent-cursor-serial)
    (blank-cursor-surface :initform nil :accessor nested-blank-cursor-surface)
    (blank-cursor-pool :initform nil :accessor nested-blank-cursor-pool)
    (blank-cursor-buffer :initform nil :accessor nested-blank-cursor-buffer)
@@ -382,13 +385,13 @@ when the input device is a parent pointer instead of a test's injection."
                                        :width width
                                        :height height
                                        :pump pump))
-          ;; The pointer's image belongs to the parent (D39).  It draws its cursor
-          ;; over our surface already; ours would be a second arrow at the same
-          ;; spot -- a 16x16 stub, upscaled by a parent whose output is at scale 2,
-          ;; on top of a themed cursor that is the right size and shape.  Two
-          ;; cursors is not a style question: it is a wrong picture, and the manual
-          ;; test saw it on the first frame it looked at.
-          (setf (headless:compositor-cursor-visible-p compositor) nil)
+          ;; Our own cursor is the fallback inside this window: when the client under
+          ;; the pointer has an image we draw that, and when it has none we draw our
+          ;; own arrow.  The parent is told to draw nothing over our surface for as
+          ;; long as we are alive (SYNC-PARENT-CURSOR), so exactly one pointer is ever
+          ;; visible.  D39 hid our cursor instead and let the parent's through; that
+          ;; left the client's image with nowhere to appear, and handing the pointer
+          ;; back mid-window is what made it vanish (D41, revised).
           (let ((registry (wc:wl-display.get-registry display)))
             ;; BIND-PARENT-GLOBALS fills in the slots of what the parent offers.
             (unless (bind-parent-globals backend registry)
@@ -509,16 +512,19 @@ cursor is.  Three cases, and the middle one is the point: a client image is bein
 -- hide the parent's; no client image -- give the parent the pointer back; nothing
 changed --- say nothing, because a set_cursor per cycle would be a request per frame for
 a picture nobody is looking at."
-  (let* ((pointer (nested-pointer backend))
-         (serial (nested-parent-pointer-serial backend))
-         (image (and (not (nested-closing-p backend))
-                     (cf.scene:scene-cursor-surface
-                      (headless:compositor-scene (nested-compositor backend)))))
-         (desired (if image :blank :default)))
-    (when (and pointer serial (not (eq desired (nested-parent-cursor-state backend))))
+  (let ((pointer (nested-pointer backend))
+        (serial (nested-parent-pointer-serial backend)))
+    ;; Blank for as long as this session exists, and blank again on every new enter:
+    ;; "give the parent its cursor back" was the earlier design and it does not work,
+    ;; because set_cursor with no surface means *hide* to a compositor, not "use your
+    ;; default" -- so the pointer disappeared whenever this session had nothing of its
+    ;; own to draw (the fifth manual test's vanishing arrow, D41 revised).
+    (when (and pointer serial
+               (not (nested-closing-p backend))
+               (or (not (eq :blank (nested-parent-cursor-state backend)))
+                   (not (eql serial (nested-parent-cursor-serial backend)))))
       (handler-case
-          (let ((surface (when (eq desired :blank)
-                           (ensure-blank-cursor-surface backend))))
+          (let ((surface (ensure-blank-cursor-surface backend)))
             (when surface
               (wc:wl-surface.attach surface (nested-blank-cursor-buffer backend) 0 0)
               (wc:wl-surface.damage surface 0 0 1 1))
@@ -528,7 +534,8 @@ a picture nobody is looking at."
             (when surface
               (wc:wl-surface.commit surface))
             (wc:flush (nested-display backend))
-            (setf (nested-parent-cursor-state backend) desired))
+            (setf (nested-parent-cursor-state backend) :blank
+                  (nested-parent-cursor-serial backend) serial))
         (wc:client-error () nil))))
   nil)
 

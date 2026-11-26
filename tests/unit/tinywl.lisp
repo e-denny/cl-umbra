@@ -79,6 +79,35 @@ connection would make this a gate rather than a test."
 ;;; Edges
 ;;; ---------------------------------------------------------------------------
 
+
+
+(deftest a-client-border-is-where-the-pointer-can-reach-it
+  ;; A client-side decoration sets an input region that excludes its shadow, so the
+  ;; visible left border sits inside the surface's bounding box.  Measuring the grab
+  ;; margin from the box put that border outside it and read a press on it as "the
+  ;; body", which resized from the bottom-right -- the sixth manual test's "the wrong
+  ;; border moves" (D42).
+  (with-tinywl (tinywl)
+    (let* ((surface (fake-window tinywl :width 806 :height 563))
+           (node (cf:surface-scene-node surface)))
+      ;; weston-terminal's own numbers: a 32-pixel shadow on every side.
+      (setf (srv:surface-input-region surface) '((32 32 742 499)))
+      (multiple-value-bind (left top width height) (tinywl:pointer-reach node)
+        (ok (equal (list left top width height) '(32 32 742 499))
+            (format nil "the reach of the window is its input region in output space (~S)"
+                    (list left top width height))))
+      (ok (= grab:+edge-left+ (tinywl:edges-at node 34 300))
+          "two pixels inside the visible left border is the left edge")
+      (ok (= grab:+edge-right+ (tinywl:edges-at node 770 300))
+          "two pixels inside the visible right border is the right edge")
+      (ok (= (logior grab:+edge-right+ grab:+edge-bottom+)
+             (tinywl:edges-at node 400 300))
+          "the middle of the window is still its bottom-right corner")
+      ;; A surface with no input region is its own reach: every undecorated client.
+      (setf (srv:surface-input-region surface) nil)
+      (ok (= 806 (nth-value 2 (tinywl:pointer-reach node)))
+          "a client with no input region reaches to its buffer's edge (806)"))))
+
 (deftest edges-at-finds-the-side-the-pointer-is-on
   (let ((node (scene:make-rect-node 200 150 #xFF000000)))
     (scene:set-node-position node 100 50)

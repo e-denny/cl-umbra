@@ -151,6 +151,9 @@ two hooks.")
    #:resize-grab
    #:begin-resize-grab
    #:resize-grab-edges
+   #:resize-grab-anchor-right
+   #:resize-grab-anchor-bottom
+   #:grab-anchored
    #:resize-target-size
    #:resize-grab-requested-width
    #:resize-grab-requested-height

@@ -146,14 +146,21 @@ lost motion event cannot leave the window drifting behind the pointer."))
    (min-height :initarg :min-height :initform 1 :reader resize-grab-min-height)
    ;; Last size asked for, so a quiet pointer does not send a configure per event.
    (requested-width :initarg :start-width :accessor resize-grab-requested-width)
-   (requested-height :initarg :start-height :accessor resize-grab-requested-height))
+   (requested-height :initarg :start-height :accessor resize-grab-requested-height)
+   ;; The edge that must not move: the opposite one's position at the start.  A
+   ;; resize from the left edge keeps the right edge where it was, so the node's
+   ;; position is derived from it and the client's *actual* size (D42).
+   (anchor-right :initarg :anchor-right :reader resize-grab-anchor-right)
+   (anchor-bottom :initarg :anchor-bottom :reader resize-grab-anchor-bottom))
   (:documentation
    "An interactive resize from EDGES (an xdg_toplevel.resize_edge bitmask).
 
-v0 asks for the size; it does not move the node when the top or left edge is
-dragged, because until the client comes back with a buffer of the requested size
-there is nothing to anchor.  That is a documented simplification, not an
-oversight: the alternative is a window that slides while its content does not."))
+A resize asks the client for a size and the client answers with one, so the node's
+size is not the grab's to set.  What the grab *can* do is keep the edge opposite the
+one being dragged still: dragging the left edge moves the window's left side while
+its right side stays put, which is what a person sees themselves doing.  It is
+anchored to the client's real size (GRAB-ANCHORED), not to the size requested, so
+the window never slides while its content does not (D42)."))
 
 (defun begin-resize-grab (node x y edges &key (button #x110) (min-width 1) (min-height 1))
   "A resize grab for NODE from EDGES, with the pointer starting at (X, Y)."
@@ -168,7 +175,9 @@ oversight: the alternative is a window that slides while its content does not.")
                    :start-height height
                    :edges edges
                    :min-width min-width
-                   :min-height min-height)))
+                   :min-height min-height
+                   :anchor-right (+ (scene:node-x node) width)
+                   :anchor-bottom (+ (scene:node-y node) height))))
 
 (defun resize-target-size (edges start-width start-height dx dy
                            &key (min-width 1) (min-height 1))
@@ -186,6 +195,28 @@ way a screenshot will not show."
               ((logtest +edge-top+ edges) (- start-height dy))
               (t start-height)))))
 
+(defgeneric grab-anchored (grab)
+  (:documentation
+   "Put the node back where the edge it is anchored to says it belongs.
+
+Called after the request (nothing has changed yet, so it is cheap and harmless) and
+again when the client's new size arrives, which is the call that matters: the size
+is the client's, and this is how a compositor keeps the opposite edge still while
+the client's answer comes back.")
+  (:method (grab) nil))
+
+(defmethod grab-anchored ((grab resize-grab))
+  "Keep the edge opposite the dragged one still, using the node's *actual* size."
+  (let ((node (grab-node grab))
+        (edges (resize-grab-edges grab)))
+    (when (logtest +edge-left+ edges)
+      (setf (scene:node-x node)
+            (- (resize-grab-anchor-right grab) (max 1 (scene:node-width node)))))
+    (when (logtest +edge-top+ edges)
+      (setf (scene:node-y node)
+            (- (resize-grab-anchor-bottom grab) (max 1 (scene:node-height node)))))
+    node))
+
 (defmethod grab-motion ((grab resize-grab) x y)
   (multiple-value-bind (width height)
       (resize-target-size (resize-grab-edges grab)
@@ -200,4 +231,8 @@ way a screenshot will not show."
       (setf (resize-grab-requested-width grab) width
             (resize-grab-requested-height grab) height)
       (grab-resize grab width height)
+      ;; The client's size may already be the new one (it may have answered the
+      ;; previous event), so the anchor is applied on every motion as well as on
+      ;; every size change.
+      (grab-anchored grab)
       (grab-changed grab))))

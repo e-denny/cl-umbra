@@ -143,30 +143,55 @@ asked for.  A compositor that decides for itself needs a rule, and twelve pixels
 small enough to reach the middle by aim and large enough to hit a corner with a
 mouse.")
 
+(defun pointer-reach (node)
+  "The window's interactive rectangle in output space: (values left top width height).
+
+The sides a person can aim at are the sides that take input.  A client with
+client-side decorations sets an input region that excludes its shadow -- weston-terminal's
+is (32 32 742 499) inside an 806x563 surface -- so the *visible* left border is 32 pixels
+in from the surface's bounding box.  Measuring the grab margin from the bounding box put
+that border outside it, and a press on the visible border then read as "the body of the
+window" and resized from the bottom-right: the right and bottom edges moved and the one
+under the pointer did not (the sixth manual test).  A surface with no input region is its
+own reach, which is every client that does not decorate itself."
+  (let* ((surface (and (typep node 'scene:buffer-node) (scene:buffer-node-surface node)))
+         (region (and surface (srv:surface-input-region surface))))
+    (if (and (consp region) (plusp (length region)))
+        (let ((x0 (loop for (x y w h) in region minimize x))
+              (y0 (loop for (x y w h) in region minimize y))
+              (x1 (loop for (x y w h) in region maximize (+ x w)))
+              (y1 (loop for (x y w h) in region maximize (+ y h))))
+          (declare (ignorable x0))   ; silence an unused-binding warning in some builds
+          (values (+ (scene:node-x node) x0)
+                  (+ (scene:node-y node) y0)
+                  (max 1 (- x1 x0))
+                  (max 1 (- y1 y0))))
+        (values (scene:node-x node) (scene:node-y node)
+                (scene:node-width node) (scene:node-height node)))))
+
 (defun edges-at (node x y)
   "The resize edges a press at (X, Y) asks for, as an xdg_toplevel.resize_edge mask.
 
 The sides within `+resize-margin+' of the point win; a point in the body of the
 window means its bottom-right corner, because that is the corner a person drags
-when the window has no border to grab."
-  (let* ((left (scene:node-x node))
-         (top (scene:node-y node))
-         (local-x (- x left))
-         (local-y (- y top))
-         (width (scene:node-width node))
-         (height (scene:node-height node))
-         (edges 0))
-    (when (< local-x +resize-margin+)
+when the window has no border to grab.  The rectangle those sides come from is the
+one the pointer can reach (POINTER-REACH), not the surface's bounding box, so a
+client's own border is a border and not a body."
+  (multiple-value-bind (left top width height) (pointer-reach node)
+    (let* ((local-x (- x left))
+           (local-y (- y top))
+           (edges 0))
+      (when (< local-x +resize-margin+)
       (setf edges (logior edges grab:+edge-left+)))
-    (when (< local-y +resize-margin+)
-      (setf edges (logior edges grab:+edge-top+)))
-    (when (> local-x (- width +resize-margin+))
-      (setf edges (logior edges grab:+edge-right+)))
-    (when (> local-y (- height +resize-margin+))
-      (setf edges (logior edges grab:+edge-bottom+)))
-    (if (zerop edges)
-        (logior grab:+edge-right+ grab:+edge-bottom+)
-        edges)))
+      (when (< local-y +resize-margin+)
+        (setf edges (logior edges grab:+edge-top+)))
+      (when (> local-x (- width +resize-margin+))
+        (setf edges (logior edges grab:+edge-right+)))
+      (when (> local-y (- height +resize-margin+))
+        (setf edges (logior edges grab:+edge-bottom+)))
+      (if (zerop edges)
+          (logior grab:+edge-right+ grab:+edge-bottom+)
+          edges))))
 
 (defun begin-interactive (tinywl surface mode)
   "Start tinywl's interactive MODE (:move or :resize) on SURFACE.

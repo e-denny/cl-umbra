@@ -457,6 +457,33 @@ of lines of protocol."
            (check (equal '(240 180) (node-size surface-a))
                   "and it came back with a ~S buffer, not 240x180" (node-size surface-a))
 
+           ;; 5b. A resize grabbed at the LEFT edge moves the left edge, not the
+           ;;     right one (D42): the grab anchors the edge opposite the dragged
+           ;;     one, using the size the client actually came back with.
+           (let* ((node (cf:surface-scene-node surface-a))
+                  (right-before (+ (cf.scene:node-x node) (cf.scene:node-width node))))
+             (moves 5 75)
+             (pump 0.1)
+             (key "Alt_L" :pressed)
+             (button :right :pressed)
+             (settle)
+             (let ((grabbed (cf:compositor-grab *inner*)))
+               (check (and (typep grabbed 'cf.grab:resize-grab)
+                           (= cf.grab:+edge-left+ (cf.grab:resize-grab-edges grabbed)))
+                      "alt+right on the left border grabs the left edge"))
+             (moves 25 75)
+             (expect '*lines-a* "resize width: 220" :label "the left drag asked for 220")
+             (button :right :released)
+             (key "Alt_L" :released)
+             (pump 0.4)
+             (check (= 20 (cf.scene:node-x node))
+                    "the window's left edge followed the pointer (x ~D)"
+                    (cf.scene:node-x node))
+             (check (= right-before
+                       (+ (cf.scene:node-x node) (cf.scene:node-width node)))
+                    "and its right edge did not move (~D -> ~D)"
+                    right-before (+ (cf.scene:node-x node) (cf.scene:node-width node))))
+
            ;; 6. Alt+F1 sends the bottom window to the front and focuses it.
            (key "Alt_L" :pressed)
            (key "F1" :pressed)
@@ -567,9 +594,15 @@ of lines of protocol."
          ;;     cursor.
          (moves 400 300)
          (settle)
+         ;; The scene learns which image to draw *during* a frame, so wait for the
+         ;; frame that has caught up rather than for the first one with an image.
          (cf:request-frame *inner*)
          (pump 5 :until (lambda ()
-                          (cf.scene:scene-cursor-surface (cf:compositor-scene *inner*))))
+                          (multiple-value-bind (focused)
+                              (cf:seat-pointer-cursor-image (cf:compositor-seat *inner*))
+                            (and focused
+                                 (eq focused (cf.scene:scene-cursor-surface
+                                              (cf:compositor-scene *inner*)))))))
          (let* ((scene (cf:compositor-scene *inner*))
                 (image (cf.scene:scene-cursor-surface scene)))
            (check image "the client's cursor image became the pointer's picture")
@@ -617,11 +650,20 @@ of lines of protocol."
                                      (cf:compositor-scene *inner*)))))
              (check (null (cf.scene:scene-cursor-surface (cf:compositor-scene *inner*)))
                     "over the bare output there is no client image")
-             (check (= *background* (cf:frame-pixel *inner* 793 596))
-                    "and nothing of ours is drawn there (#x~8,'0X)"
+             ;; The session's own arrow is the fallback: with no client image there
+             ;; must still be a pointer, and handing the parent's back does not work
+             ;; -- set_cursor with no surface means "hide" to a compositor, which is
+             ;; the vanishing arrow the sixth manual test found (D41, revised).
+             (check (= #xFFFFFFFF (cf:frame-pixel *inner* 793 596))
+                    "with no client image this session draws its own arrow (#x~8,'0X)"
                     (cf:frame-pixel *inner* 793 596))
-             (check (null (wayland.server:pointer-cursor-surface parent-pointer))
-                    "and the parent has its own pointer back")))
+             (check (let ((blank (and parent-pointer
+                                      (wayland.server:pointer-cursor-surface
+                                       parent-pointer))))
+                      (and blank
+                           (eql 1 (wayland.server:shm-buffer-width
+                                   (wayland.server:surface-current-buffer blank)))))
+                    "and the parent is still told to draw none, so one pointer shows")))
 
          ;; 12. A client's cursor image is a surface the client names, and naming it
          ;;     keeps it out of the scene for good (D40).  The terminal started in

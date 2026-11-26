@@ -27,6 +27,7 @@ compositor, and how a session starts and stops.")
    #:desktop-toplevel-at
    #:begin-interactive
    #:edges-at
+   #:pointer-reach
    #:install-keybindings
    #:close-toplevels
    #:parent-socket-path

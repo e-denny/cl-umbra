@@ -20,6 +20,7 @@
 (defpackage #:wayland.test.scene
   (:use #:cl #:rove)
   (:local-nicknames (#:scene #:cf.scene)
+                    (#:grab #:cf.grab)
                     (#:srv #:wayland.server))
   (:documentation "Tests for cf.scene: hit testing, stacking, positions, cursor."))
 
@@ -312,6 +313,33 @@ different states, and only the first is acceptable for a cursor image."
     (setf (srv:resource-destroyed-p surface) t)
     (ok (null (scene:client-cursor-usable-p surface))
         "and a destroyed one is not, whatever it still holds")))
+
+(deftest a-resize-keeps-the-edge-opposite-the-dragged-one-still
+  ;; A resize asks the client for a size and the client answers with one, so the
+  ;; grab anchors the opposite edge to the size the client *came back with* -- not to
+  ;; the size it asked for, which would slide the window while its content stayed
+  ;; (D42).
+  (let* ((node (scene:make-rect-node 200 150 #xFF000000))
+         (grab (progn (scene:set-node-position node 100 50)
+                      (grab:begin-resize-grab node 102 125 grab:+edge-left+))))
+    (ok (= 300 (grab:resize-grab-anchor-right grab))
+        "the anchored edge is where the node's right edge started")
+    ;; The client comes back 50 pixels narrower: the left edge must move 50 right.
+    (setf (scene:node-width node) 150)
+    (grab:grab-anchored grab)
+    (ok (= 150 (scene:node-x node))
+        (format nil "the left edge moved to keep the right one where it was (x = ~D)"
+                (scene:node-x node)))
+    (ok (= 300 (+ (scene:node-x node) (scene:node-width node)))
+        "and the right edge is where it started"))
+  ;; A resize from the right edge does not move the node at all.
+  (let* ((node (scene:make-rect-node 200 150 #xFF000000))
+         (grab (progn (scene:set-node-position node 100 50)
+                      (grab:begin-resize-grab node 295 125 grab:+edge-right+))))
+    (setf (scene:node-width node) 260)
+    (grab:grab-anchored grab)
+    (ok (= 100 (scene:node-x node))
+        "a right-edge resize leaves the left edge alone")))
 
 (deftest the-scene-draws-over-the-background-in-stacking-order
   (with-compositor (compositor :width 32 :height 32)

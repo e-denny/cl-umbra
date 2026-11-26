@@ -1400,6 +1400,9 @@ they are also the clearest evidence that clients are asking for cursors we do no
    second arrow, blurrier, and the wrong size wherever the parent is scaled. This is what other
    nested compositors do (weston's X11/Wayland backends, wlroots' embedded backends), and it is
    the honest division: the compositor that owns the seat owns the pointer's picture.
+   **Revised by D41:** hiding our cursor is only half of that division. The other half is drawing
+   the *client's* image, and the session keeps its own arrow as the fallback — the parent is
+   blanked for as long as we are the ones drawing. `start-nested` no longer sets this flag.
 3. **A client's cursor surface still does not appear** (phase 5). Hiding our own cursor makes
    the parent's themed pointer the one a person sees, which is right for a nested session and
    wrong for a bare one — in a headless or a finished compositor, phase 5 is where a client's
@@ -1539,15 +1542,87 @@ mode the same probe shows the parent's pointer holding our 1x1 blank while the c
 drawn and nothing of the sort at a bare-output spot. Gate clause 16 grew by these checks in both
 runs — "the client's cursor image became the pointer's picture", "...is the focused pointer's,
 hotspot (11, 12)", and nested-only "the parent is told to draw no pointer", "with a 1x1
-transparent image", "over the bare output there is no client image", "nothing of ours is drawn
-there", "the parent has its own pointer back" — 36 checks headless, 48 nested, 84 in two runs,
-gate 16/16, 216 tests in 10 suites.
+transparent image", "over the bare output there is no client image" — 36 checks headless, 52 nested
+after D42's four, 92 in two runs; the gate is 16/16 and the suite is 218 tests in 10 suites.
+
+**Revised after the sixth manual test.** Two things were wrong. First, a nested session still hid
+its *own* cursor, so with no client image there was nothing to draw at all: the pointer disappeared
+when it moved from a window onto the bare output, and came back only after leaving the window
+entirely (the parent shows its own cursor over its own surfaces). Second, "give the parent its
+pointer back" was built on a wrong reading of the protocol: `set_cursor` with no surface means *hide
+the cursor* to a compositor, not "use your default". So the rule is now: a nested session owns the
+pointer's picture for as long as it exists — it blanks the parent once and again on every enter, and
+draws the client's image or, failing that, its own arrow. That makes the background pointer our
+16x16 stub rather than the parent's themed one, upscaled on a scaled output; it is the honest
+picture, and it is what phase 2b and phase 5 (scale, cursor themes) improve.
 
 **Consequences.** Cursor shapes now change the way a client means them to, in a nested session and
-in a headless one, and the nested window shows exactly one pointer at a time. What this does not
+in a headless one, and the nested window shows exactly one pointer at a time — the client's image
+where the client has one, this session's arrow everywhere else. What this does not
 do: scale the cursor (a 24x24 image on a 2x parent is still upscaled and soft — phase 2b), animate
 it (several images per `set_cursor` is `wl_cursor` frame timing, phase 5), or honour a parent that
 ignores `set_cursor` from its own clients (a compositor that does would leave its cursor under
 ours; ours takes the serial and asks, and that is all a client can do). The lesson, which is D39's
 from the other side: **hiding your own cursor is only half a decision — the other half is drawing
 somebody else's.**
+
+## D42 — A resize moves the edge under the pointer, and a client's border is a border
+
+**Status:** accepted
+
+**Context.** The sixth manual test reported two things that turned out to be one interaction seen
+from both ends. Dragging the left border of a `weston-terminal` resized from the *right* and
+bottom edges — the edge under the pointer did not move. And that was true even when the grab did
+pick the left edge, because an interactive resize only asks the client for a size: the node's
+position was never touched, so the window grew and shrank from its top-left corner and the
+opposite edge moved by itself.
+
+Two separate mistakes, then, and the first one hid the second:
+
+1. `tinywl:edges-at` measured its 12-pixel grab margin from the **surface's bounding box**. A
+   client with client-side decorations sets an input region that excludes its shadow —
+   weston-terminal's is `(32 32 742 499)` inside an 806x563 surface — so its *visible* left border
+   is 32 pixels in from the box. A press there was 34 pixels from the box's edge, read as "the
+   body of the window", and the body means the bottom-right corner: the resize then moved exactly
+   the two edges the pointer was furthest from.
+2. Nothing anchored the opposite edge. That was a documented v0 limitation ("until the client
+   comes back with a buffer of the requested size there is nothing to anchor"), but the anchor was
+   never needed to be guessed: the client's *actual* size arrives as a buffer.
+
+**Decision.**
+
+1. **The grab margin is measured from the part of the window a pointer can reach.**
+   `TINYWL:POINTER-REACH` returns the node's rectangle intersected with its surface's input region
+   (its bounding box, when there are several rectangles), in output space; `EDGES-AT` measures
+   from that. A surface with no input region — every client that does not decorate itself — is its
+   own reach, so the old behaviour is the fallback rather than the rule. A client's own border is
+   then a border, which is also where the client draws its resize cursor, so the edge the pointer
+   is pressing is the edge the picture says it is.
+2. **A resize anchors the edge opposite the one being dragged.** `begin-resize-grab` records the
+   position of the opposite edge (`anchor-right`, `anchor-bottom`), and `GRAB-ANCHORED` puts the
+   node back so that edge stays put **using the node's actual size**: `x := anchor-right - width`
+   for a left-edge drag. It is called from `grab-motion` (the client may already have answered an
+   earlier event) and from `SURFACE-COMMITTED` (the answer arriving while the pointer is still). The
+   window therefore never slides while its content does not: the node moves only when the client's
+   size does.
+
+**Evidence.** A probe with a real `weston-terminal` and an `Alt+right` press on its visible left
+border: the grab is a `resize-grab` with `+edge-left+` (before the reach fix it was the body, i.e.
+bottom-right), the drag asks for 220x180 from a 240-wide window, and afterwards the node is at
+x=20 with its right edge still at 240 — the left edge followed the pointer, the right one did not
+move. Gate clause 16 grew by four checks in each run ("alt+right on the left border grabs the left
+edge", "the left drag asked for 220", "the window's left edge followed the pointer", "and its right
+edge did not move"): 40 checks headless, 52 nested, 92 in two runs; the gate is 16/16 and the suite
+is 218 tests in 10 suites, with `a-client-border-is-where-the-pointer-can-reach-it` (the reach, and
+the fallback for a client with no input region) and
+`a-resize-keeps-the-edge-opposite-the-dragged-one-still` (the anchor arithmetic, and that a
+right-edge drag leaves the left edge alone).
+
+**Consequences.** Dragging any border resizes from that border, in either the compositor's grab
+(`Alt+right`, now reachable on all four sides) or the client's own request. Two things it does not
+do: honour a *minimum* size the client sets (`xdg_toplevel.set_min_size` is recorded nowhere yet, so
+a client can be squeezed past its own minimum until it clamps itself), and keep the anchor for the
+*duration of a client-initiated* resize that the client finishes after the grab ends — the anchor
+is applied while the grab is active and on the commits that arrive during it, which is the whole
+drag. The lesson is the one this slice keeps teaching: **"the body" and "the border" are decisions
+that need the same geometry the pointer does, and a client's decoration is part of its geometry.**

@@ -279,9 +279,11 @@ twice*:
     when it is dragged aside, the click moves the keyboard, the focused client prints
     `key key: 16, unicode: 81` while the unfocused one prints nothing further, the drag
     moves the node by the pointer's delta and stops on the release, Alt+right at the corner
-    produces `resize width: 240, height: 180` in the *client's* output and a 240x180 buffer,
-    Alt+F1 raises the bottom window, and Alt+Esc sends `xdg_toplevel.close` to both clients
-    and stops the loop with no `wl_display.error` anywhere. One client runs with
+    produces `resize width: 240, height: 180` in the *client's* output and a 240x180 buffer, a
+    second drag grabbed at the window's *left* border asks for `resize width: 220` and leaves the
+    right edge where it was while the left one follows the pointer (D42), Alt+F1 raises the
+    bottom window, and Alt+Esc sends `xdg_toplevel.close` to both clients and stops the loop with
+    no `wl_display.error` anywhere. One client runs with
     `WAYLAND_DEBUG=1` and its coloured log (ANSI escapes stripped) is checked for an ordered
     `get_registry` → `configure` → `ack_configure`. The whole scenario then runs a second
     time with tinywl *nested* inside a headless parent, injecting input into the parent, which
@@ -302,8 +304,9 @@ twice*:
     a stray cursor stuck at the output's origin (D40). And the pointer's picture follows the
     client: over the terminal's text area the scene's cursor image is the one that client
     installed, with its hotspot, and the nested run requires the parent to be told to draw no
-    pointer while we draw the client's (a 1x1 transparent image), then to get its own back at a
-    bare-output spot where nothing of ours is drawn (D41).
+    pointer while we draw the client's (a 1x1 transparent image) and, at a bare-output spot where
+    there is no client image, this session's own arrow to be drawn while the parent stays blanked —
+    one pointer shows at all times (D41, revised).
 
 All sixteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface

@@ -207,8 +207,12 @@ space, a visibility flag and a parent.
 - **The cursor is drawn last, and it is whoever's picture it is**: the client's cursor image
   (`wl_pointer.set_cursor`) at pointer minus hotspot when the client has installed one, otherwise
   the session's own arrow. A client's image is never a scene node (D40) but is drawn from the
-  recording the seat keeps, and a nested session lends its pointer accordingly — it draws the
-  client's image and tells its parent to draw none while it does (D41).
+  recording the seat keeps, and a nested session owns the picture inside its own window: it blanks
+  its parent and draws the client's image, or its own arrow when there is none (D41).
+- **A resize moves the edge it grabbed**: `cf.grab` records the edge opposite the dragged one and
+  puts the node back so that edge stays still, using the size the client actually came back with
+  (`grab-anchored`, D42). And an edge is where the pointer can reach — a client-side decoration's
+  input region, not its surface's bounding box (D42, `tinywl:pointer-reach`).
 - **Retained, not immediate**: the tree survives frames, which is what makes rules,
   workspaces, animations and overview possible without a rewrite (D10).
 - **Damage propagation**, clip rectangles and **culling** are open (2b): v0 repaints the whole

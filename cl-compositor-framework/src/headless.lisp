@@ -363,6 +363,14 @@ tracking is 2b's job (docs/memory-and-rendering.md §7)."
         ;; is activated and the keys it asked for arrive (D27).  Once per map.
         (when (and first-map (srv:surface-shell-surface surface))
           (focus-surface compositor surface))))
+    ;; A resize from the top or left edge keeps the *opposite* edge still, and what
+    ;; decides where the node goes is the size the client actually came back with --
+    ;; so this is the moment to place it (D42).
+    (let ((grab (compositor-grab compositor)))
+      (when (and grab
+                 (typep (grab:grab-node grab) 'scene:buffer-node)
+                 (eq (scene:buffer-node-surface (grab:grab-node grab)) surface))
+        (grab:grab-anchored grab)))
     (mark-dirty compositor)
     surface))
 
