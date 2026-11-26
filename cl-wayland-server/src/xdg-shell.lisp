@@ -471,4 +471,4 @@ send, never patched (docs/framework.md §6)."
       (send-configure shell
                       :width (xdg-toplevel-configure-width toplevel)
                       :height (xdg-toplevel-configure-height toplevel)
-                      :states (if activated +xdg-toplevel-state-activated+ nil)))))
+                      :states (if activated (list +xdg-toplevel-state-activated+) nil)))))

@@ -58,7 +58,7 @@ The scripts go through `wayland.test.runner`, which names the eight suites inste
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 163 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 172 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -77,6 +77,14 @@ other end:
   budget, a half-written message kept as a partial tail, 50 connect/disconnect cycles with a
   flat descriptor count, and backpressure: queue more than a socket buffer, check the interest
   dropped to write-only, drain it, check reading came back.
+- **Seats and input.** Nine `wl_seat` tests: the name-then-capabilities order on bind; a
+  keymap arriving as a descriptor that maps to exactly the bytes the seat was given (and
+  `repeat_info` after it); `missing_capability` for a seat that never had the capability;
+  `wl_seat.release` refused at version 4; a key reaching only the focused keyboard, with the
+  enter/modifiers/key/modifiers order; pointer enter/motion/button/axis/leave with the fixed
+  coordinates and the serials a client needs for grabs; a region's union and difference; a
+  region snapshotted at commit and outliving its object; and a pool that grows, refuses to
+  shrink, and refuses to grow past its file.
 - **The shell's refusals.** Eight `xdg-shell` tests drive the same raw peer through the v1
   handshake and through every way a client can get it wrong: a second role, a second
   `xdg_surface` on one `wl_surface`, a buffer before the initial ack, an ack for a serial we
@@ -164,7 +172,25 @@ Phase 3 (xdg-shell toplevels) adds one clause:
     validated. The client is a redraw loop, so the gate *ends* it with `SIGTERM` and checks
     that it stopped -- "exits 0 by itself" would be a claim about weston, not about us.
 
-All eleven clauses pass. Two details worth knowing: the protocol clause
+Phase 3b (seats and input) adds one more:
+
+12. **Seats and input, against a real client** (`scripts/seat-gate.sh`,
+    `scripts/seat-gate.lisp`, `tests/c-client/xkb-keymap-probe.c`). `weston-eventdemo` — a
+    real client with its own libwayland and its own xkbcommon — is started on a pty (so its
+    stdio is line-buffered and its output can be read as evidence), maps a window, and is
+    focused by the compositor. The gate then injects pointer motion to (50, 60), a left button
+    press and release, a vertical scroll of 15, and Shift followed by q, and requires the
+    *client's own output* to contain: the enter ("focus x: 0, y: 0"), the motion with those
+    coordinates, the button with code 272 at (50, 60), the axis with value 15.000000, and
+    `key key: 16, unicode: 81, state: pressed, modifiers: 0x1` — keycode 16 translated through
+    the keymap we sent into "Q", with the shift mask our modifiers event reported. It also
+    checks the seat's state (capabilities, keymap, focus, keyboard objects with enter), that
+    the toplevel was configured `activated`, that the keymap we sent parses standalone
+    (`XKB_CONTEXT_NO_DEFAULT_INCLUDES`) and translates keycode 1 to Escape and Shift+q to Q,
+    that the keymap descriptor we created is closed after it travelled, and that teardown
+    leaves nothing behind.
+
+All twelve clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs
@@ -261,6 +287,7 @@ scale, pool resize), and anything that needs `xdg-shell`.
 | server | our own C probe (`tests/c-client`) | bind, destroy, re-bind across versions; `delete_id` at the right time — **passes** (`scripts/c-probe.sh`) |
 | server | the peer fuzzer | no crash, wedge, leak or malformed reply under 10⁶ adversarial connections — **passes** (`scripts/fuzz-client.sh`) |
 | server | `weston-simple-shm` | buffer attach/commit/release, damage, frame callbacks, `xdg-shell` v1 -- **passes** (`scripts/xdg-shell-gate.sh`) |
+| server | `weston-eventdemo` | `wl_seat` v4, keymap fd + `repeat_info`, focus, key/button/motion/axis events, translation to the right unicode -- **passes** (`scripts/seat-gate.sh`) |
 | server | `kitty` | keyboard, clipboard-adjacent paths, resize, popups |
 | server | GTK4 app | subsurfaces, buffer scale, fractional scale, decoration negotiation |
 | server | Qt app | buffer formats, `xdg_popup`, activation |

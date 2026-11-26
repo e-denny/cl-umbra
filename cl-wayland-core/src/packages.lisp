@@ -121,6 +121,9 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:unmap-file
    #:mapped-octets
    #:set-file-size
+   #:file-size
+   #:+seek-set+
+   #:+seek-end+
    #:write-mapped-octets
    #:pointer+
    #:+prot-read+

@@ -13,5 +13,6 @@ scene graph, seat and focus policy, and the shell protocol state machines."
   :serial t
   :components ((:file "src/package")
                (:file "src/render-pixman")
+               (:file "src/xkb")
                (:file "src/png")
                (:file "src/headless")))

@@ -91,8 +91,16 @@ cycle, so nothing is lost by stopping early."
 ;;; ---------------------------------------------------------------------------
 
 (defun run-once (display &key timeout)
-  "One reactor cycle: commands, wait, sources, timers, idles."
-  (wayland.reactor:run-once (display-reactor display) :timeout timeout))
+  "One reactor cycle: commands, wait, sources, timers, idles, then flush.
+
+The flush belongs here, at the end of every cycle, and not only where events are
+produced: a compositor that queues events outside a client's readable event (a
+backend injecting input, a timer, an idle) would otherwise leave them in the
+buffer until something unrelated flushed.  libwayland-server's loop flushes its
+clients every iteration for the same reason.  Found by weston-eventdemo sitting
+idle after its first frame: our motion events were queued and never written."
+  (prog1 (wayland.reactor:run-once (display-reactor display) :timeout timeout)
+    (flush-all display)))
 
 (defun run (display &key timeout stop)
   "Run cycles until REQUEST-STOP, STOP returns true, or TIMEOUT seconds pass.

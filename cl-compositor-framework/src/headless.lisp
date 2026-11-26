@@ -48,6 +48,11 @@ SLOT-VALUE shows a different one."))
    ;; it, newest first: the gate asks them whether the ping/pong round trip and
    ;; the configure handshake really happened.
    (shells :initform nil :accessor compositor-shells)
+   ;; One seat, one keymap, one modifier state (srv:seat, cf.input:modifiers).
+   ;; There is no input device: a backend or a test injects what a device would
+   ;; have reported, which is why the seat is reachable from the compositor.
+   (seat :initarg :seat :initform nil :accessor compositor-seat)
+   (modifiers :initform (input:make-modifiers) :accessor compositor-modifiers)
    ;; client -> the wl_output resource that client bound, for wl_surface.enter.
    (outputs :initform (make-hash-table) :reader compositor-outputs)
    (dirty-p :initform t :accessor compositor-dirty-p)
@@ -79,15 +84,26 @@ Returns the compositor; the display is `(compositor-display ...)`, and
                                                :runtime-dir runtime-dir
                                                :reactor (or reactor
                                                              (wayland.reactor:make-reactor))))
+         (seat (srv:make-seat display
+                              :name "seat0"
+                              :capabilities (logior srv:+wl-seat-capability-pointer+
+                                                    srv:+wl-seat-capability-keyboard+)))
          (compositor (make-instance 'headless-compositor
                                     :display display
                                     :width width
                                     :height height
                                     :background background
+                                    :seat seat
                                     :target (render:make-target width height))))
+    ;; wl_compositor version 3: weston's window.c clients bind 3 unconditionally
+    ;; (they were the reason this was not v1), so v3 is the lowest honest version
+    ;; that lets a real pointer-using client connect.  v3 adds one request,
+    ;; set_buffer_scale, which this server accepts and validates but draws at 1:1
+    ;; until the renderer scales (2b); the output advertises scale 1, so a
+    ;; well-behaved client never asks for more.  v4 would promise damage_buffer.
     (srv:add-global display
                                :interface "wl_compositor"
-                               :version 1
+                               :version 3
                                :resource-class 'cf-compositor
                                :bind (lambda (resource)
                                        ;; Surfaces this client creates are
@@ -118,6 +134,11 @@ Returns the compositor; the display is `(compositor-display ...)`, and
                                        (setf (compositor-shells compositor)
                                              (cons resource
                                                    (compositor-shells compositor)))))
+    ;; The seat is advertised at version 4 (D27): capabilities and name, keymap
+    ;; and repeat_info, pointer and keyboard events.  The keymap is generated, not
+    ;; compiled, so nothing here links libxkbcommon (D28).
+    (srv:add-seat-global display seat)
+    (srv:set-seat-keymap seat (input:make-keymap) :repeat-rate 25 :repeat-delay 600)
     (render:fill-target (compositor-target compositor) background)
     compositor))
 
@@ -138,6 +159,18 @@ damage tracking is the next slice's job (docs/memory-and-rendering.md §7)."
       (setf (compositor-surfaces compositor)
             (append (compositor-surfaces compositor) (list surface))))
     (setf (compositor-dirty-p compositor) t)
+    ;; tinywl's policy, and the only one that can exist without a scene graph:
+    ;; a window that *maps* takes focus, so the client learns it is activated and
+    ;; the keys it asked for arrive (D27).
+    ;;
+    ;; Only on the transition, not on every commit: focus-surface sends
+    ;; enter/leave and re-places the pointer at (0,0), so calling it per commit
+    ;; teleports the cursor and sprays enter events at the client (found by the
+    ;; seat gate: the pointer position was back at 0,0 after its buttons).
+    (when (and (srv:surface-mapped-p surface)
+               (srv:surface-shell-surface surface)
+               (not (eq surface (srv:seat-keyboard-focus (compositor-seat compositor)))))
+      (focus-surface compositor surface))
     ;; One render per cycle, however many commits arrived in it.  Frame callbacks
     ;; are queued *by* the render, after SERVICE-CLIENT has already flushed this
     ;; client, so the flush has to happen here: an event nobody writes is an event
@@ -153,6 +186,64 @@ damage tracking is the next slice's job (docs/memory-and-rendering.md §7)."
 ;;; ---------------------------------------------------------------------------
 ;;; Presenting
 ;;; ---------------------------------------------------------------------------
+
+;;; ---------------------------------------------------------------------------
+;;; Focus and synthetic input
+;;; ---------------------------------------------------------------------------
+;;
+;; There is no libinput here and no cursor image: a *backend* reports what a device
+;; did, and a compositor decides who hears it.  These functions are that seam, and
+;; they are also how the gate drives real clients, which is why they are exported
+;; rather than kept behind a test-only door.
+
+(defun focus-surface (compositor surface)
+  "Give keyboard and pointer focus to SURFACE; NIL clears both.
+
+One call, because enter/leave, the pointer's position and the toplevel's activated
+configure must not drift apart (docs/framework.md §5)."
+  (let ((seat (compositor-seat compositor)))
+    (srv:set-keyboard-focus seat surface)
+    (srv:set-pointer-focus seat surface 0 0)
+    surface))
+
+(defmethod srv:seat-focus-changed ((seat srv:seat) surface has-focus)
+  "Tell an xdg_toplevel it is activated or not.
+
+The state array is recomputed on every configure, never patched, so a losing
+toplevel gets an empty array rather than a stale `activated`."
+  (let ((shell (and surface (srv:surface-shell-surface surface))))
+    (when (and shell (srv:xdg-surface-role shell))
+      (srv:set-toplevel-activated (srv:xdg-surface-role shell) has-focus)))
+  nil)
+
+(defun inject-key (compositor name state)
+  "Press or release the key called NAME (:pressed or :released).
+
+The modifier mask is updated from the keymap's own table, so what the client
+computes and what we advertise agree by construction."
+  (let* ((seat (compositor-seat compositor))
+         (modifiers (compositor-modifiers compositor))
+         (pressed-p (eq state :pressed)))
+    (input:update-modifiers modifiers name pressed-p)
+    (srv:send-key-event seat (input:keycode name) state
+                        :mods-depressed (input:modifiers-depressed modifiers)
+                        :mods-latched (input:modifiers-latched modifiers)
+                        :mods-locked (input:modifiers-locked modifiers)
+                        :group (input:modifiers-group modifiers))))
+
+(defun inject-pointer-motion (compositor x y)
+  (srv:send-pointer-motion (compositor-seat compositor) x y))
+
+(defparameter +pointer-buttons+
+  '((:left . #x110) (:right . #x111) (:middle . #x112)))
+
+(defun inject-pointer-button (compositor button state)
+  "SYNTHETIC pointer button (:left, :right, :middle), pressed or released."
+  (let ((code (or (cdr (assoc button +pointer-buttons+)) button)))
+    (srv:send-pointer-button (compositor-seat compositor) code state)))
+
+(defun inject-pointer-axis (compositor axis value)
+  (srv:send-pointer-axis (compositor-seat compositor) axis value))
 
 (defun enter-surface (compositor surface)
   "Tell the client its surface is on the output, once, before the first frame."

@@ -155,24 +155,41 @@ animated transforms (phase 7).
 ## 5. Seat, focus and grabs
 
 ```lisp
-(defclass seat ()
-  ((capabilities …) (keyboard-focus …) (pointer-focus …)
-   (grab nil) (serials …) (keymap …) (repeat …)))
+(defclass seat ()                       ; lives in cl-wayland-server: it is the
+  ((capabilities …) (keyboard-focus …)  ; protocol state machine, not policy
+   (pointer-focus …) (keymap …) (repeat …)))
 ```
 
+*Phase 3b implements the seat, the keymap, focus and the pointer/keyboard events; grabs, the
+cursor and touch are still ahead.*
+
 - **Focus** is explicit: `(set-keyboard-focus seat surface serial)`,
-  `(set-pointer-focus seat surface x y)`. Enter/leave, `set_activated` on the toplevel, and
-  keyboard `enter`/`leave` events all follow from one call, so they cannot drift apart.
+  `(set-pointer-focus seat surface x y serial)`. Enter/leave, `set_activated` on the toplevel,
+  and keyboard `enter`/`leave` events all follow from one call, so they cannot drift apart.
+  `cf:focus-surface` is that call for a compositor, and the headless backend makes it when a
+  toplevel *maps* — not on every commit, because it re-places the pointer (D27).
 - **Serials** are validated: `(valid-serial-p seat serial)` for selections, popup grabs,
   move/resize requests. Unvalidated serials are the classic way a malicious client moves
   another client's window.
 - **Grabs** are objects, not modal flags: `interactive-move`, `interactive-resize`,
   `popup-grab`, `dnd-grab`. A grab gets motion/button/key/axis callbacks and ends exactly
   once, on button release, Escape, or client destruction.
-- **Capabilities** are recomputed from actual devices and re-advertised on change.
-- **Keymap**: one compiled xkb keymap per seat (device-specific keymaps come from libinput
-  devices; a mismatch recompiles), serialized into a memfd and sent via
-  `wl_keyboard.keymap`, with `repeat_info` after it.
+- **Capabilities** are recomputed from actual devices and re-advertised on change. Today the
+  headless backend advertises `pointer|keyboard`; touch is not advertised and `get_touch` is
+  refused with `missing_capability`, which is what the protocol asks for.
+- **Keymap**: one keymap per seat, serialized into a memfd and sent via `wl_keyboard.keymap`,
+  with `repeat_info` after it (D28). `cf.input` generates the text from a table of keys — evdev
+  code, keysyms, the modifier each key sets — so nothing links libxkbcommon yet. Phase 4
+  replaces the *generator* with libxkbcommon's keymaps from libinput devices; the protocol path
+  and the modifier bookkeeping do not change.
+- **Input without a device**: `send-key-event` and `send-pointer-motion`/`-button`/`-axis` are
+  the seam a backend calls; the headless backend wraps them as `cf:inject-*` so a test can type
+  at a real client, and a libinput backend will call the same four functions.
+- **Version**: `wl_seat` is offered at 4 (D27), so `wl_pointer.frame` (v5), `wl_seat.release`
+  (v5), `axis_source` (v6) and high-resolution scroll (v8) are unavailable, and a client that
+  asks for one is told `invalid_method`.
+- **Flushing**: the display's `run-once` flushes every client at the end of each cycle, because
+  input is produced outside any client's readable event (D27).
 - **Cursor**: shape selection (client-provided surface or a theme image), hotspot, hardware
   plane when available, software composite otherwise. `wp_cursor_shape_v1` clients name a
   shape and the framework resolves it from the theme.

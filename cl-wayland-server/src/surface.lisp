@@ -117,6 +117,40 @@ wl_display.delete_id and the id becomes reusable."
     (when buffer
       (release-shm-buffer buffer))))
 
+(defmethod wl-surface.set-buffer-transform ((surface surface) transform)
+  "Accept the transform a v2 client may set; apply none of it yet.
+
+The protocol has no error enum entry for a transform that is merely unimplemented,
+so the honest thing is to store it, say so once at :debug, and let 2b's renderer
+start honouring it.  Values outside the enum are a real error."
+  (when (or (minusp transform) (> transform 7))
+    (protocol-error (resource-client surface) (resource-id surface)
+                    +wl-surface-error-invalid-transform+
+                    "transform ~D is not a wl_output.transform value" transform))
+  (setf (surface-buffer-transform surface) transform)
+  (when (plusp transform)
+    (log-message :debug "client ~D: surface ~D transform ~D stored, not applied yet"
+                 (client-id (resource-client surface)) (resource-id surface)
+                 transform))
+  surface)
+
+(defmethod wl-surface.set-buffer-scale ((surface surface) scale)
+  "Accept a positive buffer scale; draw at 1:1 until the renderer scales.
+
+The headless output advertises scale 1, so a client that respects the output sets
+1 and nothing is lost.  A client that sets 2 anyway gets a correctly cropped
+window at half the size it expected, which is a documented 2b gap -- not a silent
+protocol error, and not a promise the version bump made."
+  (unless (plusp scale)
+    (protocol-error (resource-client surface) (resource-id surface)
+                    +wl-surface-error-invalid-scale+
+                    "buffer scale ~D is not positive" scale))
+  (setf (surface-buffer-scale surface) scale)
+  (unless (= scale 1)
+    (log-message :debug "client ~D: surface ~D buffer scale ~D stored, drawn 1:1"
+                 (client-id (resource-client surface)) (resource-id surface) scale))
+  surface)
+
 (defun destroy-surface (surface)
   "Finish the surface's buffers and callbacks, then let the pool go.
 
@@ -195,11 +229,14 @@ to an id that no longer exists."
     callback))
 
 (defmethod wl-surface.set-opaque-region ((surface surface) region)
-  (setf (surface-opaque-region surface) region)
+  "Pending until commit, like every other piece of surface state."
+  (setf (surface-pending-opaque-region surface) region
+        (surface-pending-opaque-region-p surface) t)
   surface)
 
 (defmethod wl-surface.set-input-region ((surface surface) region)
-  (setf (surface-input-region surface) region)
+  (setf (surface-pending-input-region surface) region
+        (surface-pending-input-region-p surface) t)
   surface)
 
 (defmethod wl-surface.commit ((surface surface))
@@ -232,6 +269,21 @@ before that buffer was presented."
         (when (and old (not (eq old new)))
           (release-shm-buffer old))))
     (setf (surface-pending-damage surface) nil)
+    ;; Regions are snapshotted, not referenced: the client may destroy the
+    ;; wl_region object as soon as the commit is sent (docs/memory-and-rendering.md
+    ;; §3 -- foreign state copied at the moment it becomes current).
+    (when (surface-pending-opaque-region-p surface)
+      (setf (surface-opaque-region surface)
+            (let ((region (surface-pending-opaque-region surface)))
+              (and region (region-rectangles region)))
+            (surface-pending-opaque-region-p surface) nil
+            (surface-pending-opaque-region surface) nil))
+    (when (surface-pending-input-region-p surface)
+      (setf (surface-input-region surface)
+            (let ((region (surface-pending-input-region surface)))
+              (and region (region-rectangles region)))
+            (surface-pending-input-region-p surface) nil
+            (surface-pending-input-region surface) nil))
     (setf (surface-committed-callbacks surface)
           (append (surface-committed-callbacks surface)
                   (surface-pending-frame-callbacks surface)))

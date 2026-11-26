@@ -152,3 +152,65 @@ that catch *our* bugs: a wrong type is an error in this image, not in the wire."
 
 (defmethod xdg-wm-base.ping ((wm-base xdg-wm-base) serial)
   (send-event wm-base +xdg-wm-base-ping+ serial))
+
+;;; ---------------------------------------------------------------------------
+;;; wl_seat, wl_pointer, wl_keyboard, wl_touch (version 4, D27)
+;;;
+;;; Everything here is an event a *backend* causes by injecting input; the seat
+;;; state machine (SEAT.LISP) decides who hears it.  Events newer than the
+;;; resource's version are dropped by SEND-EVENT, so a v4 client never sees a
+;;; v5 `frame` or a v10 `repeated` key even if a future injector asks for one.
+;;; ---------------------------------------------------------------------------
+
+(defmethod wl-seat.capabilities ((binding seat-resource) capabilities)
+  (send-event binding +wl-seat-capabilities+ capabilities))
+
+(defmethod wl-seat.name ((binding seat-resource) name)
+  (send-event binding +wl-seat-name+ name))
+
+(defmethod wl-pointer.enter ((pointer pointer) serial surface surface-x surface-y)
+  (send-event pointer +wl-pointer-enter+ serial surface surface-x surface-y))
+
+(defmethod wl-pointer.leave ((pointer pointer) serial surface)
+  (send-event pointer +wl-pointer-leave+ serial surface))
+
+(defmethod wl-pointer.motion ((pointer pointer) time surface-x surface-y)
+  (send-event pointer +wl-pointer-motion+ time surface-x surface-y))
+
+(defmethod wl-pointer.button ((pointer pointer) serial time button state)
+  (send-event pointer +wl-pointer-button+ serial time button state))
+
+(defmethod wl-pointer.axis ((pointer pointer) time axis value)
+  (send-event pointer +wl-pointer-axis+ time axis value))
+
+(defmethod wl-keyboard.keymap ((keyboard keyboard) format fd size)
+  (send-event keyboard +wl-keyboard-keymap+ format fd size))
+
+(defmethod wl-keyboard.enter ((keyboard keyboard) serial surface keys)
+  (send-event keyboard +wl-keyboard-enter+ serial surface keys))
+
+(defmethod wl-keyboard.leave ((keyboard keyboard) serial surface)
+  (send-event keyboard +wl-keyboard-leave+ serial surface))
+
+(defmethod wl-keyboard.key ((keyboard keyboard) serial time key state)
+  (send-event keyboard +wl-keyboard-key+ serial time key state))
+
+(defmethod wl-keyboard.modifiers ((keyboard keyboard) serial
+                                  mods-depressed mods-latched mods-locked group)
+  (send-event keyboard +wl-keyboard-modifiers+
+              serial mods-depressed mods-latched mods-locked group))
+
+(defmethod wl-keyboard.repeat-info ((keyboard keyboard) rate delay)
+  (send-event keyboard +wl-keyboard-repeat-info+ rate delay))
+
+(defmethod wl-touch.down ((touch touch) serial time surface id x y)
+  (send-event touch +wl-touch-down+ serial time surface id x y))
+
+(defmethod wl-touch.up ((touch touch) serial time id)
+  (send-event touch +wl-touch-up+ serial time id))
+
+(defmethod wl-touch.motion ((touch touch) time id x y)
+  (send-event touch +wl-touch-motion+ time id x y))
+
+(defmethod wl-touch.cancel ((touch touch))
+  (send-event touch +wl-touch-cancel+))

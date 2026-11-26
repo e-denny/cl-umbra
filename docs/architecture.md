@@ -29,11 +29,11 @@ cl-wayland-project/
 │   ├── src/  package.lisp  conditions.lisp  objects.lisp  socket.lisp
 │   │         resource.lisp  messages.lisp  client.lisp  display.lisp
 │   │         global.lisp  events.lisp  registry.lisp  dispatch.lisp
-│   │         surface.lisp  xdg-shell.lisp  demo.lisp
+│   │         surface.lisp  region.lisp  xdg-shell.lisp  seat.lisp  demo.lisp
 │   └── demo/ server-demo.lisp
 ├── cl-compositor-framework/
 │   ├── cl-compositor-framework.asd
-│   └── src/  package.lisp  render-pixman.lisp  png.lisp  headless.lisp
+│   └── src/  package.lisp  render-pixman.lisp  xkb.lisp  png.lisp  headless.lisp
 │       ├── backend/   (phase 3+) protocol.lisp headless.lisp nested.lisp drm.lisp
 │       │              libinput.lisp multi.lisp session.lisp
 │       ├── render/    protocol.lisp pixman.lisp gles2.lisp target.lisp
@@ -81,8 +81,11 @@ validation, the pool/buffer lifetime rule) and the `wl_compositor`/`wl_surface` 
 its first code: a pixman renderer, a headless compositor that draws committed surfaces into an
 in-memory target, `read-pixels`/`frame-pixel`, and a PNG writer. Phase 3a added `xdg-shell` v1
 (`xdg_wm_base`, `xdg_surface`, `xdg_toplevel`) and the three `wl_surface` commit hooks a shell
-role needs, so a real client can open a window; seats, input, the nested backend, tinywl and
-`cl-umbra` are still their plan.
+role needs, so a real client can open a window. Phase 3b added `wl_seat` v4 with `wl_pointer`
+and `wl_keyboard`, a generated keymap (`cf.input`), explicit focus with `set_activated` on
+focus change, `wl_region` with real set arithmetic, `wl_compositor` v3, `wl_shm_pool.resize`,
+and end-of-cycle flushing -- so a real client can be typed and clicked at. The nested backend,
+tinywl and `cl-umbra` are still their plan.
 
 ## 2. Packages
 

@@ -492,6 +492,22 @@ shared, because the client keeps writing into it."
   "POINTER advanced by OFFSET octets.  A subrange of a pool is one of these."
   (cffi:inc-pointer pointer offset))
 
+(defconstant +seek-set+ 0)
+(defconstant +seek-end+ 2)
+
+(defun file-size (fd)
+  "The file's size in octets, measured with LSEEK(SEEK_END).
+
+Used for exactly one thing so far: checking a wl_shm pool's file before mapping a
+new, larger range.  mmap succeeds past the end of a file and the failure arrives
+later as SIGBUS, so asking first turns a crash into a protocol error."
+  (let ((size (%lseek fd 0 +seek-end+)))
+    (when (minusp size)
+      (syscall-failed 'lseek (errno)))
+    (when (minusp (%lseek fd 0 +seek-set+))
+      (syscall-failed 'lseek (errno)))
+    size))
+
 (defun set-file-size (fd size)
   "ftruncate(2): give a memfd a size before it is mapped."
   (when (minusp (%ftruncate fd size))

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat
 
 test:
 	./scripts/run-tests.sh
@@ -36,6 +36,11 @@ frame:
 # weston-simple-shm, a real xdg-shell client, draws a window through us.
 xdg:
 	./scripts/xdg-shell-gate.sh
+
+# weston-eventdemo reports the keys and pointer events we inject, through a real
+# keymap; a libxkbcommon probe parses the keymap we sent.
+seat:
+	./scripts/seat-gate.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:

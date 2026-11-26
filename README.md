@@ -6,8 +6,8 @@ The repository is named for where the stack is going: `cl-umbra`, a daily-driver
 Everything that makes it possible is here too — the protocol implementation, the server, the
 compositor framework, and a tinywl port — as the six systems below.
 
-**Status: phase 0, phase 1, phase 2a and phase 3 gates passing.** `./scripts/gate.sh` checks
-eleven clauses. Phase 0: the unit suite (163 tests), every vendored protocol compiling,
+**Status: phase 0, phase 1, phase 2a, phase 3a and phase 3b gates passing.**
+`./scripts/gate.sh` checks twelve clauses. Phase 0: the unit suite (172 tests), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections
@@ -17,8 +17,11 @@ draws a known pattern through our headless compositor, gets its frame callback, 
 captured frame matches pixel for pixel (with a PNG screenshot to prove it). Phase 3:
 `weston-simple-shm` — a real xdg-shell client — binds `xdg_wm_base`, is configured, acks our
 serial, commits a buffer and draws a window through us; the gate checks the frame's pixels,
-answers our ping, and confirms the client never sees a protocol error. Purity (no libwayland,
-no wlroots) runs over all of it. The gate exits 0.
+answers our ping, and confirms the client never sees a protocol error. Phase 3b:
+`weston-eventdemo` is focused, sent a keymap and typed at — the gate requires the *client's own
+output* to show our injected motion, button, scroll and keys, including keycode 16 translated
+to "Q" with the shift mask, and a libxkbcommon probe parses the keymap we actually sent.
+Purity (no libwayland, no wlroots) runs over all of it. The gate exits 0.
 
 Three roadmap quality items are still open and are not gate clauses: fixed-size in/out
 rings, `WAYLAND_DEBUG`-compatible tracing, and surplus-descriptor detection (which needs a
@@ -44,11 +47,15 @@ What exists:
   `xdg_wm_base` with ping/pong, the `xdg_surface` configure/ack handshake with real serial
   bookkeeping, and `xdg_toplevel` with title, app id, size hints and a configure carrying a
   complete state array. Popups, positioners and decoration negotiation are deliberately absent
-  and answer `implementation`. The demo server offers two dummy globals so `wayland-info` has
-  something true to print.
-- `cl-compositor-framework` — its first code: a pixman renderer (the reference), a headless
-  compositor that draws committed surfaces into an in-memory target, `read-pixels`, and a PNG
-  writer. Backends, scene graph and seats are phases 2b-5.
+  and answer `implementation`. Phase 3b added `wl_seat` (v4) with `wl_pointer`, `wl_keyboard`
+  and a generated XKB keymap, explicit focus that activates the focused toplevel, `wl_region`,
+  `wl_compositor` v3, and `wl_shm_pool.resize`. The demo server offers two dummy globals so
+  `wayland-info` has something true to print.
+- `cl-compositor-framework` — a pixman renderer (the reference), a headless compositor that
+  draws committed surfaces into an in-memory target and offers `wl_compositor`, `wl_shm`,
+  `wl_output`, `xdg_wm_base` and `wl_seat`, `read-pixels`, a PNG writer, and `cf.input`
+  (generated keymaps, keycodes, modifier state). Backends beyond headless, the scene graph and
+  the remaining seat work are phases 2b-5.
 
 ## What this is
 
@@ -189,6 +196,16 @@ sbcl --eval '(require :asdf)' \
 
 # in another, with the same two variables
 wayland-info
+```
+
+## Hello, keys
+
+The phase-3b gate, in one command: `weston-eventdemo` is focused and typed at through a real
+keymap, and its printed events — coordinates, button codes, unicode code points, modifier
+masks — are the assertions.
+
+```
+./scripts/seat-gate.sh
 ```
 
 ## Hello, windows

@@ -514,33 +514,6 @@ that there is exactly one message and that it is an error."
              (ok (null (srv:display-clients display))))
         (ffi:close-fd fd)))))
 
-(deftest an-unimplemented-request-is-an-implementation-error
-  (with-demo (display)
-    (let ((fd (raw-connect display)))
-      (unwind-protect
-           (progn
-             (send-message fd 1 1 (lambda (buffer) (wire:put-new-id buffer 2)))
-             (run-server display)
-             (read-events fd)
-             ;; Bind wl_compositor (global 1) as id 3, then call create_region
-             ;; (opcode 1, one new_id): regions arrive with input and opaque
-             ;; optimisation, and until then the honest answer is an error.
-             (send-message fd 2 0
-                           (lambda (buffer)
-                             (wire:put-uint buffer 1)
-                             (wire:put-string buffer "wl_compositor")
-                             (wire:put-uint buffer 1)
-                             (wire:put-new-id buffer 3)))
-             (run-server display)
-             (send-message fd 3 1 (lambda (buffer) (wire:put-new-id buffer 4)))
-             (run-server display)
-             (destructuring-bind (object-id code message) (error-reply (read-events fd))
-               (ok (= 3 object-id))
-               (ok (= srv:+error-implementation+ code))
-               (ok (search "not implemented" message)))
-             (ok (null (srv:display-clients display))))
-        (ffi:close-fd fd)))))
-
 (deftest a-destructor-request-frees-the-id
   (with-demo (display)
     (let ((fd (raw-connect display)))
@@ -1180,7 +1153,7 @@ first proved that opcodes are worth looking up rather than assuming."
                (ok (search "still alive" message))))
         (ffi:close-fd socket)))))
 
-(deftest popups-and-positioners-are-not-implemented-yet
+(deftest an-unimplemented-request-is-an-implementation-error
   (with-xdg-display (display)
     (let ((socket (raw-connect display)))
       (unwind-protect
@@ -1276,4 +1249,440 @@ first proved that opcodes are worth looking up rather than assuming."
                (run-server display)
                (ok (null (srv:xdg-wm-base-pending-pings wm-base)))
                (ok (= 1 (srv:xdg-wm-base-pong-count wm-base)))))
+        (ffi:close-fd socket)))))
+;;; ---------------------------------------------------------------------------
+;;; wl_seat, wl_pointer, wl_keyboard: the input protocol, and the descriptors it
+;;; carries
+;;;
+;;; Same raw peer as everywhere else.  Opcodes: wl_seat.get_pointer 0,
+;;; .get_keyboard 1, .get_touch 2, .release 3; wl_pointer.set_cursor 0;
+;;; wl_region.add 1, .subtract 2; wl_shm_pool.resize 3; wl_compositor.create_region
+;;; 1.  Events: wl_pointer.enter 0, .leave 1, .motion 2, .button 3, .axis 4;
+;;; wl_keyboard.keymap 0, .enter 1, .leave 2, .key 3, .modifiers 4, .repeat_info 5;
+;;; wl_seat.capabilities 0, .name 1.
+;;;
+;;; The keymap the tests hand the seat is a literal, not cf.input's: this is a
+;;; wire test, and what matters is that the octets and the descriptor arrive, not
+;;; that the generator is good (the seat gate checks that with libxkbcommon).
+;;; ---------------------------------------------------------------------------
+
+(defparameter *test-keymap*
+  "xkb_keymap { xkb_keycodes \"t\" { minimum = 8; maximum = 255; <ESC> = 9; }; xkb_symbols \"t\" { key <ESC> { [ Escape ] }; }; };"
+  "A minimal keymap, sent verbatim so the test can compare octets.")
+
+(defmacro with-seat-display ((display &key (capabilities 3)) &body body)
+  "A display offering wl_shm (global 1), wl_compositor (2) and wl_seat (3)."
+  `(with-display (,display)
+     (srv:add-global ,display
+                     :interface "wl_shm"
+                     :version 1
+                     :resource-class 'srv:shm
+                     :bind #'srv:send-shm-formats)
+     (srv:add-global ,display
+                     :interface "wl_compositor"
+                     :version 1
+                     :resource-class 'srv:compositor)
+     (let ((seat (srv:make-seat ,display :name "seat0"
+                                         :capabilities ,capabilities)))
+       (srv:add-seat-global ,display seat)
+       (srv:set-seat-keymap seat *test-keymap* :repeat-rate 25 :repeat-delay 600)
+       (locally ,@body))))
+
+(defun seat-of (display)
+  "The SEAT the test display offers (the global's data, found by interface)."
+  (srv:global-data
+   (find "wl_seat" (srv:display-globals display)
+         :key #'srv:global-interface :test #'string=)))
+
+(defun bind-seat (display socket &key (version 4) (id 4))
+  "get_registry (2) and bind wl_seat as ID; returns the seat resource."
+  (send-get-registry socket 2)
+  (run-server display)
+  (read-events socket)
+  (send-bind socket 2 3 "wl_seat" version id)
+  (run-server display)
+  (read-events socket)                          ; name and capabilities
+  (server-object display id))
+
+(defun receive-octets/keep-fds (fd &key (size 8192))
+  "RECEIVE-OCTETS, but handing back the descriptors instead of closing them."
+  (let ((octets (make-array size :element-type '(unsigned-byte 8))))
+    (multiple-value-bind (count fds truncated-p eof-p)
+        (ffi:receive-with-ancillary fd octets 0 size :fds-max 8)
+      (ok (not truncated-p) "no descriptor truncation expected here")
+      (values (subseq octets 0 count) fds eof-p))))
+
+(defun read-events-and-fds (fd &key (timeout 0.5))
+  "READ-EVENTS, plus the descriptors that arrived (in order, not closed).
+
+Descriptors are attached to writes, not to messages, so the caller is told what
+arrived and which messages came with it; for one message carrying one keymap that
+is exactly enough."
+  (let ((deadline (+ (reactor:monotonic-now) timeout))
+        (fds '()))
+    (loop
+      (multiple-value-bind (octets received eof-p) (receive-octets/keep-fds fd)
+        (setf fds (append fds received))
+        (let ((messages (parse-messages octets)))
+          (when (or messages eof-p)
+            (return (values messages fds)))))
+      (when (>= (reactor:monotonic-now) deadline)
+        (return (values nil fds))))))
+
+(defun fresh-surface (display socket &key (surface-id 6) (compositor-id 3))
+  "Bind wl_compositor and create one surface; returns the surface resource."
+  (send-bind socket 2 2 "wl_compositor" 1 compositor-id)
+  (run-server display)
+  (read-events socket)
+  (send-message socket compositor-id 0 (lambda (buffer) (wire:put-new-id buffer surface-id)))
+  (run-server display)
+  (server-object display surface-id))
+
+(defun keymap-octets (fd size)
+  "Map FD, copy SIZE octets and unmap: what a client does with a keymap event."
+  (let ((mapping (ffi:map-file fd size)))
+    (unwind-protect (ffi:mapped-octets mapping 0 size)
+      (ffi:unmap-file mapping size))))
+
+(deftest binding-the-seat-sends-its-name-then-capabilities
+  (with-seat-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (send-get-registry socket 2)
+             (run-server display)
+             (read-events socket)
+             (send-bind socket 2 3 "wl_seat" 4 4)
+             (run-server display)
+             (let ((events (read-events socket)))
+               (ok (= 2 (length events)) "name, then capabilities")
+               (destructuring-bind ((id1 op1 reader1) (id2 op2 reader2)) events
+                 (ok (= 4 id1))
+                 (ok (= 1 op1) "wl_seat.name is opcode 1")
+                 (ok (string= "seat0" (wire:read-string reader1)))
+                 (ok (= 4 id2))
+                 (ok (= 0 op2) "wl_seat.capabilities is opcode 0")
+                 (ok (= 3 (wire:read-uint reader2))
+                     "pointer | keyboard"))))
+        (ffi:close-fd socket)))))
+
+(deftest a-keyboard-gets-the-keymap-as-a-descriptor-then-repeat-info
+  (with-seat-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-seat display socket)
+             (send-message socket 4 1 (lambda (buffer) (wire:put-new-id buffer 5)))
+             (run-server display)
+             (multiple-value-bind (events fds) (read-events-and-fds socket)
+               (ok (= 2 (length events)) "keymap, then repeat_info")
+               (destructuring-bind ((id1 op1 reader1) (id2 op2 reader2)) events
+                 (ok (= 5 id1))
+                 (ok (= 0 op1) "wl_keyboard.keymap is opcode 0")
+                 ;; The descriptor occupies no octets (D23): the reader holds
+                 ;; the format and then the size, and the fd arrives out of band.
+                 (let ((format (wire:read-uint reader1))
+                       (size (wire:read-uint reader1)))
+                   (ok (= 1 format) "xkb_v1")
+                   (ok (= (1+ (length *test-keymap*)) size)
+                       "the size includes the NUL terminator")
+                   (ok (= 1 (length fds)) "exactly one descriptor arrived")
+                   ;; What the client would do: map it, read the string, unmap.
+                   (when fds
+                     (let* ((octets (keymap-octets (first fds) size)))
+                       (ffi:close-fd (first fds))
+                       (ok (= 0 (aref octets (1- size))) "the keymap is NUL-terminated")
+                       (ok (string= *test-keymap*
+                                    (sb-ext:octets-to-string
+                                     octets :end (1- size)
+                                     :external-format :utf-8))
+                           "the octets are the keymap the seat was given"))))
+                 (ok (= 5 id2))
+                 (ok (= 5 op2) "wl_keyboard.repeat_info is opcode 5")
+                 (ok (= 25 (wire:read-int reader2)))
+                 (ok (= 600 (wire:read-int reader2))))))
+        (ffi:close-fd socket)))))
+
+(deftest a-seat-without-the-capability-refuses-the-object
+  (with-seat-display (display :capabilities 0)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-seat display socket)
+             (send-message socket 4 1 (lambda (buffer) (wire:put-new-id buffer 5)))
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (ok (= 4 object-id) "the error names the seat")
+               (ok (= 0 code) "wl_seat.error.missing_capability")
+               (ok (search "keyboard capability" message))))
+        (ffi:close-fd socket)))))
+
+(deftest the-seat-release-is-not-available-at-version-four
+  (with-seat-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-seat display socket)
+             (send-message socket 4 3 nil)             ; wl_seat.release, since 5
+             (run-server display)
+             (destructuring-bind (object-id code message)
+                 (error-reply (read-events socket))
+               (declare (ignore message))
+               (ok (= 4 object-id) "the error names the wl_seat object")
+               (ok (= 1 code) "invalid_method: the version gate, not a missing method")))
+        (ffi:close-fd socket)))))
+
+(deftest a-key-reaches-only-the-focused-keyboard
+  (with-seat-display (display)
+    (let ((socket (raw-connect display))
+          (seat (seat-of display)))
+      (unwind-protect
+           (progn
+             (bind-seat display socket)
+             (send-message socket 4 1 (lambda (buffer) (wire:put-new-id buffer 5)))
+             (run-server display)
+             (read-events-and-fds socket)                ; keymap + repeat_info
+             (let ((surface (fresh-surface display socket)))
+               ;; Nothing focused yet: a key goes nowhere and says so.
+               (ok (null (srv:send-key-event seat 1 :pressed))
+                   "no focus, no key")
+               (srv:set-keyboard-focus seat surface)
+               (run-server display)
+               (let ((events (read-events socket)))
+                 (ok (= 2 (length events)) "enter, then modifiers")
+                 (destructuring-bind ((id1 op1 reader1) (id2 op2 reader2)) events
+                   (ok (= 5 id1))
+                   (ok (= 1 op1) "wl_keyboard.enter is opcode 1")
+                   (let ((serial (wire:read-uint reader1)))
+                     (ok (plusp serial) "enter carries a serial")
+                     (ok (= 6 (wire:read-uint reader1)) "and the focused surface")
+                     (ok (null (wire:read-array reader1))
+                         "no keys were held, so the array is empty"))
+                   (ok (= 5 id2))
+                   (ok (= 4 op2) "wl_keyboard.modifiers follows the enter")
+                   (ok (integerp (wire:read-uint reader2)) "its own serial")
+                   (ok (zerop (wire:read-uint reader2)) "depressed")
+                   (ok (zerop (wire:read-uint reader2)) "latched")
+                   (ok (zerop (wire:read-uint reader2)) "locked")))
+               ;; Now a key, then the modifier state it produced.
+               (let ((serial (srv:send-key-event seat 1 :pressed
+                                                 :mods-depressed 1)))
+                 (ok (integerp serial))
+                 (run-server display)
+                 (let ((events (read-events socket)))
+                   (ok (= 2 (length events)) "key, then modifiers")
+                   (destructuring-bind ((id1 op1 reader1) (id2 op2 reader2)) events
+                     (ok (= 5 id1))
+                     (ok (= 3 op1) "wl_keyboard.key is opcode 3")
+                     (ok (= serial (wire:read-uint reader1)))
+                     (ok (integerp (wire:read-uint reader1)) "time")
+                     (ok (= 1 (wire:read-uint reader1))
+                         "the evdev keycode, not the XKB one")
+                     (ok (= srv:+wl-keyboard-key-state-pressed+
+                            (wire:read-uint reader1)))
+                     (ok (= 5 id2))
+                     (ok (= 4 op2))
+                     (ok (integerp (wire:read-uint reader2)) "its own serial")
+                     (ok (= 1 (wire:read-uint reader2))
+                         "the depressed mask the seat was told about"))))
+               ;; Losing focus says so; the logical key set is the seat's, not the
+               ;; surface's, so it still remembers the held key for the next enter.
+               (srv:set-keyboard-focus seat nil)
+               (run-server display)
+               (ok (equal (list 1) (srv:seat-pressed-keys seat)))))
+        (ffi:close-fd socket)))))
+
+(deftest pointer-events-follow-the-pointer-focus
+  (with-seat-display (display)
+    (let ((socket (raw-connect display))
+          (seat (seat-of display)))
+      (unwind-protect
+           (progn
+             (bind-seat display socket)
+             (send-message socket 4 0 (lambda (buffer) (wire:put-new-id buffer 5)))
+             (run-server display)
+             (read-events socket)
+             (let ((surface (fresh-surface display socket)))
+               (srv:set-pointer-focus seat surface 10 20)
+               (run-server display)
+               (let ((events (read-events socket)))
+                 (ok (= 1 (length events)) "enter")
+                 (destructuring-bind (id opcode reader) (first events)
+                   (ok (= 5 id))
+                   (ok (= 0 opcode) "wl_pointer.enter is opcode 0")
+                   (ok (integerp (wire:read-uint reader)) "serial")
+                   (ok (= 6 (wire:read-uint reader)) "surface")
+                   (ok (= 10 (wire:read-fixed reader)) "x, in surface coordinates")
+                   (ok (= 20 (wire:read-fixed reader)) "y")))
+               (srv:send-pointer-motion seat 30 40)
+               (srv:send-pointer-button seat #x110 :pressed)
+               (srv:send-pointer-axis seat :vertical 15)
+               (run-server display)
+               (let ((events (read-events socket)))
+                 (ok (= 3 (length events)) "motion, button, axis")
+                 (destructuring-bind ((id1 op1 reader1)
+                                      (id2 op2 reader2)
+                                      (id3 op3 reader3))
+                     events
+                   (ok (= 5 id1))
+                   (ok (= 2 op1) "wl_pointer.motion is opcode 2")
+                   (ok (integerp (wire:read-uint reader1)))
+                   (ok (= 30 (wire:read-fixed reader1)))
+                   (ok (= 40 (wire:read-fixed reader1)))
+                   (ok (= 5 id2))
+                   (ok (= 3 op2) "wl_pointer.button is opcode 3")
+                   (ok (integerp (wire:read-uint reader2)) "serial")
+                   (ok (integerp (wire:read-uint reader2)) "time")
+                   (ok (= #x110 (wire:read-uint reader2)) "BTN_LEFT")
+                   (ok (= srv:+wl-pointer-button-state-pressed+
+                          (wire:read-uint reader2)))
+                   (ok (= 5 id3))
+                   (ok (= 4 op3) "wl_pointer.axis is opcode 4")
+                   (ok (integerp (wire:read-uint reader3)) "time")
+                   (ok (= srv:+wl-pointer-axis-vertical-scroll+
+                          (wire:read-uint reader3)))
+                   (ok (= 15 (wire:read-fixed reader3)))))
+               ;; Clearing the focus leaves the surface.
+               (srv:set-pointer-focus seat nil 0 0)
+               (run-server display)
+               (let ((events (read-events socket)))
+                 (ok (= 1 (length events)))
+                 (destructuring-bind (id opcode reader) (first events)
+                   (ok (= 5 id))
+                   (ok (= 1 opcode) "wl_pointer.leave is opcode 1")))))
+        (ffi:close-fd socket)))))
+
+(deftest a-region-is-a-set-of-rectangles
+  (with-seat-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-seat display socket)
+             (send-bind socket 2 2 "wl_compositor" 1 3)
+             (run-server display)
+             (read-events socket)
+             ;; create_region (7), add 0,0,10,10, then subtract 0,0,5,5.
+             (send-message socket 3 1 (lambda (buffer) (wire:put-new-id buffer 7)))
+             (run-server display)
+             (send-message socket 7 1 (lambda (buffer)
+                                        (wire:put-int buffer 0)
+                                        (wire:put-int buffer 0)
+                                        (wire:put-int buffer 10)
+                                        (wire:put-int buffer 10)))
+             (send-message socket 7 1 (lambda (buffer)
+                                        (wire:put-int buffer 20)
+                                        (wire:put-int buffer 20)
+                                        (wire:put-int buffer 5)
+                                        (wire:put-int buffer 5)))
+             (run-server display)
+             (let ((region (server-object display 7)))
+               (ok (= 2 (length (srv:region-rects region))) "two rectangles")
+               (send-message socket 7 2 (lambda (buffer)
+                                          (wire:put-int buffer 0)
+                                          (wire:put-int buffer 0)
+                                          (wire:put-int buffer 5)
+                                          (wire:put-int buffer 5)))
+               (run-server display)
+               (ok (= 3 (length (srv:region-rects region)))
+                   "the cut corner becomes three pieces, and the far rectangle stays")
+               (ok (srv:region-contains-p region 9 9) "still inside")
+               (ok (not (srv:region-contains-p region 1 1)) "the corner is gone")
+               (ok (srv:region-contains-p region 22 22) "the second rectangle is untouched")))
+        (ffi:close-fd socket)))))
+
+(deftest a-region-is-snapshotted-when-the-surface-commits
+  (with-seat-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-seat display socket)
+             (send-bind socket 2 2 "wl_compositor" 1 3)
+             (run-server display)
+             (read-events socket)
+             (send-message socket 3 0 (lambda (buffer) (wire:put-new-id buffer 6)))
+             (send-message socket 3 1 (lambda (buffer) (wire:put-new-id buffer 7)))
+             (run-server display)
+             (send-message socket 7 1 (lambda (buffer)
+                                        (wire:put-int buffer 3)
+                                        (wire:put-int buffer 4)
+                                        (wire:put-int buffer 5)
+                                        (wire:put-int buffer 6)))
+             (run-server display)
+             ;; wl_surface.set_opaque_region is opcode 4 (set_input_region is 5).
+             (send-message socket 6 4 (lambda (buffer) (wire:put-object buffer 7)))
+             (run-server display)
+             (let ((surface (server-object display 6)))
+               (ok (null (srv:surface-opaque-region surface))
+                   "pending until the commit")
+               (send-message socket 6 6 nil)             ; commit
+               (run-server display)
+               (ok (equal '((3 4 5 6)) (srv:surface-opaque-region surface))
+                   "committed: the rectangles are copied")
+               (ok (null (srv:surface-input-region surface))
+                   "the input region was never set")
+               ;; The client may destroy the region immediately after setting it.
+               (send-message socket 7 0 nil)             ; wl_region.destroy
+               (run-server display)
+               (ok (equal '((3 4 5 6)) (srv:surface-opaque-region surface))
+                   "and outlive the region object")))
+        (ffi:close-fd socket)))))
+
+(deftest a-pool-grows-but-never-shrinks
+  (with-seat-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-shm display socket)
+             (multiple-value-bind (fd size) (make-client-pool 8 4 #xFF00FF00)
+               ;; The test's own memfd, grown the way a client grows its pool.
+               (declare (ignore size))
+               (unwind-protect
+                    (progn
+                      (send-create-pool socket 4 fd 128 :shm-id 3)
+                      (run-server display)
+                      (let ((pool (server-object display 4)))
+                        (ok (= 128 (srv:shm-pool-size pool)))
+                        ;; The file must grow first; the client does that itself.
+                        (ffi:set-file-size fd 512)
+                        (send-message socket 4 2 (lambda (buffer) (wire:put-int buffer 512)))
+                        (run-server display)
+                        (ok (= 512 (srv:shm-pool-size pool)) "the pool grew")
+                        (ok (= 512 (length (ffi:mapped-octets
+                                            (srv:shm-pool-mapping pool) 0 512)))
+                            "and the mapping grew with it")
+                        ;; Shrinking is not what resize is for.
+                        (send-message socket 4 2 (lambda (buffer) (wire:put-int buffer 256)))
+                        (run-server display)
+                        (destructuring-bind (object-id code message)
+                            (error-reply (read-events socket))
+                          (ok (= 4 object-id))
+                          (ok (= srv:+wl-shm-error-invalid-fd+ code))
+                          (ok (search "only grow" message)))))
+                 (ffi:close-fd fd))))
+        (ffi:close-fd socket)))))
+
+(deftest a-pool-cannot-be-grown-past-its-file
+  (with-seat-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-shm display socket)
+             (multiple-value-bind (fd size) (make-client-pool 8 4 #xFF00FF00)
+               (unwind-protect
+                    (progn
+                      (send-create-pool socket 4 fd size :shm-id 3)
+                      (run-server display)
+                      ;; Ask for more than the file holds: mmap would succeed and
+                      ;; the renderer would take SIGBUS later, which is exactly the
+                      ;; trap the lseek check exists to avoid.
+                      (send-message socket 4 2
+                                    (lambda (buffer) (wire:put-int buffer (* 4 size))))
+                      (run-server display)
+                      (destructuring-bind (object-id code message)
+                          (error-reply (read-events socket))
+                        (ok (= 4 object-id))
+                        (ok (= srv:+wl-shm-error-invalid-fd+ code))
+                        (ok (search "file is" message))))
+                 (ffi:close-fd fd))))
         (ffi:close-fd socket)))))

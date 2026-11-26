@@ -759,8 +759,15 @@ The wire name defaults to the symbol with its dash replaced by an underscore."
                  collect `(defconstant
                               ,(intern (enum-constant-name
                                         (lisp-name-of (wire-name-of interface-symbol))
-                                        wire-enum
-                                        (string-downcase (symbol-name name)))
+                                        ;; Both names are on the wire, so both
+                                        ;; need converting: an enum called
+                                        ;; keymap_format that is defined as
+                                        ;; +WL-KEYBOARD-KEYMAP_FORMAT-...+ is not
+                                        ;; the symbol the generated package
+                                        ;; exports, and every user of the
+                                        ;; constant gets an unbound variable.
+                                        (lisp-name-of wire-enum)
+                                        (lisp-name-of (string-downcase (symbol-name name))))
                                        *package*)
                             ,value))))))
 

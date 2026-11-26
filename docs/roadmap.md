@@ -179,7 +179,7 @@ trace tests and the malicious-pool cases are in `wayland.test.server`.
 
 ## Phase 3 — `cl-tinywl`, nested (3-4 weeks)
 
-**Status: phase 3a landed (xdg-shell toplevels).** The v1 state machine is in
+**Status: phase 3a landed (xdg-shell toplevels), phase 3b landed (seats and input).** The v1 state machine is in
 `cl-wayland-server/src/xdg-shell.lisp`; `cf.types.xdg-shell` (map/unmap events, layout,
 activation policy) is still to come. Gate clause 11: `weston-simple-shm` draws a window through
 our headless compositor (`./scripts/xdg-shell-gate.sh`). Seats, the nested backend, tinywl and
@@ -200,10 +200,14 @@ popups are open below.
 - [ ] `cf.types.xdg-shell`: map/unmap events, layout placement, activation policy
 
 `cf.types.seat`
-- [ ] capabilities; keyboard/pointer objects; enter/leave; frame events
-- [ ] keymap memfd + `repeat_info`; modifiers; key events
-- [ ] pointer motion/button/axis; cursor surface with hotspot
-- [ ] focus stack, `set_activated` on focus change
+- [x] capabilities; keyboard/pointer objects; enter/leave (`wl_seat` v4, D27)
+- [x] keymap memfd + `repeat_info`; modifiers; key events (D28)
+- [x] pointer motion/button/axis; `set_cursor` accepted and recorded
+- [ ] a cursor actually drawn (needs the scene graph: 2b/5)
+- [x] focus, and `set_activated` on focus change (`cf:focus-surface` → `seat-focus-changed`)
+- [ ] focus stack and click-to-focus (needs hit-testing: 2b)
+- [ ] grabs: `begin-move`/`begin-resize` from `move`/`resize`, serial validation
+- [ ] `wl_pointer.frame` and `wl_seat.release` (a version bump, not a rewrite)
 
 `cf.backend.nested`
 - [ ] output = parent `wl_surface` + shm buffers; attach/commit with damage

@@ -277,7 +277,8 @@ buffer scale/transform, `wl_shm_pool.resize`, `cf.scene` v0.
 **Demo:** `cl-tinywl` running as a window inside the current desktop, with kitty inside
 it, moved and resized by mouse.
 
-**Status (phase 3a — xdg-shell toplevels — met; the rest of the phase is not started):**
+**Status (phase 3a — xdg-shell toplevels — and phase 3b — seats and input — met; the rest of
+the phase is not started):**
 `xdg-shell` v1 is implemented in `cl-wayland-server/src/xdg-shell.lisp`: `xdg_wm_base`
 (ping/pong, `defunct_surfaces`), `xdg_surface` (initial configure after the first commit,
 serial bookkeeping, `ack_configure`, `invalid_serial`, `defunct_role_object`,
@@ -290,12 +291,24 @@ reached through three commit hooks, so a bare `wl_surface` is unaffected (D26). 
 window through the headless compositor; the gate checks the frame's pixels, ping/pong and
 object lifetimes (`scripts/xdg-shell-gate.sh`).
 
+**Phase 3b** adds `wl_seat` v4 with `wl_pointer`, `wl_keyboard` and `wl_touch` objects; a
+keymap generated from a table and sent as a memfd with `repeat_info` (D28); explicit keyboard
+and pointer focus that sends `set_activated` to the focused toplevel (D27); synthetic input as
+the backend seam, with `cf:inject-*` for tests; `wl_region` as a real rectangle set (D29);
+`wl_compositor` v3 with `set_buffer_scale`/`set_buffer_transform` accepted and drawn 1:1 until
+2b; `wl_shm_pool.resize` that grows and checks the file (D30); and end-of-cycle flushing, which
+input events need because they are produced outside any client's readable event. Gate clause
+12: `weston-eventdemo` prints the motion, button, scroll and key events we inject — including
+keycode 16 translated to "Q" with the shift mask — and a libxkbcommon probe parses the keymap
+we sent (`scripts/seat-gate.sh`). Grabs, a drawn cursor, click-to-focus (needs hit-testing),
+`wl_pointer.frame` and `wl_seat.release` are the rest of the seat work.
+
 Two bugs were found by the first double-buffered client, and both are decisions now: buffers
 were never released at all (the ownership flag was never cleared on attach), and releasing only
 at the next commit is a claim about our scheduling rather than the protocol's (D25). Not in
-this slice, and needed before tinywl: seats and input, the nested backend, `xdg_popup` +
-`xdg_positioner`, and any window management or layout at all — a mapped toplevel is drawn
-where its buffer offset puts it, which is (0,0).
+these slices, and needed before tinywl: the nested backend, `xdg_popup` + `xdg_positioner`, any
+window management or layout at all (a mapped toplevel is drawn where its buffer offset puts it,
+which is (0,0)), grabs, and a cursor that is actually drawn.
 
 ### Phase 4 — Real hardware: DRM dumb buffers + libinput (6-8 weeks)
 

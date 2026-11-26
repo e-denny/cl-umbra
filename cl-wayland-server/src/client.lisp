@@ -142,14 +142,26 @@ only -- we stop listening to a client that is not listening to us."
   "Write as much of CLIENT's out buffer as the socket accepts.
 
 Returns true when the buffer is empty, NIL when the socket said EAGAIN and the
-reactor now owns the rest."
+reactor now owns the rest.
+
+Descriptors queued by an event are ours until they travel: SCM_RIGHTS duplicates
+them into the client, so once the write succeeded our copies are closed here.
+This is the only place the server can know a descriptor has left -- the queue is
+dropped by the successful write itself (docs/protocol-layer.md §2).  A keymap fd
+that leaked one per keyboard bind is exactly the bug this prevents."
   (unless (client-closed-p client)
     (when (plusp (buffer-size (client-output client)))
       (log-message :debug "client ~D: flushing ~D octets"
                    (client-id client) (buffer-size (client-output client))))
     (loop while (plusp (buffer-size (client-output client)))
-          do (let ((written (flush-buffer (client-fd client)
-                                          (client-output client))))
+          do (let* ((output (client-output client))
+                    (descriptors (when (plusp (buffer-fd-count output))
+                                   (buffer-fds output)))
+                    (written (flush-buffer (client-fd client) output)))
+               (when (plusp written)
+                 (dolist (descriptor descriptors)
+                   (when (fd-open-p descriptor)
+                     (close-fd descriptor))))
                (when (zerop written)
                  (update-client-interest client)
                  (return-from flush-client nil))))
@@ -157,11 +169,21 @@ reactor now owns the rest."
     t))
 
 (defun flush-all (display)
-  "Flush every client; used at the end of a cycle and by the demo's loop."
+  "Flush every client; used at the end of a cycle, after a render, and by the
+demo's loop.
+
+A client can die between the dispatch that queued an event and this write -- the
+render idle is the usual place to notice, because a client that exited while we
+were drawing is exactly what an EPIPE on the next flush means.  Tearing it down
+here, rather than letting a condition escape the reactor, is what keeps one
+client's exit from stopping the compositor (found by the phase-3b seat test,
+which drives a real client to exit on a keypress)."
   (log-message :debug "flush-all: ~D client~:P" (length (display-clients display)))
   (dolist (client (copy-list (display-clients display)))
     (unless (client-closed-p client)
-      (flush-client client)))
+      (handler-case (flush-client client)
+        (wayland.ffi:io-error ()
+          (teardown-client client)))))
   (length (display-clients display)))
 
 ;;; ---------------------------------------------------------------------------

@@ -80,7 +80,12 @@ Constraints that shape the implementation:
 - `MSG_CTRUNC` means we lost fds we can no longer clean up: log loudly and drop the client.
 - An fd arriving when the message we decoded declares none, or a declared fd missing, is a
   protocol error. Leaked fds are closed; surplus fds are closed.
-- Our own fds for shm (memfd) and keymaps are created with `MFD_CLOEXEC`.
+- Our own fds for shm (memfd) and keymaps are created with `MFD_CLOEXEC`. A descriptor
+  queued by an *event* (only the keymap so far) is closed by `flush-client` once the write that
+  carried it succeeded: SCM_RIGHTS duplicates it into the client, and the server's copy is the
+  server's to close. `flush-buffer` does not close descriptors -- the queue is the caller's --
+  so the ownership rule lives where the queue is filled and drained, and a leak shows up as one
+  descriptor per keyboard bind.
 
 ## 2. Buffers and I/O
 
@@ -440,10 +445,26 @@ libwayland for behaviour not defined in the spec" — is adopted here without re
 | role destruction | `xdg_toplevel` may die first and the surface unmaps; `xdg_surface` before its role, or `xdg_wm_base` before its surfaces, are protocol errors (`defunct_role_object`, `defunct_surfaces`) |
 | `wl_surface.attach` of a buffer before the initial ack | `xdg_surface.error.unconfigured_buffer`, never a best guess |
 | `wl_pointer.frame` | one frame per input event batch, always last |
+| `wl_seat.name` vs `wl_seat.capabilities` | name first, then capabilities, both on bind; re-advertised capabilities keep their meaning |
+| `wl_keyboard.keymap` vs `repeat_info` | keymap (with its descriptor), then repeat_info, both before any key event |
+| `wl_keyboard.enter` | enter, then `modifiers`, then nothing until a key; the keys array carries what is logically down |
+| `wl_keyboard.key` vs `modifiers` | key first, then the resulting modifiers -- a client that reads the modifier state inside its key handler sees the *previous* state, which is what every other compositor does |
+| input serials | from the display's counter, like configures; a pointer button's serial is what a client uses for grabs |
+| `wl_pointer.set_cursor` | accepted, hotspot stored; nothing draws it yet (documented, not silent) |
 
 Regression protection: recorded `WAYLAND_DEBUG=1` traces from a real compositor (sway or
 weston) are replayed against our decoder, and our encoder's output is diffed against a
 libwayland client's trace for the same interaction.
+
+## 8.1 When events are written
+
+`run-once` flushes every client at the end of each cycle. Events are produced in three places
+-- by dispatch, by timers and idles, and by a backend injecting input -- and only the first has
+a readable event to piggyback on. Without the end-of-cycle flush, an input event waits for
+something unrelated to push the buffer out; `weston-eventdemo`, idle after its first frame,
+never saw the motion events at all. libwayland-server flushes its clients every loop iteration
+for the same reason. A client that dies in the gap is torn down by `flush-all` instead of
+letting EPIPE escape the reactor.
 
 ## 9. Robustness checklist
 

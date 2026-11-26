@@ -33,7 +33,7 @@ without changing the scene graph or the protocol layer.
 | Framework buffers (cursor images, wallpaper, decorations) | compositor (`memfd_create`) | compositor | owner object's `release` | per owner |
 | Render target (headless/nested) | compositor (`memfd_create`) | compositor | output destroy | per output |
 | DRM dumb buffer | compositor (ioctl → handle → mmap) | compositor | output destroy (`RMFB`, `DESTROY_DUMB`) | per output |
-| Keymap | compositor (`memfd_create` from libxkbcommon string) | client (read-only) | after `wl_keyboard.keymap` is sent and the client has read it | one-shot |
+| Keymap | compositor (`memfd_create` from a generated string, D28) | client (read-only) | closed by the server once the write that carried it succeeded (SCM_RIGHTS has duplicated it) | one-shot |
 | Swapchain / dmabuf (phase 5) | compositor (GBM) | GPU | output destroy | per output |
 
 Rules:
@@ -98,6 +98,13 @@ offset % 4 == 0
 - Buffer reuse without release is the single most common client-vs-compositor bug; the test
   suite has explicit cases (`attach` while still in use, `attach` then immediate `destroy`,
   commit with no buffer, damage-only commit).
+- **Pool growth** (`wl_shm_pool.resize`, D30): the new range is mapped before the old one is
+  dropped, so a failure changes nothing, and the file's size is checked with `lseek` first --
+  mmap succeeds past the end of a file and the mistake would arrive later as SIGBUS. Existing
+  buffers keep working because they hold the pool, and their pointers are derived from the
+  pool's current mapping rather than cached.
+- **Regions** (D29) are copied when a surface commits: a client may destroy the `wl_region` the
+  moment it has set it, and the surface keeps the area as a list of rectangles.
 
 ## 4. The SIGBUS problem (honest version)
 

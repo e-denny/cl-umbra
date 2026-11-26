@@ -147,13 +147,20 @@ Two numbers, because either alone can lie: a frame of one wrong colour is still
                      (fail "the toplevel never mapped"))
                    (unless (wayland.server:xdg-toplevel-title toplevel)
                      (fail "the client never set a title"))
+                   ;; Every configure this compositor sends carries 0x0: it has
+                   ;; no layout, so the client chooses its own size.  The *second*
+                   ;; configure is the one focus-on-map produces, and it says the
+                   ;; toplevel is activated (the seat gate checks that in detail);
+                   ;; the empty initial state array is asserted by the unit suite,
+                   ;; which can look at the first configure rather than the last.
                    (unless (and (zerop (wayland.server:xdg-toplevel-configure-width toplevel))
                                 (zerop (wayland.server:xdg-toplevel-configure-height toplevel)))
-                     (fail "the initial configure was ~Dx~D, not 0x0 (you choose)"
+                     (fail "the configure was ~Dx~D, not 0x0 (you choose)"
                            (wayland.server:xdg-toplevel-configure-width toplevel)
                            (wayland.server:xdg-toplevel-configure-height toplevel)))
-                   (when (wayland.server:xdg-toplevel-configure-states toplevel)
-                     (fail "the initial configure carried states ~S"
+                   (unless (member wayland.server:+xdg-toplevel-state-activated+
+                                   (wayland.server:xdg-toplevel-configure-states toplevel))
+                     (fail "the focused toplevel was never configured as activated: ~S"
                            (wayland.server:xdg-toplevel-configure-states toplevel)))
                    (unless (and surface (wayland.server:surface-current-buffer surface))
                      (fail "no buffer was ever committed")))))

@@ -184,10 +184,23 @@ mode on bind so that wayland-info has something true to print."))
    (current-y :initform 0 :accessor surface-current-y)
    ;; Callbacks requested by commits that have not been presented yet.
    (committed-callbacks :initform nil :accessor surface-committed-callbacks)
+   ;; Committed region state: a list of (x y width height) or NIL for "no region"
+   ;; -- which means "infinitely large" for opaque (nothing is opaque) and that
+   ;; the whole surface takes input.  Regions are *copied* at commit, not held by
+   ;; reference: a client may destroy or mutate a wl_region right after setting it.
    (opaque-region :initform nil :accessor surface-opaque-region)
    (input-region :initform nil :accessor surface-input-region)
+   (pending-opaque-region :initform nil :accessor surface-pending-opaque-region)
+   (pending-opaque-region-p :initform nil :accessor surface-pending-opaque-region-p)
+   (pending-input-region :initform nil :accessor surface-pending-input-region)
+   (pending-input-region-p :initform nil :accessor surface-pending-input-region-p)
    (mapped-p :initform nil :accessor surface-mapped-p)
    (committed-p :initform nil :accessor surface-committed-p)
+   ;; wl_surface.set_buffer_transform (since 2) and set_buffer_scale (since 3).
+   ;; Stored and validated; *applied* only at the values this output advertises
+   ;; (transform 0, scale 1).  Honouring other values is the renderer's 2b work.
+   (buffer-transform :initform 0 :accessor surface-buffer-transform)
+   (buffer-scale :initform 1 :accessor surface-buffer-scale)
    ;; The wl_compositor resource that created this surface.  A framework
    ;; subclasses the compositor and puts its own state behind this.
    (owner :initform nil :accessor surface-owner)
@@ -208,6 +221,17 @@ SHELL-SURFACE is the one hook a role needs: when set, the commit path calls the
 role's hooks (see SURFACE.LISP), and the role object owns the protocol state
 machine.  A bare surface -- everything phase 2a's clients create -- has none, and
 none of the role checks run."))
+
+(defclass region (resource)
+  ((rects :initform nil :accessor region-rects))
+  (:documentation
+   "wl_region: a set of rectangles, as a list of (x y width height).
+
+A region is a set, not a rectangle: ADD is union, SUBTRACT is difference, and the
+representation may contain overlapping or adjacent rectangles.  That is legal --
+the protocol only defines the area -- but it means consumers must think in terms
+of the set, not of one rectangle, and REGION-SUBTRACT produces up to four pieces
+per existing rectangle rather than trying to be minimal."))
 
 ;;; ---------------------------------------------------------------------------
 ;;; xdg-shell, version 1
@@ -335,3 +359,94 @@ pool dies, which is the one place that ownership ends."))
 
 The pool keeps the buffer alive: destroying the pool destroys its buffers, so a
 renderer can never be handed a pointer into an unmapped file."))
+
+;;; ---------------------------------------------------------------------------
+;;; Seats and input, wl_seat version 4
+;;;
+;;; The seat is the one object here that is *not* a resource: it is a property of
+;;; the compositor (a group of devices, with focus), while every client that
+;;; binds the global gets its own wl_seat resource beneath it.  Two kinds of
+;;; object, and confusing them is how a compositor ends up with per-client focus:
+;;;
+;;;   SEAT           one per compositor: capabilities, keymap, focus, pointer
+;;;                  position, pressed keys, modifier state.
+;;;   SEAT-RESOURCE  one per client bind (wl_seat).  It exists so the client can
+;;;                  create POINTER, KEYBOARD and TOUCH objects, which are the
+;;;                  ones events actually travel on.
+;;;
+;;; Focus lives on the seat, so "who gets this key" has exactly one answer.
+;;; ---------------------------------------------------------------------------
+
+(defclass seat ()
+  ((name :initarg :name :initform "seat0" :accessor seat-name)
+   (display :initarg :display :reader seat-display)
+   ;; Bitmask of WL-SEAT-CAPABILITY-*: what this seat can do *now*.
+   (capabilities :initarg :capabilities :initform 0 :accessor seat-capabilities)
+   ;; The XKB keymap text every keyboard is given, and the repeat settings that
+   ;; follow it.  NIL means "no keymap yet", which is a valid state while a
+   ;; backend is still starting; a keyboard created then gets none.
+   (keymap :initform nil :accessor seat-keymap)
+   (repeat-rate :initform 25 :accessor seat-repeat-rate)
+   (repeat-delay :initform 600 :accessor seat-repeat-delay)
+   (bindings :initform nil :accessor seat-bindings)
+   ;; The surface that has keyboard focus, and the one under the pointer.  In
+   ;; this slice they are always set explicitly by the compositor: there is no
+   ;; scene graph, so nothing can be hit-tested yet.
+   (keyboard-focus :initform nil :accessor seat-keyboard-focus)
+   (pointer-focus :initform nil :accessor seat-pointer-focus)
+   (pointer-x :initform 0 :accessor seat-pointer-x)
+   (pointer-y :initform 0 :accessor seat-pointer-y)
+   ;; Keycodes physically down, so a focus change can tell the new client what it
+   ;; is not seeing the press of (wl_keyboard.enter carries the array).
+   (pressed-keys :initform nil :accessor seat-pressed-keys)
+   ;; Modifier state as the compositor computed it, echoed in
+   ;; wl_keyboard.modifiers after every key event.
+   (mods-depressed :initform 0 :accessor seat-mods-depressed)
+   (mods-latched :initform 0 :accessor seat-mods-latched)
+   (mods-locked :initform 0 :accessor seat-mods-locked)
+   (group :initform 0 :accessor seat-group))
+  (:documentation
+   "A seat: capabilities, one keymap, focus, and the modifier state.
+
+It is deliberately not a resource.  Resources are per client and die with it;
+focus and modifier state outlive any one client, and two clients binding the same
+global must see the same seat."))
+
+(defclass seat-resource (resource)
+  ((seat :initarg :seat :initform nil :accessor seat-resource-seat)
+   (pointers :initform nil :accessor seat-resource-pointers)
+   (keyboards :initform nil :accessor seat-resource-keyboards)
+   (touches :initform nil :accessor seat-resource-touches))
+  (:documentation
+   "wl_seat as one client sees it; the factory for its pointer/keyboard/touch.
+
+Lists, not single slots: the protocol allows get_pointer twice, and a client that
+does it gets two independently identified objects."))
+
+(defclass pointer (resource)
+  ((seat :initarg :seat :initform nil :accessor pointer-seat)
+   (surface :initform nil :accessor pointer-surface)
+   ;; set_cursor's request: the image and its hotspot.  Accepted and recorded;
+   ;; there is no software cursor to draw yet, so nothing reads it.
+   (cursor-surface :initform nil :accessor pointer-cursor-surface)
+   (cursor-hotspot-x :initform 0 :accessor pointer-cursor-hotspot-x)
+   (cursor-hotspot-y :initform 0 :accessor pointer-cursor-hotspot-y)
+   ;; The serial of the last set_cursor.  A compositor needs it for cursor
+   ;; animation; a gate needs it as proof that the client received the enter that
+   ;; invited the request, which is otherwise invisible from our side.
+   (cursor-serial :initform nil :accessor pointer-cursor-serial))
+  (:documentation "wl_pointer: enter/leave/motion/button/axis for one client."))
+
+(defclass keyboard (resource)
+  ((seat :initarg :seat :initform nil :accessor keyboard-seat)
+   (surface :initform nil :accessor keyboard-surface))
+  (:documentation "wl_keyboard: keymap, repeat_info, enter/leave, key, modifiers."))
+
+(defclass touch (resource)
+  ((seat :initarg :seat :initform nil :accessor touch-seat)
+   (surface :initform nil :accessor touch-surface))
+  (:documentation
+   "wl_touch: created so a capability-less seat never answers `implementation'.
+
+No compositor capability advertises touch yet and no backend injects it, so the
+object exists, receives nothing, and is released normally."))

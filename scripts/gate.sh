@@ -45,6 +45,11 @@
 #      configured, acks our serial, commits a buffer and draws; the frame is
 #      checked for content inside the window and nothing outside it, ping/pong is
 #      answered, and the client is still connected at the end
+#  12. seats and input: weston-eventdemo -- a real client -- receives our keymap
+#      descriptor and repeat_info, is focused when its window maps (and told it is
+#      activated), and prints the keys and pointer events we inject with the right
+#      keycodes, coordinates and modifier masks; a libxkbcommon probe parses the
+#      keymap we actually sent (no default includes)
 #
 # Logs land in a temporary directory that is printed when something fails.
 
@@ -179,6 +184,15 @@ else
   fail 'xdg-shell toplevel' 'weston-simple-shm did not draw through our compositor' "$log_dir/xdg-shell.log"
 fi
 
+# 12. Seats and input --------------------------------------------------------
+printf '\nphase 3b gate: seats and input\n\n'
+
+if gb "$log_dir/seat.log" "$repo_root/scripts/seat-gate.sh"; then
+  pass 'seats and input' "$(grep -a '^seat-gate: seat ' "$log_dir/seat.log" | sed 's/^seat-gate: seat seat0: //')"
+else
+  fail 'seats and input' 'the real client did not receive the input we injected' "$log_dir/seat.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -198,7 +212,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a and 3 clauses)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 3a and 3b clauses)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

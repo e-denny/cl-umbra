@@ -24,6 +24,38 @@ buffers, which are read in place: no copy, no texture, no upload.")
    #:+pixman-op-src+
    #:+pixman-op-over+))
 
+(defpackage #:cf.input
+  (:use #:cl)
+  (:documentation
+   "Keymaps, keycodes and modifier state (docs/framework.md §5).
+
+Phase 3 needs a small, self-contained XKB keymap generated from a table, and the
+modifier mask each key sets.  Phase 4 adds libxkbcommon here, for real layouts and
+device-specific keymaps from libinput; the protocol and the rest of the framework
+already speak in keycodes and masks, so that change stays inside this package.")
+  (:export
+   #:+keys+
+   #:key-entry
+   #:keycode
+   #:xkb-keycode
+   #:key-name
+   #:key-modifier
+   #:key-modifier-mask
+   #:modifier-mask
+   #:make-keymap
+   #:modifiers
+   #:make-modifiers
+   #:modifiers-depressed
+   #:modifiers-latched
+   #:modifiers-locked
+   #:modifiers-group
+   #:update-modifiers
+   #:+modifier-shift+
+   #:+modifier-lock+
+   #:+modifier-control+
+   #:+modifier-mod1+
+   #:+modifier-mod4+))
+
 (defpackage #:cf.backend.headless.png
   (:use #:cl)
   (:documentation
@@ -36,6 +68,7 @@ a debugging artefact and a test fixture, not a compression benchmark.")
   (:use #:cl)
   (:local-nicknames (#:render #:cf.render.pixman)
                     (#:png #:cf.backend.headless.png)
+                    (#:input #:cf.input)
                     (#:srv #:wayland.server)
                     (#:reactor #:wayland.reactor))
   (:import-from #:wayland
@@ -59,6 +92,13 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:compositor-height
    #:compositor-surfaces
    #:compositor-shells
+   #:compositor-seat
+   #:compositor-modifiers
+   #:focus-surface
+   #:inject-key
+   #:inject-pointer-motion
+   #:inject-pointer-button
+   #:inject-pointer-axis
    #:compositor-target
    #:compositor-frame-count
    #:write-frame-png
@@ -78,6 +118,13 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
                 #:compositor-height
                 #:compositor-surfaces
                 #:compositor-shells
+                #:compositor-seat
+                #:compositor-modifiers
+                #:focus-surface
+                #:inject-key
+                #:inject-pointer-motion
+                #:inject-pointer-button
+                #:inject-pointer-axis
                 #:compositor-frame-count
                 #:cf-surface
                 #:cf-compositor)
@@ -107,6 +154,13 @@ docs/framework.md §1 follow.")
    #:compositor-height
    #:compositor-surfaces
    #:compositor-shells
+   #:compositor-seat
+   #:compositor-modifiers
+   #:focus-surface
+   #:inject-key
+   #:inject-pointer-motion
+   #:inject-pointer-button
+   #:inject-pointer-axis
    #:compositor-frame-count
    #:write-png
    #:write-frame-png

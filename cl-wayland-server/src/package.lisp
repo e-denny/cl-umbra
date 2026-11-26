@@ -59,6 +59,7 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:make-message-buffer
                 #:buffer-size
                 #:buffer-fds
+                #:buffer-fd-count
                 #:clear-message-buffer
                 #:begin-message
                 #:end-message
@@ -142,6 +143,9 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:wl-buffer.release
                 #:wl-compositor.create-surface
                 #:wl-compositor.create-region
+                #:wl-region.add
+                #:wl-region.subtract
+                #:wl-region.destroy
                 #:wl-surface.attach
                 #:wl-surface.damage
                 #:wl-surface.frame
@@ -149,8 +153,37 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:wl-surface.set-input-region
                 #:wl-surface.commit
                 #:wl-surface.destroy
+                #:wl-surface.set-buffer-transform
+                #:wl-surface.set-buffer-scale
+                #:wl-surface.damage-buffer
                 #:wl-surface.enter
                 #:wl-surface.leave
+                ;; wl_seat, wl_pointer, wl_keyboard, wl_touch (version 4)
+                #:wl-seat.get-pointer
+                #:wl-seat.get-keyboard
+                #:wl-seat.get-touch
+                #:wl-seat.release
+                #:wl-seat.capabilities
+                #:wl-seat.name
+                #:wl-pointer.set-cursor
+                #:wl-pointer.release
+                #:wl-pointer.enter
+                #:wl-pointer.leave
+                #:wl-pointer.motion
+                #:wl-pointer.button
+                #:wl-pointer.axis
+                #:wl-keyboard.release
+                #:wl-keyboard.keymap
+                #:wl-keyboard.enter
+                #:wl-keyboard.leave
+                #:wl-keyboard.key
+                #:wl-keyboard.modifiers
+                #:wl-keyboard.repeat-info
+                #:wl-touch.release
+                #:wl-touch.down
+                #:wl-touch.up
+                #:wl-touch.motion
+                #:wl-touch.cancel
                 ;; opcodes of the events the server sends in phase 1
                 #:+wl-display-error+
                 #:+wl-display-delete-id+
@@ -166,7 +199,40 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:+wl-shm-format+
                 #:+wl-buffer-release+
                 #:+wl-surface-enter+
+                #:+wl-surface-error-invalid-transform+
+                #:+wl-surface-error-invalid-scale+
                 #:+wl-surface-leave+
+                #:+wl-seat-capabilities+
+                #:+wl-seat-name+
+                #:+wl-pointer-enter+
+                #:+wl-pointer-leave+
+                #:+wl-pointer-motion+
+                #:+wl-pointer-button+
+                #:+wl-pointer-axis+
+                #:+wl-keyboard-keymap+
+                #:+wl-keyboard-enter+
+                #:+wl-keyboard-leave+
+                #:+wl-keyboard-key+
+                #:+wl-keyboard-modifiers+
+                #:+wl-keyboard-repeat-info+
+                #:+wl-touch-down+
+                #:+wl-touch-up+
+                #:+wl-touch-motion+
+                #:+wl-touch-cancel+
+                ;; capability / state enums
+                #:+wl-seat-capability-pointer+
+                #:+wl-seat-capability-keyboard+
+                #:+wl-seat-capability-touch+
+                #:+wl-seat-error-missing-capability+
+                #:+wl-pointer-error-role+
+                #:+wl-pointer-button-state-pressed+
+                #:+wl-pointer-button-state-released+
+                #:+wl-pointer-axis-vertical-scroll+
+                #:+wl-pointer-axis-horizontal-scroll+
+                #:+wl-keyboard-keymap-format-xkb-v1+
+                #:+wl-keyboard-key-state-pressed+
+                #:+wl-keyboard-key-state-released+
+                #:+wl-keyboard-key-state-repeated+
                 ;; wl_shm / wl_shm_pool error codes
                 #:+wl-shm-error-invalid-format+
                 #:+wl-shm-error-invalid-stride+
@@ -307,6 +373,8 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:surface-current-buffer
    #:surface-mapped-p
    #:surface-committed-p
+   #:surface-buffer-transform
+   #:surface-buffer-scale
    #:surface-committed-callbacks
    #:surface-pending-damage
    #:surface-owner
@@ -314,6 +382,18 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:surface-current-y
    #:surface-frame-callbacks
    #:surface-shell-surface
+   #:region
+   #:region-rects
+   #:region-add-rectangle
+   #:region-subtract-rectangle
+   #:region-empty-p
+   #:region-contains-p
+   #:region-rectangles
+   #:rectangle-difference
+   #:surface-opaque-region
+   #:surface-input-region
+   #:surface-pending-opaque-region
+   #:surface-pending-input-region
    #:surface-shell-check-commit
    #:surface-shell-committed
    #:surface-shell-lost
@@ -393,6 +473,70 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:ping-xdg-wm-base
    #:close-toplevel
    #:set-toplevel-activated
+   #:+xdg-toplevel-state-activated+
+   ;; seats and input (version 4)
+   #:+seat-version+
+   #:seat
+   #:make-seat
+   #:add-seat-global
+   #:seat-name
+   #:seat-capabilities
+   #:set-seat-capabilities
+   #:seat-capabilities-changed
+   #:seat-keymap
+   #:set-seat-keymap
+   #:seat-repeat-rate
+   #:seat-repeat-delay
+   #:seat-bindings
+   #:seat-keyboard-focus
+   #:seat-pointer-focus
+   #:seat-pointer-x
+   #:seat-pointer-y
+   #:seat-pressed-keys
+   #:seat-mods-depressed
+   #:seat-mods-latched
+   #:seat-mods-locked
+   #:seat-group
+   #:seat-resource
+   #:seat-resource-seat
+   #:seat-resource-pointers
+   #:seat-resource-keyboards
+   #:seat-resource-touches
+   #:pointer
+   #:pointer-seat
+   #:pointer-surface
+   #:pointer-cursor-surface
+   #:pointer-cursor-hotspot-x
+   #:pointer-cursor-hotspot-y
+   #:pointer-cursor-serial
+   #:keyboard
+   #:keyboard-seat
+   #:keyboard-surface
+   #:touch
+   #:touch-seat
+   #:touch-surface
+   #:seat-focus-changed
+   #:set-keyboard-focus
+   #:set-pointer-focus
+   #:send-key-event
+   #:send-pointer-motion
+   #:send-pointer-button
+   #:send-pointer-axis
+   #:send-keymap
+   #:keymap-memfd
+   #:seat-time
+   ;; the wl_seat / input enums a compositor or backend needs
+   #:+wl-seat-capability-pointer+
+   #:+wl-seat-capability-keyboard+
+   #:+wl-seat-capability-touch+
+   #:+wl-seat-error-missing-capability+
+   #:+wl-pointer-button-state-pressed+
+   #:+wl-pointer-button-state-released+
+   #:+wl-pointer-axis-vertical-scroll+
+   #:+wl-pointer-axis-horizontal-scroll+
+   #:+wl-keyboard-keymap-format-xkb-v1+
+   #:+wl-keyboard-key-state-pressed+
+   #:+wl-keyboard-key-state-released+
    ;; globals
    #:global
    #:global-name

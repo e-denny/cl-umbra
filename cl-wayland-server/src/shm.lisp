@@ -236,6 +236,40 @@ of our address space or a crash: they are all done before a pointer exists."
       (push buffer (shm-pool-buffers pool))
       buffer)))
 
+(defmethod wl-shm-pool.resize ((pool shm-pool) size)
+  "Grow the pool's mapping to SIZE octets.
+
+Three rules, all from the protocol: a pool can only grow, the new size must be
+mappable, and the client must have grown the *file* first.  The last one is worth
+checking because mmap happily succeeds past the end of a file and the mistake
+surfaces later as SIGBUS in the renderer; an lseek here turns that into a
+protocol error at the request that caused it.  The new mapping is established
+before the old one is dropped, so a failure leaves the pool exactly as it was."
+  (let ((client (resource-client pool)))
+    (flet ((reject (control &rest arguments)
+             (apply #'protocol-error client (resource-id pool)
+                    +wl-shm-error-invalid-fd+ control arguments)))
+      (unless (and (integerp size) (plusp size) (<= size *shm-max-pool-size*))
+        (reject "resize to ~S octets is not between 1 and ~D"
+                size *shm-max-pool-size*))
+      (unless (> size (shm-pool-size pool))
+        (reject "resize from ~D to ~D octets: a pool can only grow"
+                (shm-pool-size pool) size))
+      (let ((file-size (wayland.ffi:file-size (shm-pool-fd pool))))
+        (when (< file-size size)
+          (reject "the pool's file is ~D octets, but ~D were requested"
+                  file-size size))))
+    (let ((mapping (wayland.ffi:map-file (shm-pool-fd pool) size))
+          (old (shm-pool-mapping pool))
+          (old-length (shm-pool-mapping-length pool)))
+      (wayland.ffi:unmap-file old old-length)
+      (setf (shm-pool-mapping pool) mapping
+            (shm-pool-mapping-length pool) size
+            (shm-pool-size pool) size))
+    (log-message :debug "client ~D: pool ~D grown to ~D octets"
+                 (client-id client) (resource-id pool) size)
+    pool))
+
 (defmethod wl-shm-pool.destroy ((pool shm-pool))
   (destroy-resource pool))
 

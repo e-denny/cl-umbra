@@ -751,3 +751,127 @@ role state lives relative to `wl_surface`.
   that it did.
 - Popups will arrive with a slice that can also position and grab them; a positioner that
   positions nothing would be the lie this decision avoids.
+
+---
+
+## D27 — One seat per compositor, explicit focus, and synthetic input as the backend seam
+
+**Status:** accepted
+
+**Context.** Phase 3b has to deliver `wl_seat`, `wl_pointer` and `wl_keyboard` with no input
+device, no libinput and no cursor — and prove it with a real client.
+
+**Decision.**
+
+1. **The seat is not a resource.** `seat` is a per-compositor object holding capabilities, one
+   keymap, the keyboard and pointer focus, the pointer position, the logically-down keys and
+   the modifier state. Each client that binds the global gets a `seat-resource` beneath it,
+   which is only a factory for that client's `pointer`/`keyboard`/`touch` objects. Focus and
+   modifier state outlive any client, so they cannot live on one.
+2. **Version 4.** v5 adds `wl_pointer.frame` and `wl_seat.release`, v6 `axis_source` and
+   wheel tilt, v7+ high-resolution scroll, v10 the `repeated` key state. v4 is the newest
+   version whose every request and event this slice implements, so `wl_seat.release` is
+   correctly answered `invalid_method` rather than silently accepted.
+3. **Focus is one call.** `set-keyboard-focus` sends `leave` to the keyboards that had focus,
+   `enter` + `modifiers` (and the array of held keys) to the client that gained it, and calls
+   the `seat-focus-changed` hook that a compositor uses to send `xdg_toplevel.configure` with
+   `activated`. Enter/leave and activation cannot drift apart, because they hang off the same
+   call.
+4. **Synthetic input is the seam a backend uses**: `send-key-event`, `send-pointer-motion`,
+   `-button`, `-axis`. The headless backend exposes `inject-*` wrappers that look up the key in
+   the table and update the modifier mask, so what a test injects is exactly what a device
+   would have reported. A real backend replaces the caller, not the seat.
+5. **The compositor flushes every cycle.** `run-once` ends with `flush-all`, as
+   libwayland-server's loop does. Without it, events produced outside a client's readable
+   event — input injection, timers, idles — sat in the buffer until something unrelated
+   flushed; `weston-eventdemo` sat idle and never saw the motion events at all.
+6. **Focus follows the map, once.** The headless compositor focuses a toplevel when it maps
+   (tinywl's policy) and not on every commit: `focus-surface` re-places the pointer, so calling
+   it per commit teleported the cursor back to (0,0) and sprayed enter/leave at the client.
+
+**Consequences.**
+
+- The seat gate proves the chain with a real client: `weston-eventdemo` prints the coordinates,
+  button codes and *unicode code points* it received, and a libxkbcommon probe parses the
+  keymap we sent.
+- Grabs, cursor rendering, touch, and a real keymap from libxkbcommon stay open; the seat's
+  shape does not change when they arrive.
+
+---
+
+## D28 — Keymaps are generated as text, and parsed by the peer
+
+**Status:** accepted (phase 4 revisits the generator, not the contract)
+
+**Context.** A `wl_keyboard.keymap` event carries an XKB keymap the *client* compiles with its
+own libxkbcommon. Something has to produce one, and phase 3 has no input devices.
+
+**Decision.** `cf.input` generates a self-contained XKB keymap from a table of keys: the evdev
+code (what `wl_keyboard.key` carries), the XKB keycode (computed as evdev + 8, never stored, so
+the classic off-by-eight bug cannot be typed in), two keysyms, the modifier the key sets, and
+the keysym name. No `include` of rules or data files, so a client needs nothing from
+`/usr/share/X11/xkb`. The compositor's modifier state comes from the same table, so what the
+client computes and what `wl_keyboard.modifiers` says agree by construction.
+
+**Evidence.** `tests/c-client/xkb-keymap-probe.c` compiles the keymap we actually sent (dumped
+by the gate from the seat) with `XKB_CONTEXT_NO_DEFAULT_INCLUDES`, checks keycode 1 is Escape,
+16 is q/Q, 42 is Shift_L, and runs a state test — Shift held, q pressed, keysym `Q` — which is
+the part a keymap that merely parses can still get wrong. The gate also requires the real
+client to print `key key: 16, unicode: 81, ... modifiers: 0x1`.
+
+**Consequences.** libxkbcommon stays out of the shipped image until phase 4, where real layouts
+and device keymaps from libinput need it. Everything else already speaks keycodes and masks, so
+that change stays inside `cf.input`.
+
+---
+
+## D29 — `wl_region` is a rectangle set, and `wl_compositor` is offered at version 3
+
+**Status:** accepted
+
+**Context.** Every `window.c`-based client in weston's demo set binds `wl_compositor` at
+version 3 unconditionally and calls `create_region` before it maps a window. Advertising v1
+(the honest minimum) kept every pointer-using client off the compositor entirely.
+
+**Decision.**
+
+1. **`wl_region` is a real object**: a list of `(x y width height)`, `add` is union,
+   `subtract` is difference and produces up to four pieces per existing rectangle. It is not
+   canonicalised — the protocol defines the *area*, and a minimal decomposition is not needed
+   to be correct.
+2. **Regions are snapshotted at commit.** `set_opaque_region`/`set_input_region` store the
+   pending region; `commit` copies the rectangle list. A client may destroy the region object
+   the moment it has set it, and the surface must keep the area.
+3. **`wl_compositor` is offered at version 3.** v2 adds `set_buffer_transform`, v3 adds
+   `set_buffer_scale` (and `damage_buffer` is v4, which we do not offer). Both requests are
+   validated, stored and *not* applied: the headless output advertises transform 0 and scale 1,
+   so a client that respects the output loses nothing, and the renderer's transform/scale work
+   in 2b starts from state that already exists.
+4. Regions are stored and not yet *acted on*: there is no hit-testing (no scene graph) and the
+   renderer composites without an opaque optimisation. That is 2b, and the set arithmetic is
+   tested now so that 2b has something correct to consume.
+
+**Consequences.** The version is a promise, and the promise is "we accept and remember". A
+client that sets scale 2 gets a window drawn at half the size it asked for; that is written
+down in `docs/framework.md` §5 and is the first thing 2b fixes.
+
+---
+
+## D30 — `wl_shm_pool.resize` grows only, and checks the file first
+
+**Status:** accepted
+
+**Context.** `window.c` grows its pool when it needs a bigger buffer, so every real client
+calls `resize`. It was listed as phase-2b work; phase 3b needed it.
+
+**Decision.** `resize` accepts only a larger size (the protocol says it can only grow), maps
+the new range *before* dropping the old one so a failure changes nothing, and — because the
+pool's descriptor is ours — asks `lseek(SEEK_END)` for the file's size first. mmap succeeds
+past the end of a file and the failure arrives later as SIGBUS in the renderer; the lseek turns
+that into a protocol error at the request that caused it, with the two sizes in the message.
+
+**Consequences.** Growing a pool whose file was not grown is now a clean protocol error rather
+than a SIGBUS. The remaining SIGBUS case (a client that *shrinks* its file after mapping) is
+still open and still documented in `docs/memory-and-rendering.md` §4; `resize` no longer makes
+it worse.
+
