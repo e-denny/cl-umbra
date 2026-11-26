@@ -165,6 +165,17 @@ worth knowing: the nested input path is a real protocol round trip."
     (pump 0.2)))
 
 (defun moves (x y) (cf:inject-pointer-motion *input* x y))
+
+(defun pointer-leave ()
+  "Say that the pointer is gone, the way each mode's backend says it.
+
+A nested session learns it as wl_pointer.leave from its parent -- which is what moving
+the *parent's* pointer off our window produces -- and a headless one has no parent, so
+it says it directly.  The distinction matters: a position outside the output is clamped
+for a grab, a leave ends it (D47)."
+  (if *parent*
+      (moves -1 -1)
+      (cf:inject-pointer-leave *inner*)))
 (defun button (which state) (cf:inject-pointer-button *input* which state))
 (defun key (name state) (cf:inject-key *input* name state))
 
@@ -526,7 +537,7 @@ of lines of protocol."
            (settle)
            (check (typep (cf:compositor-grab *inner*) 'cf.grab:move-grab)
                   "a second drag started from the window's corner")
-           (moves -1 -1)
+           (pointer-leave)
            (pump 0.3)
            (check (null (cf:compositor-grab *inner*))
                   "and the pointer leaving the output ended it")
@@ -562,7 +573,43 @@ of lines of protocol."
                  ;; content and not about a background fill.
                  (check (= #xFFFF0000 (cf:frame-pixel *inner* 100 75))
                         "and the window inside is still drawn there (#x~8,'0X)"
-                        (cf:frame-pixel *inner* 100 75))))))
+                        (cf:frame-pixel *inner* 100 75))
+
+                 ;; 7b. And the parent can take space *away*.  A shrunk output used to
+                 ;;     leave its windows where they were, half outside it and
+                 ;;     unreachable (D37's open question): the same clamp a drag obeys
+                 ;;     is applied to every window when the output changes size (D46).
+                 (wayland.server:request-toplevel-size toplevel 400 300)
+                 (pump 10 :until (lambda ()
+                                   (and (= 400 (cf:compositor-width *inner*))
+                                        (= 300 (cf:compositor-height *inner*)))))
+                 (check (= 400 (cf:compositor-width *inner*))
+                        "the parent shrank our output to ~Dx~D"
+                        (cf:compositor-width *inner*) (cf:compositor-height *inner*))
+                 (pump 0.5)
+                 (let ((outside '()))
+                   (dolist (surface (mapped-surfaces *inner*))
+                     (let* ((node (node-of surface))
+                            (width (cf.scene:node-width node))
+                            (height (cf.scene:node-height node)))
+                       (multiple-value-bind (x y) (cf.scene:node-position node)
+                         ;; CLAMP-TO-OUTPUT's range: a window that fits lives in
+                         ;; [0, output - size]; one larger than the output in
+                         ;; [output - size, 0], so that it covers the output.
+                         (let ((x-low (min 0 (- 400 width))) (x-high (max 0 (- 400 width)))
+                               (y-low (min 0 (- 300 height))) (y-high (max 0 (- 300 height))))
+                           (declare (ignorable x-low))
+                           (unless (and (<= x-low x x-high) (<= y-low y y-high))
+                             (push (list (wayland.server:resource-id surface)
+                                         x y width height)
+                                   outside))))))
+                   (check (null outside)
+                          "and every window was re-clamped inside it (~S outside)"
+                          outside))
+                 ;; Put the space back: re-clamping only ever pulls in, and the rest of
+                 ;; the run wants room to launch a client into.
+                 (wayland.server:request-toplevel-size toplevel 800 600)
+                 (pump 10 :until (lambda () (= 800 (cf:compositor-width *inner*))))))))
 
          ;; 8. Alt+Shift+Return starts a client on *our* display, which is the one
          ;;    thing a nested session cannot do for itself from the outside: the

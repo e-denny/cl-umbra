@@ -133,6 +133,27 @@ get back (the sixth manual test's second finding, D43)."
   (let ((limit (- output-size size)))
     (max (min 0 limit) (min (max 0 limit) position))))
 
+(defun clamp-node-to-output (node output-width output-height)
+  "Move NODE so its window's *visible* box stays inside the output; returns NODE.
+
+The node's position is where its buffer starts, and a decorated client's buffer starts
+earlier than its window (a shadow): clamping the node would leave the shadow's width
+of slack, so the arithmetic is in window geometry and the node is placed back from it
+(D43, D46).  A window larger than the output is placed so it covers the output rather
+than sliding off it, which is CLAMP-TO-OUTPUT's rule.
+
+Either output dimension may be NIL, meaning 'do not clamp on that axis'."
+  (multiple-value-bind (geometry-x geometry-y width height) (node-geometry node)
+    (let ((x (scene:node-x node))
+          (y (scene:node-y node)))
+      (when output-width
+        (setf x (- (clamp-to-output (+ x geometry-x) (max 1 width) output-width)
+                   geometry-x)))
+      (when output-height
+        (setf y (- (clamp-to-output (+ y geometry-y) (max 1 height) output-height)
+                   geometry-y)))
+      (scene:set-node-position node x y))))
+
 (defclass move-grab (grab)
   ((start-x :initarg :start-x :reader move-grab-start-x)
    (start-y :initarg :start-y :reader move-grab-start-y)
@@ -163,16 +184,12 @@ know where the edges are and the position is free."))
                  :output-height output-height))
 
 (defmethod grab-motion ((grab move-grab) x y)
-  (let* ((node (grab-node grab))
-         (new-x (+ (move-grab-origin-x grab) (- x (move-grab-start-x grab))))
-         (new-y (+ (move-grab-origin-y grab) (- y (move-grab-start-y grab))))
-         (output-width (move-grab-output-width grab))
-         (output-height (move-grab-output-height grab)))
-    (when output-width
-      (setf new-x (clamp-to-output new-x (scene:node-width node) output-width)))
-    (when output-height
-      (setf new-y (clamp-to-output new-y (scene:node-height node) output-height)))
-    (scene:set-node-position node new-x new-y)
+  (let ((node (grab-node grab)))
+    (scene:set-node-position node
+                             (+ (move-grab-origin-x grab) (- x (move-grab-start-x grab)))
+                             (+ (move-grab-origin-y grab) (- y (move-grab-start-y grab))))
+    (when (or (move-grab-output-width grab) (move-grab-output-height grab))
+      (clamp-node-to-output node (move-grab-output-width grab) (move-grab-output-height grab)))
     (grab-changed grab)))
 
 ;;; ---------------------------------------------------------------------------
@@ -203,7 +220,15 @@ know where the edges are and the position is free."))
    ;; resize from the left edge keeps the right edge where it was, so the node's
    ;; position is derived from it and the client's *actual* size (D42).
    (anchor-right :initarg :anchor-right :reader resize-grab-anchor-right)
-   (anchor-bottom :initarg :anchor-bottom :reader resize-grab-anchor-bottom))
+   (anchor-bottom :initarg :anchor-bottom :reader resize-grab-anchor-bottom)
+   ;; The *other* pair, in output space: the edge a drag pushes is the one that must
+   ;; stop at the output's border, so its maximum is measured from here (D46).
+   (anchor-left :initarg :anchor-left :initform nil :reader resize-grab-anchor-left)
+   (anchor-top :initarg :anchor-top :initform nil :reader resize-grab-anchor-top)
+   ;; The output the node lives in, when the caller knows it: a resize, like a move,
+   ;; is clamped to it.  NIL means unbounded, as for MOVE-GRAB.
+   (output-width :initarg :output-width :initform nil :reader resize-grab-output-width)
+   (output-height :initarg :output-height :initform nil :reader resize-grab-output-height))
   (:documentation
    "An interactive resize from EDGES (an xdg_toplevel.resize_edge bitmask).
 
@@ -232,8 +257,13 @@ client -- is its own buffer."
         (values (first geometry) (second geometry) (third geometry) (fourth geometry))
         (values 0 0 (max 1 (scene:node-width node)) (max 1 (scene:node-height node))))))
 
-(defun begin-resize-grab (node x y edges &key (button #x110) (min-width 1) (min-height 1))
-  "A resize grab for NODE from EDGES, with the pointer starting at (X, Y)."
+(defun begin-resize-grab (node x y edges &key (button #x110) (min-width 1) (min-height 1)
+                                          output-width output-height)
+  "A resize grab for NODE from EDGES, with the pointer starting at (X, Y) in output space.
+
+OUTPUT-WIDTH and OUTPUT-HEIGHT bound the drag: the edge under the pointer stops at the
+output's border, with the opposite edge anchored where it is (D46).  NIL means
+unbounded, which is what a compositor that does not know its output gets."
   (multiple-value-bind (geometry-x geometry-y width height) (node-geometry node)
     (make-instance 'resize-grab
                    :node node
@@ -245,26 +275,57 @@ client -- is its own buffer."
                    :edges edges
                    :min-width min-width
                    :min-height min-height
-                   ;; The anchored edge is the *geometry's*, in output space: that is
+                   ;; The anchored edges are the *geometry's*, in output space: that is
                    ;; the edge a person sees and drags.
+                   :anchor-left (+ (scene:node-x node) geometry-x)
+                   :anchor-top (+ (scene:node-y node) geometry-y)
                    :anchor-right (+ (scene:node-x node) geometry-x width)
-                   :anchor-bottom (+ (scene:node-y node) geometry-y height))))
+                   :anchor-bottom (+ (scene:node-y node) geometry-y height)
+                   :output-width output-width
+                   :output-height output-height)))
+
+(defun resize-grab-max-size (grab)
+  "The largest size a drag may ask for, as (values WIDTH HEIGHT) or NIL per axis.
+
+The dragged edge may travel as far as the output's border and no further, with the
+opposite edge anchored: dragging a right edge from x=100 in a 400-wide output asks for
+at most 300, and dragging a left edge whose right edge is at 300 asks for at most 300.
+This is the rule CLAMP-TO-OUTPUT applies to a move (D43), applied to the edge the
+pointer is on -- a window cannot be resized out of reach any more than it can be
+dragged out of reach."
+  (let ((edges (resize-grab-edges grab))
+        (output-width (resize-grab-output-width grab))
+        (output-height (resize-grab-output-height grab)))
+    (values
+     (cond ((logtest +edge-right+ edges)
+            (and output-width (- output-width (resize-grab-anchor-left grab))))
+           ((logtest +edge-left+ edges)
+            (resize-grab-anchor-right grab))
+           (t nil))
+     (cond ((logtest +edge-bottom+ edges)
+            (and output-height (- output-height (resize-grab-anchor-top grab))))
+           ((logtest +edge-top+ edges)
+            (resize-grab-anchor-bottom grab))
+           (t nil)))))
 
 (defun resize-target-size (edges start-width start-height dx dy
-                           &key (min-width 1) (min-height 1))
-  "The size a drag of (DX, DY) from EDGES asks for, clamped to the minimum.
+                           &key (min-width 1) (min-height 1) max-width max-height)
+  "The size a drag of (DX, DY) from EDGES asks for, clamped to the bounds.
 
 A pure function on purpose: the arithmetic is the part that can be wrong in a
-way a screenshot will not show."
+way a screenshot will not show.  MAX-WIDTH and MAX-HEIGHT are the output's terms
+(see RESIZE-GRAB-MAX-SIZE); NIL means unbounded.  The minimum wins when the two
+disagree, because a window smaller than its client's minimum is a window the client
+cannot draw."
   (values
-   (max min-width
-        (cond ((logtest +edge-right+ edges) (+ start-width dx))
-              ((logtest +edge-left+ edges) (- start-width dx))
-              (t start-width)))
-   (max min-height
-        (cond ((logtest +edge-bottom+ edges) (+ start-height dy))
-              ((logtest +edge-top+ edges) (- start-height dy))
-              (t start-height)))))
+   (let ((wanted (cond ((logtest +edge-right+ edges) (+ start-width dx))
+                       ((logtest +edge-left+ edges) (- start-width dx))
+                       (t start-width))))
+     (max min-width (if max-width (min wanted max-width) wanted)))
+   (let ((wanted (cond ((logtest +edge-bottom+ edges) (+ start-height dy))
+                       ((logtest +edge-top+ edges) (- start-height dy))
+                       (t start-height))))
+     (max min-height (if max-height (min wanted max-height) wanted)))))
 
 (defgeneric grab-anchored (grab)
   (:documentation
@@ -290,21 +351,24 @@ the client's answer comes back.")
     node))
 
 (defmethod grab-motion ((grab resize-grab) x y)
-  (multiple-value-bind (width height)
-      (resize-target-size (resize-grab-edges grab)
-                          (resize-grab-start-width grab)
-                          (resize-grab-start-height grab)
-                          (- x (resize-grab-start-x grab))
-                          (- y (resize-grab-start-y grab))
-                          :min-width (resize-grab-min-width grab)
-                          :min-height (resize-grab-min-height grab))
-    (unless (and (= width (resize-grab-requested-width grab))
-                 (= height (resize-grab-requested-height grab)))
-      (setf (resize-grab-requested-width grab) width
-            (resize-grab-requested-height grab) height)
-      (grab-resize grab width height)
-      ;; The client's size may already be the new one (it may have answered the
-      ;; previous event), so the anchor is applied on every motion as well as on
-      ;; every size change.
-      (grab-anchored grab)
-      (grab-changed grab))))
+  (multiple-value-bind (max-width max-height) (resize-grab-max-size grab)
+    (multiple-value-bind (width height)
+        (resize-target-size (resize-grab-edges grab)
+                            (resize-grab-start-width grab)
+                            (resize-grab-start-height grab)
+                            (- x (resize-grab-start-x grab))
+                            (- y (resize-grab-start-y grab))
+                            :min-width (resize-grab-min-width grab)
+                            :min-height (resize-grab-min-height grab)
+                            :max-width max-width
+                            :max-height max-height)
+      (unless (and (= width (resize-grab-requested-width grab))
+                   (= height (resize-grab-requested-height grab)))
+        (setf (resize-grab-requested-width grab) width
+              (resize-grab-requested-height grab) height)
+        (grab-resize grab width height)
+        ;; The client's size may already be the new one (it may have answered the
+        ;; previous event), so the anchor is applied on every motion as well as on
+        ;; every size change.
+        (grab-anchored grab)
+        (grab-changed grab)))))

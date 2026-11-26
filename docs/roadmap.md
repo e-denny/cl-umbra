@@ -229,8 +229,11 @@ compositor is open below.
       keys to the next in it, and popups push the window they belong to rather than entering
 - [ ] a *visible* switcher (Alt+Tab overlay): needs a scene node and a surface, phase 6;
       `xdg_activation`-style "demands attention" is also open
-- [ ] edge-anchored resizing (a top/left drag resizes without moving the node until the client
-      comes back with a buffer); Escape-to-cancel bound by default
+- [x] clamping: a resize stops with the dragged edge at the output's border and the opposite
+      edge anchored, and every window is re-clamped when the output shrinks (D46)
+- [ ] edge-anchored resizing: still open -- the node is placed from the client's answer on every
+      motion, so a top/left drag moves the window as the client answers rather than only at the
+      end; Escape-to-cancel bound by default is also open
 - [x] popup grabs: owner-events, dismissed by a press outside the stack or by Escape (phase 3f)
 - [x] grabs: `begin-move`/`begin-resize` from `move`/`resize`, serial validation (phase 3d, D33)
 - [ ] `wl_pointer.frame` and `wl_seat.release` (a version bump, not a rewrite)

@@ -216,7 +216,11 @@ it and not on some other click during it."
         (:resize
          (cf:start-grab tinywl (grab:begin-resize-grab node x y
                                                        (edges-at node x y)
-                                                       :button button))))
+                                                       :button button
+                                                       ;; A resize stops at the output's
+                                                       ;; edge, as a move does (D46).
+                                                       :output-width (cf:compositor-width tinywl)
+                                                       :output-height (cf:compositor-height tinywl)))))
       t)))
 
 (defun alt-held-p (tinywl)

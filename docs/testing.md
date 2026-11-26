@@ -240,11 +240,19 @@ Phase 3d (grabs and keybindings) adds the fourteenth:
     serial from the button event the compositor sent; the gate drags and asserts the window's
     node moved by exactly the pointer's delta and its pixels moved with it; it releases and
     asserts the grab is gone *and* that a further motion does nothing; it right-drags and asserts
-    `configure 240x180` arrived from a 200x150 window and a (40,30) drag; a second window is
-    started so that Alt+F1 has somewhere to go, and the gate asserts the bottom window came to
-    the top and took the keyboard; Alt+Esc must stop the reactor. Unit tests cover what the gate
-    cannot: an invented serial and a real serial without focus are both refused, and a grab's
-    second ending is a no-op.
+    `configure 240x180` arrived from a 200x150 window and a (40,30) drag; and a second right-drag
+    that would leave the 512x512 output asks for `configure 482x472` — the window's anchored
+    top-left is (30,40), so the bottom-right edge stops at the output's border (D46); a second
+    and a drag whose pointer goes *past* the bottom edge while still moving in x configures
+    `320x472` and then `420x472` — the far axis clamped, the near one still tracking (D47) — before
+    both reach the edge at `482x472`; a second window is started so that Alt+F1 has somewhere to
+    go, and the gate asserts the bottom window came to the top and took the keyboard; Alt+Esc must
+    stop the reactor. Unit tests cover what
+    the gate cannot: an invented serial and a real serial without focus are both refused, a
+    grab's second ending is a no-op, the resize bounds themselves (four edges, a drag with no
+    bound, and a client minimum larger than the output), and the axis independence — a drag past
+    one edge that keeps tracking the other, the cursor staying where the device put it, and a
+    `leave` ending the grab where a coordinate would not.
 
 Phase 3e (the client library and a nested session) adds the fifteenth:
 
@@ -360,6 +368,12 @@ Phase 3g (the focus stack) adds the eighteenth:
     popup pushing the window it belongs to (and never entering itself), a roleless surface never
     entering, a rotating cycle that wraps and raises, two windows toggling, a closed window handing
     the keys on down to the last one, and an empty cycle.
+
+The nested run of clause 16 also takes space *away*: after growing the nested output to
+800x600 it configures it to 400x300 and requires every live window to satisfy the clamp
+invariant (`x` in `[0, W-w]` for a window that fits, `[W-w, 0]` for one larger than the output)
+— a shrunken output used to leave its windows half outside it and unreachable (D37's open
+question, closed by D46) — then puts the space back.
 
 All eighteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface

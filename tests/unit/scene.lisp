@@ -763,3 +763,181 @@ which is a question about nodes and the numbers the configure left behind.  Retu
   (with-compositor (compositor :width 100 :height 100)
     (ok (null (cf:focus-stack-cycle compositor))
         "no windows, no focus, no error")))
+
+;;; ---------------------------------------------------------------------------
+;;; Clamping: a resize stops at the output, and a shrinking output re-clamps (D46)
+;;; ---------------------------------------------------------------------------
+
+(deftest resize-target-size-is-bounded-by-the-output
+  ;; The pure arithmetic: the *edge under the pointer* may travel as far as the
+  ;; output's border, with the anchored edge where it is.
+  (multiple-value-bind (width height)
+      (grab:resize-target-size grab:+edge-right+ 100 100 900 0 :max-width 300)
+    (declare (ignore height))
+    (ok (= 300 width) "a right drag stops at the output's right edge (300, not 1000)"))
+  (multiple-value-bind (width height)
+      (grab:resize-target-size grab:+edge-left+ 100 100 -900 0 :max-width 300)
+    (declare (ignore height))
+    (ok (= 300 width) "a left drag stops at its anchored right edge"))
+  (multiple-value-bind (width height)
+      (grab:resize-target-size grab:+edge-bottom+ 100 100 0 900 :max-height 200)
+    (declare (ignore width))
+    (ok (= 200 height) "a bottom drag stops at the output's bottom edge"))
+  (multiple-value-bind (width height)
+      (grab:resize-target-size grab:+edge-top+ 100 100 0 -900 :max-height 200)
+    (declare (ignore width))
+    (ok (= 200 height) "a top drag stops at its anchored bottom edge"))
+  ;; Without a maximum the drag is what the client asked for, as before.
+  (ok (equal '(600 150)
+             (multiple-value-list
+              (grab:resize-target-size grab:+edge-right+ 200 150 400 300)))
+      "an unbounded resize is unchanged (height is not dragged from this edge)")
+  ;; A client's minimum size wins over the output: a window smaller than its
+  ;; client's minimum is a window the client cannot draw.
+  (ok (equal '(300 300)
+             (multiple-value-list
+              (grab:resize-target-size grab:+edge-right+ 400 400 -500 -500
+                                       :min-width 300 :min-height 300
+                                       :max-width 100 :max-height 100)))
+      "the minimum wins where the two disagree"))
+
+(deftest a-resize-grab-derives-its-bounds-from-the-output
+  ;; The integration half: BEGIN-RESIZE-GRAB measures the anchored edges in output
+  ;; space, so the maximum is the distance from them to the output's border.
+  (let* ((node (scene:make-rect-node 200 150 #xFF000000))
+         (grab (progn
+                 (scene:set-node-position node 100 100)
+                 (grab:begin-resize-grab node 295 245
+                                         (logior grab:+edge-right+ grab:+edge-bottom+)
+                                         :output-width 400 :output-height 300))))
+    (ok (equal '(300 200) (multiple-value-list (grab:resize-grab-max-size grab)))
+        "a bottom-right drag is bounded by the output's far edges (400-100, 300-100)")
+    (grab:grab-motion grab 900 900)
+    (ok (= 300 (grab:resize-grab-requested-width grab))
+        "so a drag past the corner asks for exactly that")
+    (ok (= 200 (grab:resize-grab-requested-height grab))
+        "on both axes"))
+  ;; A left drag is bounded by where the right edge is, because the right edge is
+  ;; the anchored one -- so the window cannot be widened out of the left of the
+  ;; output either.
+  (let* ((node (scene:make-rect-node 200 150 #xFF000000))
+         (grab (progn
+                 (scene:set-node-position node 100 100)
+                 (grab:begin-resize-grab node 105 145 grab:+edge-left+
+                                         :output-width 400 :output-height 300))))
+    (ok (= 300 (grab:resize-grab-max-size grab))
+        "a left drag is bounded by the anchored right edge (100 + 200)")
+    (grab:grab-motion grab -900 300)
+    (ok (= 300 (grab:resize-grab-requested-width grab))
+        "so a drag far to the left asks for at most the anchored edge's distance")))
+
+(deftest an-output-that-shrinks-re-clamps-its-windows
+  (with-compositor (compositor :width 400 :height 300)
+    (multiple-value-bind (surface node) (window-node compositor 250 200)
+      (setf (cf:compositor-surfaces compositor) (list surface))
+      (ok (equal '(250 200) (multiple-value-list (scene:node-position node))))
+      (cf:resize-compositor compositor 200 150)
+      (ok (equal '(100 70) (multiple-value-list (scene:node-position node)))
+          "a 100x80 window at (250,200) comes back inside a 200x150 output")
+      ;; A window wider than the output cannot fit at all: the clamp puts it
+      ;; wherever it still covers the output (D43), which is any x in [W-w, 0].
+      (cf:resize-compositor compositor 50 40)
+      (let* ((node (cf:surface-scene-node surface))
+             (width (scene:node-width node))
+             (height (scene:node-height node)))
+        (multiple-value-bind (x y) (scene:node-position node)
+          (ok (<= (- 50 width) x 0)
+              (format nil "a window larger than the output covers it on x (~D in [~D, 0])"
+                      x (- 50 width)))
+          (ok (<= (- 40 height) y 0)
+              (format nil "and on y (~D in [~D, 0])" y (- 40 height)))
+          (ok (and (<= x 0) (>= (+ x width) 50)
+                   (<= y 0) (>= (+ y height) 40))
+              "no part of the output is left uncovered"))))))
+
+(deftest re-clamping-speaks-window-geometry
+  ;; A decorated client's buffer starts before its window (a shadow).  Clamping the
+  ;; node would leave the shadow's width of slack, so the arithmetic is in geometry.
+  (with-compositor (compositor :width 1024 :height 768)
+    (multiple-value-bind (surface node) (window-node compositor 500 300
+                                                     :width 806 :height 563)
+      (setf (cf:compositor-surfaces compositor) (list surface))
+      (setf (srv:xdg-surface-window-geometry (srv:surface-shell-surface surface))
+            (list 32 32 742 499))
+      (ok (= 806 (scene:node-width node)) "the buffer is 806 wide, the window 742")
+      ;; At 200 the 742-wide window ends at 232 + 742 = 974, inside 1024.
+      (scene:set-node-position node 200 300)
+      (grab:clamp-node-to-output node 1024 768)
+      (ok (= 200 (scene:node-x node)) "a window that fits is not moved")
+      (scene:set-node-position node 900 300)
+      (grab:clamp-node-to-output node 1024 768)
+      (ok (= 250 (scene:node-x node))
+          "a window hanging over the edge is placed by its *geometry* (250, not 218)")
+      (ok (= 282 (+ (scene:node-x node) 32))
+          "which puts the visible left edge at the output's largest allowed x")
+      (grab:clamp-node-to-output node 2048 768)
+      (ok (= 250 (scene:node-x node))
+          "and a bigger output does not move it again on its own"))))
+
+(deftest a-drag-past-one-edge-keeps-tracking-the-other
+  ;; D47: the axes are independent, and a pointer outside the output is clamped for
+  ;; the grab rather than ending it -- so a corner drag past the bottom keeps growing
+  ;; to the right, which is what a person dragging past the screen's corner expects.
+  (with-compositor (compositor :width 400 :height 300)
+    (multiple-value-bind (surface node) (window-node compositor 50 50 :width 200 :height 150)
+      (declare (ignore surface))
+      (setf (cf:compositor-surfaces compositor) (list (cf.scene:buffer-node-surface node)))
+      (let ((grab (cf:start-grab compositor
+                                 (grab:begin-resize-grab
+                                  node 240 190
+                                  (logior grab:+edge-right+ grab:+edge-bottom+)
+                                  :output-width 400 :output-height 300))))
+        (cf:inject-pointer-motion compositor 399 299)
+        (ok (equal (list 350 250)
+                   (list (grab:resize-grab-requested-width grab)
+                         (grab:resize-grab-requested-height grab)))
+            "both axes reach the output's far edges")
+        (cf:inject-pointer-motion compositor 350 299)
+        (ok (= 310 (grab:resize-grab-requested-width grab))
+            "with y at its bound, x still tracks")
+        ;; Now the pointer goes past the bottom edge: the grab stays, y stays clamped,
+        ;; and x keeps going.  This is the case the manual test reported.
+        (cf:inject-pointer-motion compositor 300 500)
+        (ok (eq grab (cf:compositor-grab compositor))
+            "a position past one edge does not end the grab")
+        (ok (equal (list 260 250)
+                   (list (grab:resize-grab-requested-width grab)
+                         (grab:resize-grab-requested-height grab)))
+            "the far axis is clamped and the near one follows the pointer (260x250)")
+        (cf:inject-pointer-motion compositor 380 900)
+        (ok (= 340 (grab:resize-grab-requested-width grab))
+            "and keeps following: 340 wide while the pointer is 600 below the output")
+        (ok (= 250 (grab:resize-grab-requested-height grab))
+            "with the height still at its bound")
+        (ok (= 380 (cf:compositor-cursor-x compositor))
+            "the cursor itself is where the device said, not where the grab clamped")
+        (ok (= 900 (cf:compositor-cursor-y compositor))
+            "on both axes")
+        ;; A *leave* is a different statement: the pointer is gone, so the grab ends.
+        (cf:inject-pointer-leave compositor)
+        (ok (null (cf:compositor-grab compositor))
+            "but a backend saying the pointer left ends the grab")
+        (ok (= -1 (cf:compositor-cursor-x compositor))
+            "and parks the cursor off the output")))))
+
+(deftest a-move-grab-clamps-the-pointer-too
+  (with-compositor (compositor :width 400 :height 300)
+    (multiple-value-bind (surface node) (window-node compositor 50 50)
+      (declare (ignore surface))
+      (let ((grab (cf:start-grab compositor
+                                 (grab:begin-move-grab node 100 100
+                                                       :output-width 400 :output-height 300))))
+        (cf:inject-pointer-motion compositor 500 500)
+        (ok (eq grab (cf:compositor-grab compositor))
+            "a move past the corner keeps its grab")
+        (ok (equal (list (- 400 (scene:node-width node))
+                         (- 300 (scene:node-height node)))
+                   (multiple-value-list (scene:node-position node)))
+            "while the window stays inside the output")
+        (cf:inject-pointer-leave compositor)
+        (ok (null (cf:compositor-grab compositor)) "and a leave ends it")))))

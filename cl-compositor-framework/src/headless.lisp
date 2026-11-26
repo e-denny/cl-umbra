@@ -597,7 +597,7 @@ surface -- a cursor image, a bare surface a client mapped for itself -- is nobod
          (role (and shell (srv:xdg-surface-role shell))))
     (cond
       ((null shell) nil)
-      ((eq :toplevel (srv:xdg-surface-role-name shell)) surface)
+      ((window-surface-p surface) surface)
       ((typep role 'srv:xdg-popup)
        (let* ((toplevel (srv:xdg-popup-toplevel role))
               (toplevel-shell (and toplevel (srv:xdg-toplevel-shell-surface toplevel))))
@@ -681,17 +681,20 @@ would be a type error at the worst possible moment (the click that focuses a men
   "Ask the main loop to stop at the end of this cycle (tinywl's Alt+Esc)."
   (reactor:request-stop (srv:display-reactor (compositor-display compositor))))
 
-(defun window-node-p (node)
-  "Is NODE a window: a mapped surface with the *toplevel* role?
+(defun window-surface-p (surface)
+  "Is SURFACE a window: a wl_surface with the *toplevel* role?
 
-Not every buffer node is a window.  A client's cursor surface is a buffer node with
-no role, a popup is a buffer node with a role but no window of its own, and so is any
-surface a client maps without asking for one; cycling or click-to-raise that treated
-those as windows would raise an arrow or a menu (D36, D44)."
+Not every surface is a window.  A client's cursor image has no role at all, a popup
+has a role but no window of its own, and so has any surface a client maps for itself;
+cycling, click-to-raise or re-clamping that treated those as windows would raise an
+arrow or move a menu (D36, D44, D46)."
+  (let ((shell (and surface (srv:surface-shell-surface surface))))
+    (and shell (eq :toplevel (srv:xdg-surface-role-name shell)))))
+
+(defun window-node-p (node)
+  "Is NODE a window: a mapped surface with the toplevel role?"
   (and (typep node 'scene:buffer-node)
-       (let* ((surface (scene:buffer-node-surface node))
-              (shell (and surface (srv:surface-shell-surface surface))))
-         (and shell (eq :toplevel (srv:xdg-surface-role-name shell))))))
+       (window-surface-p (scene:buffer-node-surface node))))
 
 (defun cycle-views (compositor)
   "Bring the bottom window to the top and give it the keyboard (tinywl's Alt+F1).
@@ -762,12 +765,17 @@ focused, or NIL when there is nothing to cycle to."
     (when compositor (mark-dirty compositor))))
 
 (defmethod grab:grab-resize ((grab grab:resize-grab) width height)
-  "Ask the client for a new size: for a shm client, that is what resizing is."
-  (let* ((surface (scene:buffer-node-surface (grab:grab-node grab)))
-         (shell (and surface (srv:surface-shell-surface surface)))
-         (toplevel (and shell (srv:xdg-surface-role shell))))
-    (when (typep toplevel 'srv:xdg-toplevel)
-      (srv:request-toplevel-size toplevel width height))))
+  "Ask the client for a new size: for a shm client, that is what resizing is.
+
+A grab whose node is not a surface -- a rectangle in a test, or a future node kind
+without a client behind it -- has no one to ask, so it asks nothing."
+  (let ((node (grab:grab-node grab)))
+    (when (typep node 'scene:buffer-node)
+      (let* ((surface (scene:buffer-node-surface node))
+             (shell (and surface (srv:surface-shell-surface surface)))
+             (toplevel (and shell (srv:xdg-surface-role shell))))
+        (when (typep toplevel 'srv:xdg-toplevel)
+          (srv:request-toplevel-size toplevel width height))))))
 
 (defun handle-key (compositor name state)
   "Press or release the key called NAME (:pressed or :released).
@@ -804,24 +812,48 @@ only then the focused client."
   "SYNTHETIC key press or release; same path a real backend's device takes."
   (handle-key compositor name state))
 
+(defun clamp-pointer (compositor x y)
+  "A grab's copy of the pointer position, clamped into the output; two values.
+
+A drag past an edge still means something on the other axis: a person dragging a
+window's bottom-right corner past the bottom of the screen expects it to keep growing
+to the right, not to stop growing at all (D47).  Only the *grab* sees the clamped
+position; the cursor node keeps the coordinates the device reported (D43)."
+  (values (max 0 (min x (max 0 (1- (compositor-width compositor)))))
+          (max 0 (min y (max 0 (1- (compositor-height compositor)))))))
+
 (defun inject-pointer-motion (compositor x y)
   "Move the pointer to (X, Y) in output space and let the scene decide who hears it.
 
-While a grab holds the pointer the grab decides: the client under the pointer is
-not sent motion events for a drag it is not doing.  A pointer that leaves the output
-ends the grab instead: nobody is dragging anything any more, and a grab that outlives
-its pointer is a compositor that has swallowed the mouse -- which is what a nested
-session does when the outer pointer walks off its window (D43)."
+While a grab holds the pointer the grab decides: the client under the pointer is not
+sent motion events for a drag it is not doing.  A position outside the output is
+*clamped* for the grab rather than ending it (CLAMP-POINTER, D47): the device still
+belongs to this compositor, so a drag whose pointer is past one edge keeps tracking
+the other.  What ends a grab is the backend saying the pointer is gone --
+INJECT-POINTER-LEAVE, which is exactly what a nested session learns when its parent
+takes the pointer away (D43), and the one case where nothing can continue."
   (scene:set-node-position (scene:scene-cursor (compositor-scene compositor)) x y)
   (let ((grab (compositor-grab compositor)))
-    (cond
-      ((null grab) (update-pointer compositor))
-      ((or (minusp x) (minusp y)
-           (>= x (compositor-width compositor))
-           (>= y (compositor-height compositor)))
-       (end-active-grab compositor :reason :pointer-left-output))
-      (t (grab:grab-motion grab x y))))
+    (if (null grab)
+        (update-pointer compositor)
+        (multiple-value-bind (grab-x grab-y) (clamp-pointer compositor x y)
+          (grab:grab-motion grab grab-x grab-y))))
   ;; The cursor moved, so the frame changed even if no client did anything.
+  (mark-dirty compositor))
+
+(defun inject-pointer-leave (compositor)
+  "The pointer is no longer over the output at all: park it, drop the focus, end a grab.
+
+This is a backend's *statement*, not an inference from a coordinate: a nested session
+receives wl_pointer.leave from its parent when the outer pointer walks off its window,
+and after that event it gets no coordinates at all, so a drag cannot continue however
+much of it was still meaningful.  Ending the grab here is what stops a nested session
+from swallowing the mouse -- the failure D43 was written for -- and it is the one case
+where 'the pointer is outside' really does mean 'there is no pointer any more'."
+  (scene:set-node-position (scene:scene-cursor (compositor-scene compositor)) -1 -1)
+  (when (compositor-grab compositor)
+    (end-active-grab compositor :reason :pointer-left-output))
+  (update-pointer compositor)
   (mark-dirty compositor))
 
 (defparameter +pointer-buttons+
@@ -935,7 +967,10 @@ grab instead of to the window."
                                            edges
                                            :button button
                                            :min-width (max 1 (srv:xdg-toplevel-min-width toplevel))
-                                           :min-height (max 1 (srv:xdg-toplevel-min-height toplevel))))
+                                           :min-height (max 1 (srv:xdg-toplevel-min-height toplevel))
+                                           ;; A resize stops at the output, like a move (D46).
+                                           :output-width (compositor-width compositor)
+                                           :output-height (compositor-height compositor)))
        (srv:log-message :debug "toplevel ~D: interactive resize (serial ~D, edges ~D)"
                         (srv:resource-id toplevel) serial edges)
        t))))
@@ -1087,6 +1122,31 @@ found (D38)."
             (remove-if #'srv:resource-destroyed-p (compositor-surfaces compositor)))
       target)))
 
+(defun reclamp-windows (compositor)
+  "Keep every window inside the output after the output changed size; returns how many moved.
+
+D37's open question: a parent configure that shrinks a nested session used to leave its
+windows where they were, half of them outside the new output and unreachable.  The rule
+is the same one CLAMP-TO-OUTPUT applies to a drag (D43) -- a window that fits stays
+fully inside, a window larger than the output covers it -- so this is the same helper
+the move grab uses, applied to every window at once.  Popups are not moved here: their
+node follows its parent on the next frame (D44), which is where their placement lives."
+  (let ((moved 0))
+    (dolist (surface (compositor-surfaces compositor))
+      (when (and (srv:surface-mapped-p surface) (window-surface-p surface))
+        (let ((node (surface-scene-node surface)))
+          (when node
+            (multiple-value-bind (old-x old-y) (scene:node-position node)
+              (grab:clamp-node-to-output node
+                                         (compositor-width compositor)
+                                         (compositor-height compositor))
+              (multiple-value-bind (new-x new-y) (scene:node-position node)
+                (unless (and (= old-x new-x) (= old-y new-y))
+                  (incf moved)
+                  (srv:log-message :debug "window ~D re-clamped from (~D, ~D) to (~D, ~D)"
+                                   (srv:resource-id surface) old-x old-y new-x new-y))))))))
+    moved))
+
 (defun resize-compositor (compositor width height)
   "Make COMPOSITOR a WIDTH x HEIGHT output; returns it.
 
@@ -1105,6 +1165,9 @@ only the parts the framework owns change here."
       (setf (compositor-target compositor) (render:make-target width height))
       (render:fill-target (compositor-target compositor)
                           (compositor-background compositor)))
+    ;; The windows are the size they are; the output is not.  Anything that no longer
+    ;; fits is brought back inside (D46).
+    (reclamp-windows compositor)
     (setf (compositor-dirty-p compositor) t))
   compositor)
 

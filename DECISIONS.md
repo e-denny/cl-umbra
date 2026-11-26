@@ -1669,6 +1669,10 @@ has left its surface.
    pointer is gone is a drag nobody is making, and a nested session receives exactly that as a
    `wl_pointer.leave` from its parent. (A grab that outlives its pointer also leaves the *next*
    press going to a grab instead of to the window, which is the failure this prevents.)
+   *(Refined by D47: a position outside the output is now clamped for the grab, and a grab ends
+   only when the backend says the pointer left. The reason above still holds for that case — a
+   leave is a pointer that is gone — but it was being inferred from a coordinate, which ended
+   drags that were still meaningful on the other axis.)*
 
 **Evidence.** A probe with a real `weston-terminal`: a left-edge drag of 50 pixels asks for a
 geometry of 692 (from 742) rather than the buffer's 806, the client answers 688 (its own 2-pixel
@@ -1836,3 +1840,133 @@ slice deliberately did not take: **clamping a resize to the output, and re-clamp
 the output shrinks** (D43's open question, D37's). The lesson: **draw order and focus order are
 two different claims, and a compositor that keeps only one of them cannot answer who gets the
 keys next.**
+
+## D46 — A resize stops where the output does, and a shrinking output brings its windows back
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** resize clamping / re-clamping
+
+Two questions D43 and D37 deliberately left open, now answered together because they are one
+rule seen from two sides: a move was clamped to its output (D43), a *resize* was not
+(weston-terminal could be dragged wider than the nested window and disappear past its edge), and
+an output that *shrank* left its windows where they were (D37: a parent configure that made the
+nested window smaller left half of each window outside it, unreachable). A window that cannot be
+seen and cannot be clicked is a window the user has lost, whichever way it got there.
+
+**Decision.**
+
+1. **The dragged edge stops at the output's border; the opposite edge stays put.** That is the
+   resize-side twin of `clamp-to-output`: the anchored edge is where it was (D42), so the largest
+   size the drag may ask for is the distance from that edge to the output's border on the axis
+   being dragged — `resize-grab-max-size`, computed from the anchored *geometry* edges in output
+   space and the output size both callers now pass in (`toplevel-resize-requested`,
+   `tinywl:begin-interactive`). A right/bottom drag is bounded by `output − anchor-left/top`; a
+   left/top drag by the anchored right/bottom edge, so a window cannot be widened out of the left
+   either. A client's minimum size wins where the two disagree: a window smaller than its
+   client's minimum is a window the client cannot draw.
+2. **Clamping speaks window geometry, in one helper.** `clamp-node-to-output` clamps a node by
+   its *window geometry* and places the node back from it, because a decorated client's buffer
+   starts before its window (a shadow): clamping the node would leave the shadow's width of slack
+   (D43's lesson, applied to the whole family). The move grab, the re-clamp and any compositor
+   that wants the same rule now call it instead of doing the arithmetic at each call site.
+3. **An output that changes size re-clamps every window.** `resize-compositor` calls
+   `reclamp-windows` after the new dimensions are in place, so D37's nested case — the parent
+   hands us 400x300 where we had 800x600 — brings the windows back instead of leaving them
+   outside. It only ever pulls *in*: growing the output again does not push anything out, because
+   moving a window is the compositor's or the user's decision, not a side effect of a resize.
+   Popups are not moved by it: their node is placed from their parent every frame (D44), so they
+   follow for free.
+
+**Evidence.** Gate clause 14 grew three checks with a real compiled client: a second right-drag
+that would ask for 1120x1070 on a 512x512 output configures `482x472` — the window's anchored
+top-left is (30,40), so the bottom-right edge stops at the border — and the grab ends on the
+release. Clause 16's nested run grew two: after growing the nested output to 800x600 it is
+configured to 400x300, and every live window must satisfy the clamp invariant (`x` in `[0, W−w]`
+for a window that fits, `[W−w, 0]` for one larger than the output), which is what the re-clamp
+now guarantees; the run then puts the space back for the rest of the scenario. Four new unit
+tests pin the parts a gate cannot isolate: the four edges' bounds and the minimum-wins rule on
+the pure function, the bounds the grab *derives* from its anchored edges (both the bottom-right
+and the left case), an output shrinking under a window that fits and then under one that does
+not, and the geometry-versus-buffer arithmetic (a 742-wide window in an 806-wide buffer is
+clamped as 742). One robustness fix came with them: `grab-resize` now ignores a node that is not
+a surface instead of erroring, since a grab is a scene object and not every node has a client.
+Suite 253 → 257 tests, eleven suites; parity 108 → 110 checks in two runs; the gate is 18/18.
+
+**Consequences.** A resize can no longer lose a window, and a nested session whose parent shrinks
+keeps its windows usable. What this does not do: clamp a *client's* own size (a client that
+attaches a larger buffer is the client's business — only interactive resizes and placement are
+ours), grow a window back when the output does (deliberate, see 3), keep a window inside the
+output while its client animates a size change, or compensate for a menu that would now need
+re-positioning after a shrink (v1 popups have one configure; `reposition` is v3). Edge-anchored
+resizing — moving the node only when the client answers, so a top/left drag does not trail the
+pointer — is still open. The lesson: **a bound that holds for one way of moving a window has to
+hold for the other, and for the output moving under it.**
+
+## D47 — A grab clamps the pointer; only a backend saying "left" ends it
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** resize clamping, second round (a defect the manual test found in D46)
+
+D46 stopped a resize at the output's edge, and the manual test found the flaw in how: resize
+a window from its bottom-right corner and, once the height reaches the bottom of the output,
+the whole resize stopped — the width would not follow the pointer any more either, although it
+had room to. The prose in D43 ("a window cannot be resized out of reach") was satisfied, but the
+interaction was not: a person dragging a corner past one edge expects the other axis to keep
+tracking, and that is what every desktop does.
+
+A probe with a headless compositor and an injected pointer found two separate facts, and they
+had been conflated:
+
+    motion (399,299) -> grab alive, asked (350 250)   ; both axes at their bounds
+    motion (350,299) -> grab alive, asked (310 250)   ; y at its bound, x keeps tracking
+    motion (390,320) -> grab NIL                      ; the pointer left the output
+
+So the arithmetic was right and the *axes* were never coupled. What ended the resize was
+`inject-pointer-motion`'s rule from D43: a position outside the output ends the grab, because a
+grab that outlives its pointer swallows the mouse. That rule is right about a pointer that is
+*gone* — and wrong about a pointer that is merely past an edge, which is a position this
+compositor's own device can still report, and which says nothing about the axis it is not on.
+In a nested session the two arrive as the same thing, because the backend encoded its parent's
+`wl_pointer.leave` as the coordinate `(-1,-1)`.
+
+**Decision.**
+
+1. **A position outside the output is clamped for the grab, not fatal.** `clamp-pointer` maps the
+   grab's copy of the pointer into `[0, width-1] x [0, height-1]`, so a drag whose pointer is
+   past the bottom edge keeps resizing the width. The *cursor* keeps the raw coordinates the
+   device reported: D43's "the pointer is where the device says, the window is what stops" is
+   unchanged, and the renderer clips it as before.
+2. **Only a backend can say the pointer is gone, and saying it ends the grab.**
+   `cf:inject-pointer-leave` is that statement: it parks the cursor, drops the pointer focus and
+   ends the grab with `:pointer-left-output`. `cf.backend.nested` calls it for its parent's
+   `wl_pointer.leave` instead of inventing `(-1,-1)`; a top-level backend with a real device has
+   no such event and will call it when a device leaves the output. The distinction is now in the
+   API rather than in a magic coordinate.
+3. **Nested sessions still stop at the window's edge, and that is the parent's decision.** When
+   the outer pointer walks off the nested window, the parent sends `leave` and then no
+   coordinates at all — so nothing can continue, whatever the grab would have done. What changed
+   is *why* it stops and that it stops only there.
+
+**Evidence.** The unit test `a-drag-past-one-edge-keeps-tracking-the-other` reproduces the
+probe's numbers through the real API: 350x250 at the corner, 310 with y at its bound, then with
+the pointer 600 below a 300-high output the width follows to 260 and 340 while the height stays
+250 and the *cursor* is at (380, 900) — clamped for the grab, not for the device. A second unit
+test does the same for a move grab. Gate clause 14 grew three checks with the compiled client:
+from a drag starting at (80,80) on a 200x150 window anchored at (30,40), a pointer at (200,600)
+configures `320x472`, at (300,600) `420x472` (x still following, y at the output's bound), and at
+(500,500) `482x472` (both at the edge). Clause 16's both runs keep their "a pointer that leaves
+the output ends the drag" check, now routed through each mode's own leave: in the nested run the
+parent's motion off our window becomes `wl_pointer.leave`, in the headless one the test calls
+`inject-pointer-leave` directly — so the gate tests the contract rather than a coordinate.
+Suite 257 → 259 tests; the gate is 18/18.
+
+**Consequences.** A corner drag tracks both axes independently, which is what the manual test
+expected, and the "swallowed mouse" failure D43 fixed is still prevented because a `leave` still
+ends the grab. What this does not change: in a nested session the pointer belongs to the parent,
+so leaving the nested window still ends the drag (the parent sends no coordinates afterwards);
+`wl_pointer.frame`/pointer-lock would be needed for anything else, and neither is a version we
+advertise. The lesson: **a coordinate outside the output and a pointer that no longer exists are
+different statements, and a compositor that infers the second from the first throws away the
+first.**

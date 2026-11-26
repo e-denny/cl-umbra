@@ -146,7 +146,41 @@ from LISTEN, which is the normal end of a drain, not an error."
   (cf:inject-pointer-button compositor :right :released)
   (pump compositor pty 0.1)
   (check (null (cf:compositor-grab compositor))
-         "the resize grab ended on the button release"))
+         "the resize grab ended on the button release")
+
+  ;; And a resize stops where the output does (D46).  The window's anchored
+  ;; top-left is (30,40), so the bottom-right edge may travel to (512,512) and no
+  ;; further: the drag asks for 482x472 however far the pointer goes.
+  (cf:inject-pointer-motion compositor 80 80)
+  (pump compositor pty 0.1)
+  (cf:inject-pointer-button compositor :right :pressed)
+  ;; The client asks on the press, and the grab takes the pointer where it is *then*:
+  ;; moving first would give the drag a zero delta.  Pump until the request has
+  ;; arrived (the stale "resize" line from the first drag is still in the log).
+  (pump compositor pty 0.2)
+  (check (typep (cf:compositor-grab compositor) 'cf.grab:resize-grab)
+         "a second resize grab started from inside the window")
+  ;; The pointer goes *past* the bottom edge with x still inside: the grab survives,
+  ;; the height stops at the output and the width keeps following (D47).  A drag that
+  ;; stopped entirely here is what the manual test reported.
+  ;; The drag starts at (80,80) on a 200x150 window whose anchored top-left is (30,40).
+  (cf:inject-pointer-motion compositor 200 600)
+  (pump compositor pty 0.2)
+  (check (and (cf:compositor-grab compositor)
+              (wait-for-line compositor pty "configure 320x472" 5))
+         "a drag past the bottom edge keeps resizing x (320x472)")
+  (cf:inject-pointer-motion compositor 300 600)
+  (pump compositor pty 0.2)
+  (check (wait-for-line compositor pty "configure 420x472" 5)
+         "and keeps following it, with the height still at the output's bound (420x472)")
+  (cf:inject-pointer-motion compositor 500 500)
+  (pump compositor pty 0.2)
+  (check (wait-for-line compositor pty "configure 482x472" 5)
+         "until x reaches the edge too, where both stop (482x472, not 1120x1070)")
+  (cf:inject-pointer-button compositor :right :released)
+  (pump compositor pty 0.1)
+  (check (null (cf:compositor-grab compositor))
+         "and the clamped resize ended on the release"))
 
 (defun keybindings (compositor pty)
   "Alt+F1 cycles the bottom window to the top; Alt+Esc stops the main loop."

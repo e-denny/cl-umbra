@@ -379,8 +379,12 @@ in most-recently-focused order, Alt+Tab rotates and raises, a closing window han
 the next in the history, and popups push the window they belong to instead of entering the stack.
 Gate clause 18 drives three independent clients through it (`scripts/focus-gate.sh`).
 
-Not in these slices: a visible Alt+Tab switcher, edge-anchored resizing, clamping a resize to the
-output and re-clamping windows when it shrinks (D43/D37's open decision), `reposition` and reactive
+Clamping was closed as its own slice (3h, D46): a resize stops with the dragged edge at the
+output's border and the opposite edge anchored, and when the output shrinks (a nested session
+following its parent) every window is re-clamped inside it. Gate clause 14 drives a real client's
+resize into the corner; clause 16's nested run shrinks the output under two live windows.
+
+Not in these slices: a visible Alt+Tab switcher, edge-anchored resizing, `reposition` and reactive
 positioning (v3, so the global stays v1), layer-shell, client cursor surfaces (a client's
 `set_cursor` surface is now kept out of the scene rather than drawn as a window), and a nested
 window on a *foreign* compositor (which needs a window on a live session, and therefore its own

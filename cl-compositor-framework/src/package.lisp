@@ -156,7 +156,13 @@ two hooks.")
    #:resize-grab-anchor-bottom
    #:grab-anchored
    #:clamp-to-output
+   #:clamp-node-to-output
    #:node-geometry
+   #:resize-grab-max-size
+   #:resize-grab-anchor-left
+   #:resize-grab-anchor-top
+   #:resize-grab-output-width
+   #:resize-grab-output-height
    #:popup-grab
    #:begin-popup-grab
    #:popup-grab-popup
@@ -273,6 +279,7 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:focus-stack-window
    #:inject-key
    #:inject-pointer-motion
+   #:inject-pointer-leave
    #:inject-pointer-button
    #:inject-pointer-axis
    #:compositor-target
@@ -382,6 +389,7 @@ owns, and the presentation step is attach + damage + commit.")
                 #:focus-stack-window
                 #:inject-key
                 #:inject-pointer-motion
+                #:inject-pointer-leave
                 #:inject-pointer-button
                 #:inject-pointer-axis
                 #:compositor-frame-count
@@ -473,6 +481,7 @@ docs/framework.md §1 follow.")
    #:focus-stack-window
    #:inject-key
    #:inject-pointer-motion
+   #:inject-pointer-leave
    #:inject-pointer-button
    #:inject-pointer-axis
    #:compositor-frame-count

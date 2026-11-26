@@ -216,11 +216,23 @@ space, a visibility flag and a parent.
   puts the node back so that edge stays still, using the size the client actually came back with
   (`grab-anchored`, D42). And an edge is where the pointer can reach — a client-side decoration's
   input region, not its surface's bounding box (D42, `tinywl:pointer-reach`).
-- **Resize arithmetic speaks window geometry, and a move has bounds**: `node-geometry` reads
-  `xdg_surface.set_window_geometry`, so a configure asks for the size a client means rather than
-  its buffer (a decorated window is otherwise off by its decoration); and `clamp-to-output` keeps
-  a dragged window inside its output — fully inside if it fits, always covering it if it does not —
-  while a pointer that leaves the output ends the grab rather than dragging unseen (D43).
+- **Resize arithmetic speaks window geometry, and both directions have bounds**: `node-geometry`
+  reads `xdg_surface.set_window_geometry`, so a configure asks for the size a client means rather
+  than its buffer (a decorated window is otherwise off by its decoration). `clamp-to-output` keeps
+  a window of a given size inside an output of a given size — fully inside if it fits, always
+  covering it if it does not; `clamp-node-to-output` applies that to a node *by its geometry*, and
+  a pointer that leaves the output ends the grab rather than dragging unseen (D43). A **move** is
+  clamped on every motion; a **resize** is clamped by `resize-grab-max-size`, which is the
+  distance from the anchored edge to the output's border on the axis being dragged, so the edge
+  under the pointer stops at the border with the opposite edge still (D46); and when the *output*
+  changes size — a nested session following its parent (D37) — `reclamp-windows` applies the same
+  rule to every window, because a window left outside a shrunken output cannot be seen or clicked.
+- **A grab clamps the pointer; a leave ends it** (D47). A pointer position outside the output is
+  clamped for the grab, so a corner drag past the bottom edge keeps resizing the width, while the
+  drawn cursor stays where the device says (D43). `cf:inject-pointer-leave` is the *statement*
+  that the pointer is gone — a nested session's parent `leave` is exactly that, and it ends the
+  grab, which is what stops a nested session swallowing the mouse. In a nested session leaving
+  the window therefore still stops the drag: the parent sends no coordinates afterwards.
 - **Retained, not immediate**: the tree survives frames, which is what makes rules,
   workspaces, animations and overview possible without a rewrite (D10).
 - **Damage propagation**, clip rectangles and **culling** are open (2b): v0 repaints the whole

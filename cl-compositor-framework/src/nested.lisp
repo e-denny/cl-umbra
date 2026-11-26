@@ -563,9 +563,10 @@ a picture nobody is looking at."
          (setf (nested-parent-pointer-serial backend) serial)
          (cf:inject-pointer-motion compositor (round x) (round y))))
       (:leave
-       ;; Off the output: the scene's hit test finds nothing and the seat's pointer
-       ;; focus is cleared, which is exactly what a real backend reports.
-       (cf:inject-pointer-motion compositor -1 -1))
+       ;; The parent has taken the pointer: no coordinates follow, so this is a
+       ;; statement about the pointer rather than a position off the output, and it
+       ;; is what ends a drag (D43, D47).
+       (cf:inject-pointer-leave compositor))
       (:motion
        (destructuring-bind (time x y) arguments
          (declare (ignore time))
