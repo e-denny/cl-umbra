@@ -78,12 +78,7 @@ is the one interface that must not need a library to read."
 
 (defun parent-socket-p ()
   "Is there a live compositor at WAYLAND_DISPLAY?"
-  (let* ((name (uiop:getenv "WAYLAND_DISPLAY"))
-         (path (cond ((null name) nil)
-                     ((uiop:absolute-pathname-p (uiop:parse-native-namestring name)) name)
-                     (t (format nil "~A/~A"
-                                (or (uiop:getenv "XDG_RUNTIME_DIR") "/nonexistent")
-                                name)))))
+  (let ((path (parent-socket-path (uiop:getenv "WAYLAND_DISPLAY"))))
     (and path (probe-file path) t)))
 
 (defun main (&optional (arguments (uiop:command-line-arguments)))

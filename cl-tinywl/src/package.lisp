@@ -29,6 +29,7 @@ compositor, and how a session starts and stops.")
    #:edges-at
    #:install-keybindings
    #:close-toplevels
+   #:parent-socket-path
    ;; a session: headless, or nested inside another compositor
    #:session
    #:session-mode

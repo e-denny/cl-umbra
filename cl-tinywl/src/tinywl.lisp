@@ -125,6 +125,16 @@ configure together (D27), so there is nothing to keep in sync here."
 ;;; Interaction: who owns the pointer while a button is down
 ;;; ---------------------------------------------------------------------------
 
+(defun parent-socket-path (name)
+  "NAME -- a path or a bare WAYLAND_DISPLAY name -- resolved to a socket path.
+
+A compositor's own display is named (\"wayland-0\") and lives in XDG_RUNTIME_DIR, so a
+nested session that took WAYLAND_DISPLAY literally would try to connect to a file in
+the current directory.  The rule is WAYLAND.IO:SOCKET-PATH's, because the server
+creates the socket this has to find; duplicating it here is how the two drift."
+  (when name
+    (wayland.io:socket-path :display-name name)))
+
 (defparameter +resize-margin+ 12
   "How close to a window's side a press must be for that side to resize it.
 
@@ -316,7 +326,7 @@ window appears."
                                  :runtime-dir (or runtime-dir
                                                   (uiop:getenv "XDG_RUNTIME_DIR")))))
     (:nested
-     (let* ((parent (or parent-path (uiop:getenv "WAYLAND_DISPLAY")))
+     (let* ((parent (parent-socket-path (or parent-path (uiop:getenv "WAYLAND_DISPLAY"))))
             (backend (progn
                        (unless parent
                          (error "a nested session needs a parent: --parent PATH, or ~

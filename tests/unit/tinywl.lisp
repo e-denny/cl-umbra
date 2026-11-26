@@ -253,6 +253,25 @@ connection would make this a gate rather than a test."
           "nothing is left marked as consumed"))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Finding the parent
+;;; ---------------------------------------------------------------------------
+
+(deftest a-bare-parent-name-is-resolved-against-the-runtime-directory
+  ;; WAYLAND_DISPLAY holds a *name*, and our display's socket lives in
+  ;; XDG_RUNTIME_DIR.  Taking the name literally made a nested session try to
+  ;; connect to a file in the current directory -- and the parity gate never saw it,
+  ;; because it always passed an absolute path (the parent was in the same image).
+  (let ((runtime (uiop:getenv "XDG_RUNTIME_DIR")))
+    (ok (equal (format nil "~A/wayland-0" (string-right-trim "/" runtime))
+               (tinywl:parent-socket-path "wayland-0"))
+        "a name resolves to a path in XDG_RUNTIME_DIR")
+    (ok (equal "/tmp/somewhere/wayland-7"
+               (tinywl:parent-socket-path "/tmp/somewhere/wayland-7"))
+        "an absolute path is already a path")
+    (ok (null (tinywl:parent-socket-path nil))
+        "and no name at all is NIL, which START reports as a missing parent")))
+
+;;; ---------------------------------------------------------------------------
 ;;; The class seam
 ;;; ---------------------------------------------------------------------------
 
