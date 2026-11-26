@@ -966,3 +966,66 @@ and client-provided cursor surfaces are the next slices and hang off the same ca
 keyboard and makes A's configure carry `activated` while B's carries nothing; clicking B moves
 it back; both windows' pixels are drawn where they were placed; the cursor's black tip and white
 body are the exact pixels at the pointer's position.
+
+---
+
+## D33 — Grabs are objects started by a validated serial, and keybindings come before the client
+
+**Status:** accepted
+
+**Context.** `xdg_toplevel.move`/`.resize` were accepted, validated for the enum and ignored: there
+was a seat but no serial vocabulary and nothing to move. The scene (D31) and pointer focus (D32)
+made both possible.
+
+**Decision.**
+
+1. **A serial is a capability.** Every serial-bearing event the server sends comes from
+   `display-next-serial`, which now also remembers the last 64 serials.
+   `display-valid-serial-p`/`valid-serial-p` answer "did we issue this recently"; a serial we never
+   sent, one from before the window, and one from a previous interaction are all refused. The
+   window is bounded on purpose: a click-to-request round trip is short, and keeping every serial
+   forever would make an old one replayable into a new interaction.
+2. **`move`/`resize` are checked twice.** The shell refuses a request whose serial is not ours or
+   whose surface is not the seat's keyboard or pointer focus, *silently* — the protocol defines no
+   error for this, and a client asking to move a window it does not have is a client whose click we
+   already ignored. Only then does it call `toplevel-move-requested`/`toplevel-resize-requested`,
+   generic functions dispatched on the `wl_surface` (so a framework's `CF-SURFACE` own them) whose
+   default does nothing. A transport-only server still answers xdg-shell correctly.
+3. **A grab is an object that ends exactly once** (`cf.grab`): `grab-motion`, `grab-button`,
+   `grab-key`, and `grab-end`, which is idempotent. A grab holds the button that was *physically
+   down* when the client asked (the seat tracks pressed buttons), so a middle-button drag ends on
+   the middle button instead of assuming the left one.
+4. **A move follows the pointer's delta from a remembered origin**, not an accumulation of events:
+   a lost motion event cannot leave the window drifting behind the pointer.
+5. **A resize is a configure.** The compositor cannot resize a buffer it does not own, so the grab
+   computes the size the edge implies (`resize-target-size`, a pure function) and asks the client
+   for it with `xdg_toplevel.configure`. `set-toplevel-activated` already re-sends the last
+   configure size, so a focus change does not reset a resized window to "you choose". Dragging a
+   top or left edge does **not** move the node: until the client comes back with a buffer of the
+   requested size there is nothing to anchor, and a node that slides while its content does not is
+   worse than one that waits.
+6. **Keybindings are consulted before the client**, in the one key path a backend and a test both
+   use (`handle-key`): a grab first, then the table, then the focused window. A consumed press
+   never reaches the client, and its release is swallowed too, because a client that never saw the
+   press must not see the release. Modifier keys are still forwarded when they are not themselves
+   bound — v0 has no device to suppress them from, and a client that never saw Alt release would
+   think it was still held. That is a documented simplification, not an oversight.
+7. **Matching is exact on the modifier mask.** Alt+Escape does not fire with Alt+Shift held. A
+   compositor that wants "any of these" adds bindings; predictable is worth more than clever.
+8. **The default table is tinywl's two**: Alt+Esc stops the main loop, Alt+F1 brings the bottom
+   window to the top and focuses it. They are installed by `make-headless-compositor` because that
+   compositor is the tinywl-shaped default; a compositor removes them with
+   `cf:remove-keybinding`.
+
+**Evidence.** `scripts/grab-gate.sh`: a real libwayland client, with xdg-shell generated from our
+vendored XML by `wayland-scanner`, asks to be moved with the serial from a button event we sent;
+the window moves to the drag's delta, stops on the release and is not moved again; its pixels are
+at the new position; a right-button drag produces `configure 240x180` from a 200x150 window and a
+(40,30) drag; Alt+F1 raises the bottom of two windows and focuses it; Alt+Esc stops the loop; the
+client is still connected at the end. Unit tests cover the rule the gate cannot show: a serial we
+never issued, or a real one without focus, is refused, and a grab's second ending is a no-op.
+
+**Consequences.** Escape-to-cancel is not installed by default: a compositor binds it to
+`cf:end-active-grab`. Window menus, keyboard grabs, popup grabs, a focus stack and edge-anchored
+resizing are the next slices; the grab object, the serial predicate and the key path do not change
+when they arrive.

@@ -181,6 +181,17 @@ array or it will think the key is up."
                            (seat-group seat))
     (setf (keyboard-surface keyboard) surface)))
 
+(defun valid-serial-p (seat serial)
+  "Was SERIAL issued recently by this seat's display?
+
+Selections, popup grabs and interactive move/resize all name a serial, and the
+only thing that makes the number meaningful is that *we* produced it in response
+to an input event.  A client that invents one, or replays one from a previous
+interaction, is refused (D33).  Focus is deliberately not part of this predicate:
+whether the asking surface has the pointer is a separate question, and the shell
+asks both."
+  (display-valid-serial-p (seat-display seat) serial))
+
 (defun set-keyboard-focus (seat surface &optional serial)
   "Give keyboard focus to SURFACE (or NIL) and tell both sides.
 
@@ -290,10 +301,18 @@ Returns the serial, or NIL when nothing has keyboard focus."
     t))
 
 (defun send-pointer-button (seat button state &key (time (seat-time)))
-  "A pointer button press or release.  Returns the serial (for grabs and clicks)."
+  "A pointer button press or release.  Returns the serial (for grabs and clicks).
+
+The seat remembers which buttons are down: a grab started from a middle-button
+drag must end on the middle button, and "which button is down" is state the seat
+owns, not something a grab can infer from the event that started it."
   (let ((surface (seat-pointer-focus seat)))
     (unless surface
       (return-from send-pointer-button nil))
+    (ecase state
+      (:pressed (pushnew button (seat-pressed-buttons seat)))
+      (:released (setf (seat-pressed-buttons seat)
+                       (remove button (seat-pressed-buttons seat)))))
     (let ((serial (display-next-serial (seat-display seat))))
       (dolist (pointer (seat-pointer-for-client seat (resource-client surface)))
         (when (eq surface (pointer-surface pointer))

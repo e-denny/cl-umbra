@@ -68,6 +68,16 @@ SLOT-VALUE shows a different one."))
    ;; Where the next toplevel goes: a cascade, so two windows are two windows.
    (placement-x :initform 0 :accessor compositor-placement-x)
    (placement-y :initform 0 :accessor compositor-placement-y)
+   ;; The interaction that owns the pointer, if any (D33).  One at a time: a
+   ;; second grab supersedes the first, which is how a move that starts during a
+   ;; move ends the old one exactly once.
+   (grab :initform nil :accessor compositor-grab)
+   ;; Keys a binding consumed, so their releases are swallowed too: a client that
+   ;; never saw the press must not see the release.
+   (consumed-keys :initform nil :accessor compositor-consumed-keys)
+   ;; Alt+Esc and Alt+F1 by default -- tinywl's two, and the smallest table that
+   ;; proves the path; a compositor adds to it with CF:ADD-KEYBINDING (D33).
+   (keybindings :initform nil :accessor compositor-keybindings)
    ;; client -> the wl_output resource that client bound, for wl_surface.enter.
    (outputs :initform (make-hash-table) :reader compositor-outputs)
    (dirty-p :initform t :accessor compositor-dirty-p)
@@ -155,6 +165,15 @@ Returns the compositor; the display is `(compositor-display ...)`, and
     ;; compiled, so nothing here links libxkbcommon (D28).
     (srv:add-seat-global display seat)
     (srv:set-seat-keymap seat (input:make-keymap) :repeat-rate 25 :repeat-delay 600)
+    ;; tinywl's two bindings, installed here because this compositor is the
+    ;; tinywl-shaped default (D33).  A compositor removes them or adds its own.
+    (setf (compositor-keybindings compositor) (kb:make-keybinding-table))
+    (add-keybinding compositor "Escape" (lambda () (stop-compositor compositor))
+                    :modifiers input:+modifier-mod1+
+                    :description "quit")
+    (add-keybinding compositor "F1" (lambda () (cycle-views compositor))
+                    :modifiers input:+modifier-mod1+
+                    :description "cycle views")
     (render:fill-target (compositor-target compositor) background)
     compositor))
 
@@ -347,30 +366,186 @@ toplevel gets an empty array rather than a stale `activated`."
       (srv:set-toplevel-activated (srv:xdg-surface-role shell) has-focus)))
   nil)
 
-(defun inject-key (compositor name state)
+;;; ---------------------------------------------------------------------------
+;;; Keybindings
+;;; ---------------------------------------------------------------------------
+;;
+;; The key path is the backend seam plus one rule: a binding is consulted before
+;; the focused client, and a consumed key never reaches it.  v0 has no device to
+;; suppress a modifier from, so a modifier that is not itself bound still goes to
+;; the client -- a client that never saw Alt release would think it was held.
+
+(defun add-keybinding (compositor key function &key (modifiers 0) description)
+  "Bind KEY with MODIFIERS to FUNCTION in COMPOSITOR's table."
+  (kb:add-keybinding (compositor-keybindings compositor) key function
+                     :modifiers modifiers :description description))
+
+(defun remove-keybinding (compositor key &key (modifiers 0))
+  "Drop COMPOSITOR's binding for KEY; returns true when one was there."
+  (kb:remove-keybinding (compositor-keybindings compositor) key :modifiers modifiers))
+
+(defun stop-compositor (compositor)
+  "Ask the main loop to stop at the end of this cycle (tinywl's Alt+Esc)."
+  (reactor:request-stop (srv:display-reactor (compositor-display compositor))))
+
+(defun cycle-views (compositor)
+  "Bring the bottom window to the top and give it the keyboard (tinywl's Alt+F1).
+
+"Bottom" is draw order, so cycling visits every window once and the old one ends
+up at the back -- the same rule tinywl's view list has."
+  (let* ((root (scene:scene-root (compositor-scene compositor)))
+         (windows (remove-if-not (lambda (node) (typep node 'scene:buffer-node))
+                                 (scene:node-children root))))
+    (when windows
+      (let ((node (first windows)))
+        (scene:node-raised node)
+        (focus-surface compositor (scene:buffer-node-surface node))
+        (mark-dirty compositor)
+        node))))
+
+(defun end-active-grab (compositor &key reason)
+  "End COMPOSITOR's grab, if it has one; idempotent."
+  (let ((grab (compositor-grab compositor)))
+    (if grab
+        (grab:grab-end grab :reason (or reason :requested))
+        nil)))
+
+(defun start-grab (compositor grab)
+  "Make GRAB the interaction that owns the pointer, ending any previous one."
+  (let ((old (compositor-grab compositor)))
+    (when old
+      (grab:grab-end old :reason :superseded)))
+  (setf (grab:grab-owner grab) compositor
+        (compositor-grab compositor) grab)
+  (srv:log-message :debug "grab started: ~A" (class-name (class-of grab)))
+  grab)
+
+(defmethod grab:grab-ended ((grab grab:grab) reason)
+  "The compositor forgets a grab that ended, whoever ended it."
+  (declare (ignore reason))
+  (let ((compositor (grab:grab-owner grab)))
+    (when (and compositor (eq grab (compositor-grab compositor)))
+      (setf (compositor-grab compositor) nil))))
+
+(defmethod grab:grab-changed ((grab grab:grab))
+  (let ((compositor (grab:grab-owner grab)))
+    (when compositor (mark-dirty compositor))))
+
+(defmethod grab:grab-resize ((grab grab:resize-grab) width height)
+  "Ask the client for a new size: for a shm client, that is what resizing is."
+  (let* ((surface (scene:buffer-node-surface (grab:grab-node grab)))
+         (shell (and surface (srv:surface-shell-surface surface)))
+         (toplevel (and shell (srv:xdg-surface-role shell))))
+    (when toplevel
+      (srv:request-toplevel-size toplevel width height))))
+
+(defun handle-key (compositor name state)
   "Press or release the key called NAME (:pressed or :released).
 
-The modifier mask is updated from the keymap's own table, so what the client
-computes and what we advertise agree by construction."
+The modifier mask is updated from the keymap's own table first, so a binding sees
+the mask the press produced; then a grab may take the key, then a binding, and
+only then the focused client."
   (let* ((seat (compositor-seat compositor))
          (modifiers (compositor-modifiers compositor))
-         (pressed-p (eq state :pressed)))
+         (pressed-p (eq state :pressed))
+         (grab (compositor-grab compositor)))
     (input:update-modifiers modifiers name pressed-p)
-    (srv:send-key-event seat (input:keycode name) state
-                        :mods-depressed (input:modifiers-depressed modifiers)
-                        :mods-latched (input:modifiers-latched modifiers)
-                        :mods-locked (input:modifiers-locked modifiers)
-                        :group (input:modifiers-group modifiers))))
+    (cond
+      ((and grab (grab:grab-key grab name state))
+       t)
+      ((and pressed-p
+            (kb:dispatch-keybinding (compositor-keybindings compositor)
+                                    name (input:modifiers-depressed modifiers)))
+       (push name (compositor-consumed-keys compositor))
+       t)
+      ((and (not pressed-p)
+            (member name (compositor-consumed-keys compositor) :test #'string-equal))
+       (setf (compositor-consumed-keys compositor)
+             (remove name (compositor-consumed-keys compositor) :test #'string-equal))
+       t)
+      (t
+       (srv:send-key-event seat (input:keycode name) state
+                           :mods-depressed (input:modifiers-depressed modifiers)
+                           :mods-latched (input:modifiers-latched modifiers)
+                           :mods-locked (input:modifiers-locked modifiers)
+                           :group (input:modifiers-group modifiers))))))
+
+(defun inject-key (compositor name state)
+  "SYNTHETIC key press or release; same path a real backend's device takes."
+  (handle-key compositor name state))
 
 (defun inject-pointer-motion (compositor x y)
-  "Move the pointer to (X, Y) in output space and let the scene decide who hears it."
+  "Move the pointer to (X, Y) in output space and let the scene decide who hears it.
+
+While a grab holds the pointer the grab decides: the client under the pointer is
+not sent motion events for a drag it is not doing."
   (scene:set-node-position (scene:scene-cursor (compositor-scene compositor)) x y)
-  (update-pointer compositor)
+  (let ((grab (compositor-grab compositor)))
+    (if grab
+        (grab:grab-motion grab x y)
+        (update-pointer compositor)))
   ;; The cursor moved, so the frame changed even if no client did anything.
   (mark-dirty compositor))
 
 (defparameter +pointer-buttons+
   '((:left . #x110) (:right . #x111) (:middle . #x112)))
+
+;;; ---------------------------------------------------------------------------
+;;; A client asking to be moved or resized
+;;; ---------------------------------------------------------------------------
+;;
+;; The shell has already checked the serial and the focus (D33); what is left is
+;; this compositor's policy, and the policy is "start a grab".
+;;
+;; The grab holds the button that is *physically down* rather than assuming the
+;; left one: a client may ask from a middle-button drag, and a grab that ends on
+;; the wrong button would either end immediately or never.
+
+(defun dragged-button (compositor &optional (default #x110))
+  (or (first (srv:seat-pressed-buttons (compositor-seat compositor))) default))
+
+(defmethod srv:toplevel-move-requested ((surface cf-surface) toplevel serial seat)
+  "A validated xdg_toplevel.move: start an interactive move of this window."
+  (declare (ignore seat))
+  (let* ((compositor (cf-compositor-headless (srv:surface-owner surface)))
+         (node (surface-scene-node surface)))
+    (cond
+      ((null node)
+       (srv:log-message :debug "toplevel ~D asked to move but has no scene node"
+                        (srv:resource-id toplevel))
+       nil)
+      (t
+       (start-grab compositor
+                   (grab:begin-move-grab node
+                                         (compositor-cursor-x compositor)
+                                         (compositor-cursor-y compositor)
+                                         :button (dragged-button compositor)))
+       (srv:log-message :debug "toplevel ~D: interactive move (serial ~D)"
+                        (srv:resource-id toplevel) serial)
+       t))))
+
+(defmethod srv:toplevel-resize-requested ((surface cf-surface) toplevel serial seat edges)
+  "A validated xdg_toplevel.resize: start an interactive resize from EDGES."
+  (declare (ignore seat))
+  (let* ((compositor (cf-compositor-headless (srv:surface-owner surface)))
+         (node (surface-scene-node surface)))
+    (cond
+      ((null node)
+       (srv:log-message :debug "toplevel ~D asked to resize but has no scene node"
+                        (srv:resource-id toplevel))
+       nil)
+      (t
+       (start-grab compositor
+                   (grab:begin-resize-grab node
+                                           (compositor-cursor-x compositor)
+                                           (compositor-cursor-y compositor)
+                                           edges
+                                           :button (dragged-button compositor)
+                                           :min-width (max 1 (srv:xdg-toplevel-min-width toplevel))
+                                           :min-height (max 1 (srv:xdg-toplevel-min-height toplevel))))
+       (srv:log-message :debug "toplevel ~D: interactive resize (serial ~D, edges ~D)"
+                        (srv:resource-id toplevel) serial edges)
+       t))))
 
 (defun inject-pointer-button (compositor button state)
   "SYNTHETIC pointer button (:left, :right, :middle), pressed or released.
@@ -379,16 +554,23 @@ A press is also the click that focuses: the window under the pointer takes the
 keyboard, which is what makes clicking another window work at all (D32).  A press
 on the bare output changes nothing -- there is no click-to-raise or
 click-to-dismiss policy in v0."
-  (let ((seat (compositor-seat compositor)))
-    (when (eq state :pressed)
-      (multiple-value-bind (surface x y) (surface-under-cursor compositor)
-        (when surface
-          (unless (eq surface (srv:seat-pointer-focus seat))
-            (srv:set-pointer-focus seat surface x y))
-          (unless (eq surface (srv:seat-keyboard-focus seat))
-            (focus-surface compositor surface)))))
-    (let ((code (or (cdr (assoc button +pointer-buttons+)) button)))
-      (srv:send-pointer-button seat code state))))
+  (let* ((seat (compositor-seat compositor))
+         (code (or (cdr (assoc button +pointer-buttons+)) button))
+         (grab (compositor-grab compositor)))
+    (cond
+      ;; A grab owns the pointer: the grab decides, and the event is not also
+      ;; delivered as a click to the client under it.
+      (grab
+       (grab:grab-button grab code state))
+      (t
+       (when (eq state :pressed)
+         (multiple-value-bind (surface x y) (surface-under-cursor compositor)
+           (when surface
+             (unless (eq surface (srv:seat-pointer-focus seat))
+               (srv:set-pointer-focus seat surface x y))
+             (unless (eq surface (srv:seat-keyboard-focus seat))
+               (focus-surface compositor surface)))))
+       (srv:send-pointer-button seat code state)))))
 
 (defun inject-pointer-axis (compositor axis value)
   (srv:send-pointer-axis (compositor-seat compositor) axis value))

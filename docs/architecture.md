@@ -33,8 +33,8 @@ cl-wayland-project/
 │   └── demo/ server-demo.lisp
 ├── cl-compositor-framework/
 │   ├── cl-compositor-framework.asd
-│   └── src/  package.lisp  render-pixman.lisp  scene.lisp  xkb.lisp  png.lisp
-│             headless.lisp
+│   └── src/  package.lisp  render-pixman.lisp  scene.lisp  grab.lisp
+│             keybindings.lisp  xkb.lisp  png.lisp  headless.lisp
 │       ├── backend/   (phase 3+) protocol.lisp headless.lisp nested.lisp drm.lisp
 │       │              libinput.lisp multi.lisp session.lisp
 │       ├── render/    protocol.lisp pixman.lisp gles2.lisp target.lisp
@@ -58,7 +58,8 @@ cl-wayland-project/
 │                    soak.lisp  run-tests.sh  fuzz.sh  fuzz-client.sh
 │                    c-probe.sh  headless-frame.sh  headless-gate.lisp
 │                    xdg-shell-gate.sh  xdg-shell-gate.lisp  seat-gate.sh
-│                    seat-gate.lisp  scene-gate.sh  scene-gate.lisp  check-loads.sh
+│                    seat-gate.lisp  scene-gate.sh  scene-gate.lisp  grab-gate.sh
+│                    grab-gate.lisp  check-loads.sh
 │                    purity-check.sh  lib.sh  capture.sh  run-nested.sh  run-tty.sh
 └── qlfile           local Quicklisp/qlot project set
 ```
@@ -90,7 +91,10 @@ and end-of-cycle flushing -- so a real client can be typed and clicked at. Phase
 `cf.scene` v0 -- buffer, rect and image nodes, positions in parent space, stacking by placement
 order, a front-to-back hit test that honours input regions, a cascade placement policy behind
 `cf:on-new-toplevel`, and a cursor composited last -- so two windows can be placed, hovered and
-clicked. The nested backend, tinywl and `cl-umbra` are still their plan.
+clicked. Phase 3d added `cf.grab` (move and resize grabs that end exactly once, started from a
+serial the display issued and the shell validated) and `cf.keybindings` (a table consulted
+before the focused client, with Alt+Esc and Alt+F1 by default), so a window can be moved,
+resized and cycled. The nested backend, tinywl and `cl-umbra` are still their plan.
 
 ## 2. Packages
 

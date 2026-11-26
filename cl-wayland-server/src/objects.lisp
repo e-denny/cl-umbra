@@ -103,6 +103,10 @@ allowed to free per-client state (docs/architecture.md §7)."))
    (next-global-name :initform 1 :accessor display-next-global-name)
    (next-client-id :initform 1 :accessor display-next-client-id)
    (serial :initform 0 :accessor display-serial)
+   ;; The serials this display issued recently, newest first, bounded: the whole
+   ;; point of a serial is that a client can echo one back, so "did we issue it"
+   ;; has to be answerable, and "how long ago" has to be answerable too (D33).
+   (recent-serials :initform nil :accessor display-recent-serials)
    ;; How many connections one readable event may accept.  A connect storm must
    ;; not starve the clients that are already connected.
    (accept-budget :initarg :accept-budget :initform 16 :reader display-accept-budget)
@@ -392,9 +396,10 @@ renderer can never be handed a pointer into an unmapped file."))
    (repeat-rate :initform 25 :accessor seat-repeat-rate)
    (repeat-delay :initform 600 :accessor seat-repeat-delay)
    (bindings :initform nil :accessor seat-bindings)
-   ;; The surface that has keyboard focus, and the one under the pointer.  In
-   ;; this slice they are always set explicitly by the compositor: there is no
-   ;; scene graph, so nothing can be hit-tested yet.
+   ;; Pointer buttons physically down, so a grab can end on the button that
+   ;; started it instead of assuming the left one (D33).
+   (pressed-buttons :initform nil :accessor seat-pressed-buttons)
+   ;; The surface that has keyboard focus, and the one under the pointer.
    (keyboard-focus :initform nil :accessor seat-keyboard-focus)
    (pointer-focus :initform nil :accessor seat-pointer-focus)
    (pointer-x :initform 0 :accessor seat-pointer-x)

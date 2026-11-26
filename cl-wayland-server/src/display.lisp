@@ -113,11 +113,35 @@ error inside it never escapes (see SERVICE-CLIENT)."
 ;;; Serials
 ;;; ---------------------------------------------------------------------------
 
-(defun display-next-serial (display)
-  "A per-display monotonic serial, wrapped at 32 bits.
+(defparameter +recent-serial-limit+ 64
+  "How many issued serials stay valid for a client to echo back.
 
-Phase 1 has nothing serial-bearing yet; seats, selections and popup grabs in
-later phases do, and clients echo these numbers back, so the counter belongs to
-the display and not to any one resource."
-  (setf (display-serial display)
-        (logand (1+ (display-serial display)) #xFFFFFFFF)))
+A serial is a capability, not an identity: a client that can name one is allowed
+to act on it (start a grab, take a selection).  Keeping the last 64 is long
+enough for any sane click-to-request round trip and short enough that a stale
+serial from a previous interaction cannot be replayed into a new one (D33).")
+
+(defun display-next-serial (display)
+  "A per-display monotonic serial, wrapped at 32 bits, remembered as recent.
+
+Every serial the server sends -- enter, leave, button, key, configure, ping --
+comes from here, so a client can only ever echo one we issued.  The recent list
+is what VALID-SERIAL-P consults."
+  (let ((serial (logand (1+ (display-serial display)) #xFFFFFFFF)))
+    (setf (display-serial display) serial
+          (display-recent-serials display)
+          (cons serial (subseq (display-recent-serials display)
+                               0 (min (length (display-recent-serials display))
+                                      (1- +recent-serial-limit+)))))
+    serial))
+
+(defun display-valid-serial-p (display serial)
+  "Is SERIAL one this display issued recently?
+
+A serial we never sent, one from before the window, and one from a previous
+connection are all refused -- which is the whole point: a client cannot move its
+own window by inventing a number, and cannot replay a serial it was given in a
+different interaction."
+  (and (integerp serial)
+       (plusp serial)
+       (member serial (display-recent-serials display) :test #'=)))

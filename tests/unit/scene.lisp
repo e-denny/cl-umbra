@@ -235,3 +235,137 @@ concerned; the protocol state machine has its own tests in wayland.test.server."
           "the lower rectangle is drawn")
       (ok (= #xFF0000FF (cf:frame-pixel compositor 8 8))
           "the upper rectangle is drawn over it"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Grabs
+;;; ---------------------------------------------------------------------------
+;;
+;; A grab is driven the way a backend drives it: injected motion and buttons.
+;; The parts worth asserting are the ones a screenshot cannot show -- that the
+;; node follows the pointer's *delta* (not the pointer), that a release ends the
+;; grab exactly once, and that a size asked for is the size the edge implies.
+
+(defclass counting-move-grab (cf.grab:move-grab)
+  ((end-count :initform 0 :accessor end-count)))
+
+(defmethod cf.grab:grab-ended ((grab counting-move-grab) reason)
+  (declare (ignore reason))
+  (incf (end-count grab))
+  (call-next-method))
+
+(defclass recording-resize-grab (cf.grab:resize-grab)
+  ((requests :initform nil :accessor requests)))
+
+(defmethod cf.grab:grab-resize ((grab recording-resize-grab) width height)
+  (push (list width height) (requests grab)))
+
+(defun window-node (compositor x y &key (width 100) (height 80))
+  "A cf-surface with a mapped buffer, a node at (X, Y); returns (values surface node)."
+  (let* ((surface (make-instance 'cf:cf-surface
+                                 :client nil :id 9 :interface nil :version 1))
+         (node (scene:scene-add-node (cf:compositor-scene compositor)
+                                     (scene:make-buffer-node surface)
+                                     :x x :y y)))
+    (setf (srv:surface-current-buffer surface)
+          (make-instance 'srv:shm-buffer
+                         :pool nil :offset 0 :width width :height height
+                         :stride (* 4 width) :format 0)
+          (srv:surface-mapped-p surface) t
+          (cf:surface-scene-node surface) node)
+    (values surface node)))
+
+(deftest a-move-grab-follows-the-pointer-and-ends-exactly-once
+  (with-compositor (compositor :width 200 :height 200)
+    (multiple-value-bind (surface node) (window-node compositor 10 10)
+      (declare (ignore surface))
+      (let ((grab (make-instance 'counting-move-grab
+                                 :node node :start-x 20 :start-y 20
+                                 :origin-x 10 :origin-y 10)))
+        (cf:start-grab compositor grab)
+        (cf:inject-pointer-motion compositor 35 50)
+        (ok (equal '(25 40) (multiple-value-list (scene:node-position node)))
+            "the node moved by the pointer's delta, not to the pointer")
+        (cf:inject-pointer-button compositor :left :released)
+        (ok (null (cf:compositor-grab compositor)) "the release ended the grab")
+        (ok (= 1 (end-count grab)) "and it ended once")
+        (cf:inject-pointer-button compositor :left :released)
+        (ok (= 1 (end-count grab)) "a second release is not a second end")
+        (cf:inject-pointer-motion compositor 150 150)
+        (ok (equal '(25 40) (multiple-value-list (scene:node-position node)))
+            "and motion after the end moves nothing")))))
+
+(deftest a-resize-grab-asks-for-the-size-the-edge-implies
+  (with-compositor (compositor :width 400 :height 400)
+    (multiple-value-bind (surface node) (window-node compositor 0 0 :width 200 :height 150)
+      (declare (ignore surface))
+      (let ((grab (make-instance 'recording-resize-grab
+                                 :node node :start-x 0 :start-y 0
+                                 :start-width 200 :start-height 150
+                                 :edges (logior cf.grab:+edge-right+
+                                                cf.grab:+edge-bottom+))))
+        (cf:start-grab compositor grab)
+        (cf:inject-pointer-motion compositor 40 30)
+        (ok (equal '((240 180)) (requests grab))
+            "a bottom-right drag asks for the start size plus the delta")
+        (cf:inject-pointer-motion compositor 40 30)
+        (ok (equal '((240 180)) (requests grab))
+            "and the same size is not asked for twice")
+        (cf:inject-pointer-motion compositor 45 35)
+        (ok (equal '((245 185) (240 180)) (requests grab))
+            "a further drag asks again")
+        (cf:inject-pointer-button compositor :left :released)
+        (ok (null (cf:compositor-grab compositor)) "the release ended the resize")))))
+
+(deftest resize-target-size-answers-each-edge
+  (flet ((size (edges dx dy)
+           (multiple-value-list (cf.grab:resize-target-size edges 200 150 dx dy))))
+    (ok (equal '(240 180) (size (logior cf.grab:+edge-right+ cf.grab:+edge-bottom+) 40 30)))
+    (ok (equal '(160 150) (size cf.grab:+edge-left+ 40 30))
+        "dragging the left edge inward makes the window narrower")
+    (ok (equal '(200 120) (size cf.grab:+edge-top+ 40 30))
+        "and the top edge shorter")
+    (ok (equal '(200 150) (size 0 40 30))
+        "a resize with no edge changes nothing")
+    (ok (equal '(1 1) (size (logior cf.grab:+edge-right+ cf.grab:+edge-bottom+) -500 -500))
+        "and a drag past the origin is clamped, not negative")))
+
+;;; ---------------------------------------------------------------------------
+;;; Keybindings
+;;; ---------------------------------------------------------------------------
+
+(deftest alt-escape-stops-the-compositor
+  (with-compositor (compositor :width 64 :height 64)
+    (cf:inject-key compositor "Alt_L" :pressed)
+    (ok (cf:handle-key compositor "Escape" :pressed)
+        "the binding consumed the press")
+    (ok (member "Escape" (cf:compositor-consumed-keys compositor) :test #'string-equal)
+        "and remembered it, so its release is swallowed too")
+    (ok (cf:handle-key compositor "Escape" :released) "the release was consumed")
+    (ok (null (cf:compositor-consumed-keys compositor)) "and then forgotten")
+    (ok (wayland.reactor:stopped-p
+         (wayland.server:display-reactor (cf:compositor-display compositor)))
+        "the main loop was asked to stop")))
+
+(deftest alt-f1-cycles-the-bottom-window-to-the-top
+  (with-compositor (compositor :width 200 :height 200)
+    (multiple-value-bind (surface-a node-a) (window-node compositor 0 0)
+      (multiple-value-bind (surface-b node-b) (window-node compositor 10 10)
+        (srv:set-keyboard-focus (cf:compositor-seat compositor) surface-b)
+        (ok (eq node-b (car (last (scene:node-children
+                                   (scene:scene-root (cf:compositor-scene compositor))))))
+            "the second window is on top to start with")
+        (cf:inject-key compositor "Alt_L" :pressed)
+        (cf:inject-key compositor "F1" :pressed)
+        (cf:inject-key compositor "F1" :released)
+        (cf:inject-key compositor "Alt_L" :released)
+        (ok (eq node-a (car (last (scene:node-children
+                                   (scene:scene-root (cf:compositor-scene compositor))))))
+            "alt+F1 brought the bottom window to the top")
+        (ok (eq surface-a (srv:seat-keyboard-focus (cf:compositor-seat compositor)))
+            "and focused it")))))
+
+(deftest an-unbound-key-is-not-consumed
+  (with-compositor (compositor :width 64 :height 64)
+    (ok (null (cf:handle-key compositor "a" :pressed))
+        "nothing bound 'a', so it goes to the client (and nowhere, with no focus)")
+    (ok (null (cf:compositor-consumed-keys compositor)))))

@@ -113,6 +113,64 @@ nothing about seats, toplevels or focus.")
    #:+cursor-height+
    #:make-cursor-image))
 
+(defpackage #:cf.grab
+  (:use #:cl)
+  (:local-nicknames (#:scene #:cf.scene))
+  (:documentation
+   "Grabs: an interaction that owns the pointer until it ends (docs/framework.md
+§5).  Move and resize are the two a window manager cannot do without; a grab knows
+about nodes and sizes, and tells the compositor about frames and configures through
+two hooks.")
+  (:export
+   #:grab
+   #:grab-node
+   #:grab-owner
+   #:grab-button-code
+   #:grab-active-p
+   #:grab-motion
+   #:grab-button
+   #:grab-key
+   #:grab-changed
+   #:grab-resize
+   #:grab-ended
+   #:grab-end
+   #:move-grab
+   #:begin-move-grab
+   #:move-grab-start-x
+   #:move-grab-start-y
+   #:move-grab-origin-x
+   #:move-grab-origin-y
+   #:resize-grab
+   #:begin-resize-grab
+   #:resize-grab-edges
+   #:resize-target-size
+   #:resize-grab-requested-width
+   #:resize-grab-requested-height
+   #:+edge-top+
+   #:+edge-bottom+
+   #:+edge-left+
+   #:+edge-right+))
+
+(defpackage #:cf.keybindings
+  (:use #:cl)
+  (:documentation
+   "Compositor keybindings, consulted before the focused client (docs/framework.md
+§5).  A binding is (modifiers, key name) -> a function; a consumed key never
+reaches the client.")
+  (:export
+   #:keybinding
+   #:keybinding-key
+   #:keybinding-modifiers
+   #:keybinding-function
+   #:keybinding-description
+   #:keybinding-table
+   #:keybinding-table-bindings
+   #:make-keybinding-table
+   #:add-keybinding
+   #:remove-keybinding
+   #:binding-for
+   #:dispatch-keybinding))
+
 (defpackage #:cf.backend.headless.png
   (:use #:cl)
   (:documentation
@@ -127,6 +185,8 @@ a debugging artefact and a test fixture, not a compression benchmark.")
                     (#:png #:cf.backend.headless.png)
                     (#:input #:cf.input)
                     (#:scene #:cf.scene)
+                    (#:grab #:cf.grab)
+                    (#:kb #:cf.keybindings)
                     (#:srv #:wayland.server)
                     (#:reactor #:wayland.reactor))
   (:import-from #:wayland
@@ -162,6 +222,16 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:surface-under-cursor
    #:update-pointer
    #:surface-scene-node
+   #:compositor-grab
+   #:compositor-keybindings
+   #:compositor-consumed-keys
+   #:start-grab
+   #:end-active-grab
+   #:add-keybinding
+   #:remove-keybinding
+   #:handle-key
+   #:stop-compositor
+   #:cycle-views
    #:focus-surface
    #:inject-key
    #:inject-pointer-motion
@@ -198,6 +268,16 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
                 #:surface-under-cursor
                 #:update-pointer
                 #:surface-scene-node
+                #:compositor-grab
+                #:compositor-keybindings
+                #:compositor-consumed-keys
+                #:start-grab
+                #:end-active-grab
+                #:add-keybinding
+                #:remove-keybinding
+                #:handle-key
+                #:stop-compositor
+                #:cycle-views
                 #:focus-surface
                 #:inject-key
                 #:inject-pointer-motion
@@ -246,6 +326,16 @@ docs/framework.md §1 follow.")
    #:surface-under-cursor
    #:update-pointer
    #:surface-scene-node
+   #:compositor-grab
+   #:compositor-keybindings
+   #:compositor-consumed-keys
+   #:start-grab
+   #:end-active-grab
+   #:add-keybinding
+   #:remove-keybinding
+   #:handle-key
+   #:stop-compositor
+   #:cycle-views
    #:focus-surface
    #:inject-key
    #:inject-pointer-motion

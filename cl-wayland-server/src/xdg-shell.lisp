@@ -373,32 +373,102 @@ already acknowledged (pending: ~S)"
   (setf (xdg-toplevel-app-id toplevel) app-id)
   nil)
 
-;; Interactive move/resize and the window menu need a seat, a pointer and a
-;; serial vocabulary that only exists while a grab is active.  They are accepted
-;; and logged; nothing acts on them until this compositor has a seat, which is the
-;; next slice of this phase.
+;;; ---------------------------------------------------------------------------
+;;; Interactive move/resize: the policy hook
+;;; ---------------------------------------------------------------------------
+;;
+;; xdg_toplevel.move and .resize are a client *asking* to be dragged.  The
+;; compositor decides whether to: the serial must be one we issued recently
+;; (D33), and the asking surface must be the one the pointer or the keyboard is
+;; on.  A refused request is not an error -- the protocol defines none for this --
+;; it is a no-op, because a client asking to move a window it does not have is a
+;; client whose click we already ignored.
+;;
+;; The grab itself is policy, not protocol, so the shell only *reports* it.  The
+;; hook is dispatched on the wl_surface, which is the object a framework has
+;; already subclassed (CF-SURFACE in the headless compositor); the default does
+;; nothing, so a transport-only server still answers xdg-shell correctly.
+
+(defgeneric toplevel-move-requested (surface toplevel serial seat)
+  (:documentation
+   "SURFACE (a toplevel's wl_surface) asked to be moved, with a validated SERIAL.
+
+SEAT is the seat the client named, resolved, or NIL if it named something else.
+The default does nothing: grabbing is compositor policy.  Send the matching
+`move' event to the client when the grab ends (xdg-shell v5; the global here is
+v1, so there is nothing to send).")
+  (:method (surface toplevel serial seat)
+    (declare (ignore surface toplevel serial seat))
+    nil))
+
+(defgeneric toplevel-resize-requested (surface toplevel serial seat edges)
+  (:documentation
+   "SURFACE asked to be resized from EDGES, with a validated SERIAL.
+
+EDGES is the xdg_toplevel.resize_edge bitmask, from one edge to two adjacent
+ones (a corner).  The default does nothing.")
+  (:method (surface toplevel serial seat edges)
+    (declare (ignore surface toplevel serial seat edges))
+    nil))
+
+(defun toplevel-surface (toplevel)
+  "The wl_surface a toplevel draws through, or NIL."
+  (let ((shell (xdg-toplevel-shell-surface toplevel)))
+    (and shell (xdg-surface-surface shell))))
+
+(defun grab-request-acceptable-p (seat surface serial)
+  "Is a move/resize request from SURFACE, naming SERIAL on SEAT, to be honoured?"
+  (and seat
+       surface
+       serial
+       (valid-serial-p seat serial)
+       (or (eq surface (seat-keyboard-focus seat))
+           (eq surface (seat-pointer-focus seat)))))
+
+(defun request-toplevel-size (toplevel width height)
+  "Ask the client for WIDTH x HEIGHT, keeping the states it already has.
+
+This is what an interactive resize *is* for a shm client: the compositor cannot
+resize a buffer it does not own, so it configures a size and the client comes
+back with a buffer that size.  The size is remembered on the toplevel, so a later
+configure for a focus change (SET-TOPLEVEL-ACTIVATED) keeps it instead of
+resetting the window to "you choose"."
+  (let* ((shell (xdg-toplevel-shell-surface toplevel))
+         (states (xdg-toplevel-configure-states toplevel)))
+    (when (and shell (shell-alive-p shell))
+      (send-configure shell
+                      :width (max 0 width)
+                      :height (max 0 height)
+                      :states states))))
 
 (defmethod xdg-toplevel.show-window-menu ((toplevel xdg-toplevel) seat serial x y)
   (declare (ignore seat x y))
-  (log-message :debug "toplevel ~D: show_window_menu (serial ~D) ignored: no seat"
+  (log-message :debug "toplevel ~D: show_window_menu (serial ~D) ignored"
                (resource-id toplevel) serial)
   nil)
 
-(defmethod xdg-toplevel.move ((toplevel xdg-toplevel) seat serial)
-  (declare (ignore seat))
-  (log-message :debug "toplevel ~D: move (serial ~D) ignored: no seat"
-               (resource-id toplevel) serial)
-  nil)
+(defmethod xdg-toplevel.move ((toplevel xdg-toplevel) seat-object serial)
+  (let* ((surface (toplevel-surface toplevel))
+         (seat (and (typep seat-object 'seat-resource)
+                    (seat-resource-seat seat-object))))
+    (if (grab-request-acceptable-p seat surface serial)
+        (toplevel-move-requested surface toplevel serial seat)
+        (log-message :debug "toplevel ~D: move refused (serial ~D, seat ~S, focused ~S)"
+                     (resource-id toplevel) serial
+                     (not (null seat)) (not (null surface))))))
 
-(defmethod xdg-toplevel.resize ((toplevel xdg-toplevel) seat serial edges)
-  (declare (ignore seat))
+(defmethod xdg-toplevel.resize ((toplevel xdg-toplevel) seat-object serial edges)
   (unless (member edges '(0 1 2 4 5 6 8 9 10))
     (protocol-error (resource-client toplevel) (resource-id toplevel)
                     +xdg-toplevel-error-invalid-resize-edge+
                     "resize edge ~D is not a variant of the enum" edges))
-  (log-message :debug "toplevel ~D: resize (serial ~D, edges ~D) ignored: no seat"
-               (resource-id toplevel) serial edges)
-  nil)
+  (let* ((surface (toplevel-surface toplevel))
+         (seat (and (typep seat-object 'seat-resource)
+                    (seat-resource-seat seat-object))))
+    (if (grab-request-acceptable-p seat surface serial)
+        (toplevel-resize-requested surface toplevel serial seat edges)
+        (log-message :debug "toplevel ~D: resize refused (serial ~D, edges ~D)"
+                     (resource-id toplevel) serial edges))))
 
 (defun check-size-hint (toplevel width height what)
   (when (or (minusp width) (minusp height))

@@ -187,11 +187,12 @@ trace tests and the malicious-pool cases are in `wayland.test.server`.
 ## Phase 3 — `cl-tinywl`, nested (3-4 weeks)
 
 **Status: phase 3a landed (xdg-shell toplevels), 3b landed (seats and input), 3c landed (the
-scene: placement, hit testing, click-to-focus, a drawn cursor).** The v1 state machine is in
+scene: placement, hit testing, click-to-focus, a drawn cursor), 3d landed (grabs and
+keybindings).** The v1 state machine is in
 `cl-wayland-server/src/xdg-shell.lisp` and the policy seam is `cf:on-new-toplevel`. Gates:
 clause 11 `./scripts/xdg-shell-gate.sh`, clause 12 `./scripts/seat-gate.sh`, clause 13
-`./scripts/scene-gate.sh`. Grabs, the focus stack, the nested backend, tinywl and popups are
-open below.
+`./scripts/scene-gate.sh`, clause 14 `./scripts/grab-gate.sh`. The focus stack, the nested
+backend, tinywl and popups are open below.
 
 `cf.types.xdg-shell` (core)
 - [x] `xdg_wm_base` ping/pong; error conditions (`role`, `defunct_surfaces`)
@@ -200,8 +201,7 @@ open below.
       `defunct_role_object`)
 - [x] `xdg_toplevel` configure size/states, title, app_id, min/max, close
       (`configure_bounds`/`wm_capabilities` wait for a version bump; the global is v1)
-- [ ] `move`/`resize` requests with serial validation (accepted, validated for the enum, and
-      ignored: no seat yet)
+- [x] `move`/`resize` requests with serial validation, and grabs behind them (phase 3d, D33)
 - [x] `set_activated` driving a configure with the `activated` state (focus and click-to-focus
       call `set-toplevel-activated`, and the gate asserts the state array either way)
 - [ ] basic `xdg_popup` + `xdg_positioner` (needed by menus; polish in phase 6)
@@ -215,7 +215,11 @@ open below.
       theme shapes are phase 5)
 - [x] focus, and `set_activated` on focus change (`cf:focus-surface` → `seat-focus-changed`)
 - [x] click-to-focus, and pointer focus that follows the pointer (phase 3c, D32)
+- [x] interactive move and resize grabs, started from a validated serial (phase 3d, D33)
+- [x] a keybinding table consulted before the client; Alt+Esc and Alt+F1 as defaults (D33)
 - [ ] focus stack (alt-tab order); v0 has "the window that mapped last" and nothing more
+- [ ] edge-anchored resizing (a top/left drag resizes without moving the node until the client
+      comes back with a buffer); Escape-to-cancel bound by default; popup grabs
 - [ ] grabs: `begin-move`/`begin-resize` from `move`/`resize`, serial validation
 - [ ] `wl_pointer.frame` and `wl_seat.release` (a version bump, not a rewrite)
 

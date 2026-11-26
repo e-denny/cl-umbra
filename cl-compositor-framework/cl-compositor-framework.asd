@@ -14,6 +14,8 @@ scene graph, seat and focus policy, and the shell protocol state machines."
   :components ((:file "src/package")
                (:file "src/render-pixman")
                (:file "src/scene")
+               (:file "src/grab")
+               (:file "src/keybindings")
                (:file "src/xkb")
                (:file "src/png")
                (:file "src/headless")))

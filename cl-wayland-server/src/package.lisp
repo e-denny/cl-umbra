@@ -330,6 +330,8 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:display-globals
    #:display-closed-p
    #:display-next-serial
+   #:display-valid-serial-p
+   #:display-recent-serials
    #:flush-all
    ;; clients
    #:client
@@ -473,6 +475,11 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:ping-xdg-wm-base
    #:close-toplevel
    #:set-toplevel-activated
+   #:request-toplevel-size
+   #:toplevel-move-requested
+   #:toplevel-resize-requested
+   #:grab-request-acceptable-p
+   #:valid-serial-p
    #:+xdg-toplevel-state-activated+
    ;; seats and input (version 4)
    #:+seat-version+
@@ -492,6 +499,7 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:seat-pointer-focus
    #:seat-pointer-x
    #:seat-pointer-y
+   #:seat-pressed-buttons
    #:seat-pressed-keys
    #:seat-mods-depressed
    #:seat-mods-latched

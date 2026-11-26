@@ -1722,3 +1722,45 @@ is exactly enough."
                         (ok (search "file is" message))))
                  (ffi:close-fd fd))))
         (ffi:close-fd socket)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Serials and grab requests
+;;; ---------------------------------------------------------------------------
+;;
+;; A serial is a capability: it is meaningful only because *we* issued it in
+;; response to an input event.  These are the two halves of the rule -- is the
+;; number ours and recent, and is the asking surface the one the seat is on --
+;; which together decide whether an xdg_toplevel.move becomes a grab (D33).
+
+(deftest only-recent-serials-are-valid
+  (with-seat-display (display)
+    (let* ((seat (seat-of display))
+           (serial (srv:display-next-serial display)))
+      (ok (srv:valid-serial-p seat serial) "a serial we just issued is valid")
+      (ok (not (srv:valid-serial-p seat (1+ serial)))
+          "one we have never issued is not")
+      (ok (not (srv:valid-serial-p seat 0)) "and zero is never a capability")
+      (dotimes (i 100) (srv:display-next-serial display))
+      (ok (not (srv:valid-serial-p seat serial))
+          "a serial older than the window is no longer valid"))))
+
+(deftest a-move-request-needs-our-serial-and-the-focus
+  (with-seat-display (display)
+    (let* ((socket (raw-connect display))
+           (seat (seat-of display)))
+      (unwind-protect
+           (progn
+             (bind-seat display socket)
+             (run-server display)
+             (read-events socket)
+             (let ((surface (fresh-surface display socket))
+                   (serial (srv:display-next-serial display)))
+               (srv:set-keyboard-focus seat surface)
+               (ok (srv:grab-request-acceptable-p seat surface serial)
+                   "a recent serial plus keyboard focus is acceptable")
+               (ok (not (srv:grab-request-acceptable-p seat surface (+ serial 1000)))
+                   "an invented serial is refused")
+               (srv:set-keyboard-focus seat nil)
+               (ok (not (srv:grab-request-acceptable-p seat surface serial))
+                   "a real serial without focus is refused too")))
+        (ffi:close-fd socket)))))

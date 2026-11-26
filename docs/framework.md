@@ -192,12 +192,24 @@ focus stack, cursor shapes and touch are still ahead.*
 - **Injection** moves the pointer and marks the output dirty, because the frame changed even if
   no client did. That is why `cf:inject-pointer-motion` produces a new frame with no commit
   behind it.
-- **Serials** are validated: `(valid-serial-p seat serial)` for selections, popup grabs,
-  move/resize requests. Unvalidated serials are the classic way a malicious client moves
-  another client's window.
-- **Grabs** are objects, not modal flags: `interactive-move`, `interactive-resize`,
-  `popup-grab`, `dnd-grab`. A grab gets motion/button/key/axis callbacks and ends exactly
-  once, on button release, Escape, or client destruction.
+- **Serials** are validated: `(valid-serial-p seat serial)` is true only for a serial this
+  display issued recently (the last 64), so a client cannot move another client's window by
+  inventing a number or replaying one from a previous interaction (D33). `move`/`resize` are
+  checked for the serial *and* for the focus, and refused silently when they fail: xdg-shell
+  defines no error for this, and silence is the honest answer.
+- **Grabs** are objects, not modal flags (`cf.grab`): `grab-motion`, `grab-button`, `grab-key`,
+  and `grab-end`, which is idempotent — a release racing a cancel ends the grab once. Two exist:
+  `move-grab` (the node follows the pointer's delta from a remembered origin) and `resize-grab`
+  (the size an edge implies is computed by the pure `resize-target-size` and *configured*, because
+  a compositor cannot resize a buffer it does not own). A grab holds the button that was
+  physically down when it started, and the compositor learns about frames and configures through
+  two hooks, `grab-changed` and `grab-resize`. Popup grabs and DnD arrive with their protocols.
+- **Keybindings** come before the client (D33): the key path is grab, then table, then focused
+  window. `(add-keybinding compositor key function :modifiers mask)` — exact mask match, so
+  Alt+Escape does not fire with Alt+Shift held. A consumed press never reaches the client and its
+  release is swallowed; an unbound modifier is still forwarded, which is a v0 simplification
+  (there is no device to suppress it from). The defaults are tinywl's: Alt+Esc stops the loop,
+  Alt+F1 cycles the bottom window to the top and focuses it.
 - **Capabilities** are recomputed from actual devices and re-advertised on change. Today the
   headless backend advertises `pointer|keyboard`; touch is not advertised and `get_touch` is
   refused with `missing_capability`, which is what the protocol asks for.

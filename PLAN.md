@@ -319,9 +319,20 @@ Bugs this slice found, each now a decision: committing is not raising (two redra
 fought over the stacking order, D31.3); focus must be applied when a window *maps* rather than
 whenever an unfocused window commits (D32.3); and regions must be copied when
 `set_input_region` is handled, not at commit, because the client destroys the `wl_region`
-immediately (D31.5). Not in these slices, and needed before tinywl: the nested backend,
-`xdg_popup` + `xdg_positioner`, window management (grabs, move/resize, a focus stack) and
-layer-shell.
+immediately (D31.5).
+
+**Phase 3d** adds grabs and keybindings (D33): `move`/`resize` are now honoured after checking
+the serial against the display's recent serials *and* the asking surface against the seat's
+focus, `cf.grab` has `move-grab` and `resize-grab` (ending exactly once, holding the button that
+was physically down), a resize becomes an `xdg_toplevel.configure` carrying the size the edge
+implies, and the key path consults a keybinding table before the focused client — with Alt+Esc
+and Alt+F1 as the default two. Gate clause 14: a real client compiled at gate time asks to be
+moved with the serial from a button event we sent, is dragged, stops on release and is not moved
+again; a right-drag produces `configure 240x180`; Alt+F1 cycles the bottom window to the top and
+Alt+Esc stops the loop (`scripts/grab-gate.sh`).
+
+Not in these slices, and needed before tinywl: the nested backend, `xdg_popup` +
+`xdg_positioner`, the focus stack, edge-anchored resizing and layer-shell.
 
 ### Phase 4 — Real hardware: DRM dumb buffers + libinput (6-8 weeks)
 
