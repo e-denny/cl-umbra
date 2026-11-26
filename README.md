@@ -6,16 +6,22 @@ The repository is named for where the stack is going: `cl-umbra`, a daily-driver
 Everything that makes it possible is here too — the protocol implementation, the server, the
 compositor framework, and a tinywl port — as the six systems below.
 
-**Status: phase 0, phase 1, phase 2a, phase 3a, phase 3b, phase 3c, phase 3d, phase 3e and
-phase 3's exit gate — `cl-tinywl` — passing.** `./scripts/gate.sh` checks sixteen clauses.
-Phase 0: the unit suite (212 tests), every vendored protocol compiling,
+**Status: phase 0, phase 1, phase 2a, phase 2b, phase 3a, phase 3b, phase 3c, phase 3d,
+phase 3e and phase 3's exit gate — `cl-tinywl` — passing.** `./scripts/gate.sh` checks
+nineteen clauses. Phase 0: the unit suite (282 tests, twelve suites), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections
 neither crash, wedge, leak nor get a malformed reply; and an independent libwayland C client
 binds, destroys and re-binds across versions. Phase 2a: a libwayland shared-memory client
 draws a known pattern through our headless compositor, gets its frame callback, and the
-captured frame matches pixel for pixel (with a PNG screenshot to prove it). Phase 3:
+captured frame matches pixel for pixel (with a PNG screenshot to prove it). Phase 2b: the
+same kind of real client draws at buffer scale 1 and 2 on scale-1 and scale-2 outputs and with
+90- and 180-degree transforms, and every quadrant lands where the scale and the transform say;
+a scene of opaque and translucent rectangles is then moved a few pixels at a time and the
+incrementally repainted frame must equal a full repaint of the same scene pixel for pixel, with
+the damage smaller than the output (damage tracking, buffer age, opaque culling, buffer scale
+and transform: D48, D49, D50). Phase 3:
 `weston-simple-shm` — a real xdg-shell client — binds `xdg_wm_base`, is configured, acks our
 serial, commits a buffer and draws a window through us; the gate checks the frame's pixels,
 answers our ping, and confirms the client never sees a protocol error. Phase 3b:
@@ -79,8 +85,9 @@ What exists:
   testing, a software cursor), `cf.grab`, `cf.keybindings`, and `cf.backend.nested` (our
   compositor as a client of another one: its frame goes into the parent's shm buffer, its input
   comes from the parent's seat). `xdg_popup` and `xdg_positioner` are implemented (menus,
-  tooltips, their grabs and their dismissal); damage, a focus stack and the DRM/libinput
-  backends are phases 2b-5.
+  tooltips, their grabs and their dismissal), a focus stack decides who gets the keys when a
+  window closes, and the renderer tracks damage, applies buffer scale and the eight buffer
+  transforms, and culls what an opaque window hides. The DRM/libinput backends are phases 4-5.
 
 ## What this is
 
@@ -263,6 +270,7 @@ injected into the *parent*.
 
 ```
 ./scripts/tinywl-parity.sh     # both runs;  ./scripts/gate.sh runs it as clause 16
+./scripts/render-gate.sh       # scale, transform, damage;  clause 19
 ```
 
 Run it as a compositor, with a client of your own — as a window inside the session you
@@ -281,7 +289,11 @@ window and the menu appears at the pointer; Escape or a click outside dismisses 
 **Alt+Shift+Return** — it sets the child's `WAYLAND_DISPLAY` to tinywl's own socket, which
 is the one thing a client started from a shell cannot do for itself in a nested session.
 `--size WxH` defaults to 1280x800 and the nested output also follows the parent's
-`xdg_toplevel.configure`, so a tiling parent decides (D37). `--help` lists the rest,
+`xdg_toplevel.configure`, so a tiling parent decides (D37). `--scale N` renders at *N*
+device pixels per layout pixel: `--scale 2` is what a HiDPI output wants, and a nested session
+tells its parent the same scale so the window stays the layout size it asked for while the
+pixels are twice as dense (D49) — text is drawn at the output's density instead of being
+upscaled by the parent. `--help` lists the rest,
 `--headless` renders into memory instead (needs `--display`, because `wayland-0` is the
 session's own socket), and `--parent PATH` points at a compositor that is not
 `WAYLAND_DISPLAY`. `scripts/tinywl.sh` is only a launcher: it loads ASDF, Quicklisp and

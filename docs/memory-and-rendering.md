@@ -201,11 +201,22 @@ Semantics:
                                0 0  0 0  x y  width height)))
 ```
 
-Phase 2a implements the target, `composite-buffer` and `render-surface` from that sketch:
+Phase 2a implemented the target and `composite-buffer` from that sketch (and a
+`render-surface` that drew one surface at its committed position, since removed: the scene is
+the one drawing path, and a second one that ignored damage and scale was a trap):
 `PIXMAN_OP_SRC` for `xrgb8888` into a cleared target and `PIXMAN_OP_OVER` for `argb8888`, the
 conversion `0xAARRGGBB` ↔ `PIXMAN_a8r8g8b8`, and readback through the target's octet vector.
-Not yet: clip regions, scaling, transforms, buffer age and damage scissoring — the notes below
-are the plan for them, and the full-target repaint is honest until they exist.
+Phase 2b added the rest of the sketch: a **region** wrapper (`make-region`, `region-add`,
+`region-union`/`-intersect`/`-subtract`, `region-rectangles`) used for damage and clipping, the
+target's clip region (`target-set-clip`), **scaling and the eight buffer transforms**
+(`buffer-display-size`, `transform-matrix`, and `:width`/`:height`/`:transform` on
+`composite-buffer`), and **buffer age** for the nested path (D48, D49, D50).
+
+One pixman wart is load-bearing and measured rather than assumed: `pixman_image_fill_boxes`
+with a translucent `pixman_color_t` writes a *straight* alpha pixel and composites it as if it
+were premultiplied, so 50% white over green comes out opaque white. Opaque fills (every
+background and border) take that path; translucent ones are a repeated one-pixel premultiplied
+image composited with `OVER`, which blends exactly.
 
 Notes that matter for correctness and speed:
 
@@ -287,10 +298,18 @@ it. The consequences worth knowing:
   moment of its own choosing, so the presenter (attach + damage + commit) runs after
   `scene:scene-render`, never before it: committing a cleared target announces an empty frame and
   the window in the parent flickers or stays half-drawn (D38).
-- **Damage is still "everything".** The nested path damages the whole buffer because the
-  renderer still repaints the whole target (2b adds real damage to both).
-- **No scale, no transform.** The nested output is 1:1 with the parent surface; buffer
-  scale/transform are stored and not applied, as everywhere else in v0 (D29).
+- **Damage is what the frame painted.** The presenter is given the frame's damage (a region
+  in device pixels, or `:full`) and sends it to the parent as `wl_surface.damage` rectangles in
+  surface coordinates. A buffer the parent has not seen, or one older than two frames, is
+  damaged whole; anything else is the union of the frames it missed (D50).
+- **A frame with no pixels sends nothing.** The presenter is still called, so the slot is
+  returned and the frame is recorded, but nothing is attached or committed: an unchanged buffer
+  is already what the parent shows. Skipping that call entirely used to deadlock the session by
+  keeping both buffers busy (D50).
+- **Scale is a number, and the parent is told it.** A nested output at scale *N* advertises
+  `wl_output.scale` *N*, sets `wl_surface.set_buffer_scale` on the parent surface, and allocates
+  its parent buffers in device pixels — layout size times *N* — so a client that drew at the
+  output's scale is presented 1:1 (D49).
 
 ### 8.3 DRM/KMS with dumb buffers (phases 4-6)
 
@@ -369,7 +388,10 @@ The renderer and the input path are the two places where a GC pause is visible. 
   writes live in foreign memory or in a `wl_shm` mapping (D35); the only Lisp vectors handed
   to C are copied-from/into within the same `with-pointer-to-vector-data` block.
 - Damage regions are preallocated `pixman_region32_t` per output and per surface, cleared
-  rather than re-created.
+  rather than re-created. Phase 2b does this for the compositor's damage region and for the
+  scene's clip arithmetic (a pooled set of scratch regions, one index per draw item); what still
+  conses is the draw list itself, one item per node per frame, which is the honest remaining cost
+  until there is a frame-budget test to hold it to (§10's first rung).
 - Hot-path functions are compiled with `(optimize (speed 3) (safety 1))` and are periodically
   checked for new consing with `sb-ext:get-bytes-consed` around a scripted interaction.
 - Benchmarks in `tests/perf/` assert: bytes consed per frame, per pointer motion, and per

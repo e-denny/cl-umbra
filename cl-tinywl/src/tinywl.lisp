@@ -55,7 +55,7 @@ state tinywl.c keeps (the view list, the grabbed toplevel, the grab x/y) is the
 framework's scene, grab and seat already, and a second copy is a second thing that
 can disagree."))
 
-(defun make-tinywl (&key (width 1280) (height 800) (background #xFF000000)
+(defun make-tinywl (&key (width 1280) (height 800) (scale 1) (background #xFF000000)
                          (display-name "wayland-0")
                          (runtime-dir (uiop:getenv "XDG_RUNTIME_DIR"))
                          (reactor nil))
@@ -67,6 +67,7 @@ WAYLAND_DISPLAY default on purpose: a nested session needs WAYLAND_DISPLAY to na
 its *parent*, and a headless session started with one must not take that socket
 name."
   (let ((tinywl (cf:make-headless-compositor :width width :height height
+                                             :scale scale
                                              :background background
                                              :display-name display-name
                                              :runtime-dir runtime-dir
@@ -414,7 +415,7 @@ parity script meaningless."
              (cf:compositor-display (session-compositor session))))))
 
 (defun start (&key (mode :headless)
-                   (width 1280) (height 800)
+                   (width 1280) (height 800) (scale 1)
                    (background #xFF000000)
                    display-name
                    runtime-dir
@@ -430,11 +431,16 @@ headless session -- it is the only compositor on that runtime directory -- and
 \"tinywl-1\" nested, where the parent already owns a socket.  PUMP is the nested
 case's escape hatch for a parent in the same image (see CF.BACKEND.NESTED).
 When the parent's socket is not there, that is an error worth reporting before a
-window appears."
+window appears.
+
+SCALE is device pixels per layout coordinate: 2 makes the session render at the
+density of a HiDPI output (crisp text, twice the buffer), 1 is the old behaviour.
+A nested session tells the parent the same scale, so the parent still gives it the
+layout size it asked for (D49)."
   (ecase mode
     (:headless
      (let ((tinywl (make-tinywl
-                    :width width :height height
+                    :width width :height height :scale scale
                     :background background
                     :display-name (or display-name "wayland-0")
                     :runtime-dir (or runtime-dir (uiop:getenv "XDG_RUNTIME_DIR")))))
@@ -448,7 +454,7 @@ window appears."
 WAYLAND_DISPLAY in the environment"))
                        (nested:start-nested
                         :parent-path parent
-                        :width width :height height
+                        :width width :height height :scale scale
                         :display-name (or display-name "tinywl-1")
                         :runtime-dir (or runtime-dir
                                          (uiop:getenv "XDG_RUNTIME_DIR"))

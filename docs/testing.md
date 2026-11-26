@@ -54,11 +54,11 @@ ASDF. Assertions are Rove's own: `(ok FORM "description")` for a predicate, and
 `(ok (signals FORM 'condition-type))` for an expected error; a failure prints the test name,
 the assertion, its source location and the arguments' values.
 
-The scripts go through `wayland.test.runner`, which names the nine suites instead of letting
+The scripts go through `wayland.test.runner`, which names the twelve suites instead of letting
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 201 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 282 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -375,7 +375,38 @@ invariant (`x` in `[0, W-w]` for a window that fits, `[W-w, 0]` for one larger t
 — a shrunken output used to leave its windows half outside it and unreachable (D37's open
 question, closed by D46) — then puts the space back.
 
-All eighteen clauses pass. Two details worth knowing: the protocol clause
+Phase 2b (rendering) adds the nineteenth:
+
+19. **Scale, transform, damage and opaque culling** (`scripts/render-gate.sh`,
+    `scripts/render-gate.lisp`, `tests/c-client/wayland-scale-client.c`). A compiled
+    libwayland client draws one 64x32 buffer of four coloured quadrants and decides its own
+    `wl_surface.set_buffer_scale` and `set_buffer_transform`; the gate reads the frame back at
+    the device coordinates each case implies. At buffer scale 1 on a scale-1 output the quadrants
+    are 32x16 each and 2048 device pixels are drawn. On a *scale-2* output the same buffer is
+    magnified to 128x64 — the far device corner is the buffer's last pixel, the pixel past it is
+    background. At buffer scale 2 on a scale-2 output it is 1:1 again: 64x32 device pixels for a
+    32x16 layout, so a HiDPI client that drew at the output's scale is copied, not resampled.
+    Transform 90 (counter-clockwise) draws 32x64 with the buffer's right column on top — green
+    above red, white beside blue — and transform 180 turns it end for end; both are checked as
+    four quadrant samples plus an out-of-bounds pixel. The pointer is drawn 32x32 device pixels
+    on a scale-2 output (its body's white at device (12,16) from logical (5,5)), and a *nested*
+    session at scale 2 is checked from its parent's side: the parent's server saw
+    `buffer_scale 2`, a 200x160 buffer for a 100x80 layout, and the window drawn at 100x80 layout
+    pixels. Then, with no client at all, a scene of two opaque rectangles and a translucent veil
+    is moved five times; the last frame must repaint less than the whole output (60x41 of
+    120x90), at least one frame must be partial, and — the invariant the whole slice rests on —
+    the incrementally painted frame must equal a full repaint of the same scene *pixel for
+    pixel* (`cf:frame-octets` on both sides), with `cf:invalidate-output` producing exactly that
+    full repaint. Unit tests (`tests/unit/render.lisp`, suite 12, 22 tests) cover what the gate cannot
+    isolate: region union/intersect/subtract/translate, the eight transform matrices as numbers,
+    a scaled bitmap's blocks, a 64x32 buffer at scale 2 being a 32x16 *window* to hit testing,
+    the damage a moved node reports, an opaque window uncovering what it hid, the blend of a
+    premultiplied translucent rectangle, and the nested backend's buffer-age arithmetic (a slot
+    nobody has seen, a slot that missed one frame, one that missed a full frame, one whose
+    missing frame was never recorded, and a history that keeps two frames and reuses two
+    regions).
+
+All nineteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs
@@ -461,8 +492,10 @@ Descriptors: the fuzzer's "plausible" case picks real requests, and since phase 
 descriptor arriving on a request that declares none — surplus-fd detection, a phase-0
 leftover that now has a place to be tested.
 
-Not yet covered: the protocol content of phases 2b and later (regions, transforms, buffer
-scale, pool resize), and anything that needs `xdg-shell`.
+Not yet covered *by the fuzzers* -- the requests themselves are implemented and gated: the
+protocol content of phases 2b and later (`wl_region`, `set_buffer_transform`,
+`set_buffer_scale`, `wl_shm_pool.resize`) has no hand-written case here yet, and nothing that
+needs `xdg-shell` has one either.
 
 ## 5. Interop matrix
 
@@ -511,7 +544,10 @@ scene fixture → render → read-pixels → PNG → hash
   exact equality across pixman versions.
 - One fixture per behaviour, not per protocol: opaque stacking, alpha blending, buffer
   scale 2, fractional scale 1.5, output transform 90/180/270, damage-only repaint,
-  subsurface offsets, popup positioning, cursor composite, letterboxing.
+  subsurface offsets, popup positioning, cursor composite, letterboxing. Clause 19 covers the
+  scale, transform and damage-only-repaint behaviours as assertions rather than hashes (a
+  hash tells you it changed, an assertion tells you which quadrant moved); the single PNG it
+  writes is evidence, not a comparison.
 - Every fixture also runs through the GL renderer in phase 5 and must match within tolerance;
   that is the acceptance test for "the GPU path is correct".
 

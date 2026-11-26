@@ -29,8 +29,19 @@
    ;; Did a client ever name this surface as its pointer's image?  Then it is a
    ;; cursor image for good: the protocol has no way to give the surface another
    ;; role, and drawing it would put a cursor at the output's origin (D40).
-   (pointer-image-p :initform nil :accessor surface-pointer-image-p))
+   (pointer-image-p :initform nil :accessor surface-pointer-image-p)
+   ;; The damage this surface has reported since a frame last painted it, in
+   ;; surface-local coordinates.  Accumulated at every commit and cleared by the
+   ;; frame that drew those pixels: it is the *content* half of a frame's damage,
+   ;; the geometry half being the difference between two draw lists (D48).
+   (damage-since-frame :initform nil :accessor surface-content-damage))
   (:documentation "A server surface with the framework's own state on top (D7)."))
+
+(defmethod srv:surface-damage-since-frame ((surface cf-surface))
+  (surface-content-damage surface))
+
+(defmethod (setf srv:surface-damage-since-frame) (damage (surface cf-surface))
+  (setf (surface-content-damage surface) damage))
 
 (defclass cf-compositor (srv:compositor)
   ((headless :initarg :headless :initform nil :accessor cf-compositor-headless))
@@ -47,6 +58,25 @@ SLOT-VALUE shows a different one."))
   ((display :initarg :display :reader compositor-display)
    (width :initarg :width :accessor compositor-width)
    (height :initarg :height :accessor compositor-height)
+   ;; Device pixels per layout coordinate (D49).  The output, the scene and every
+   ;; policy stay in layout coordinates; only the target and a client's buffer
+   ;; scale care, and they both read this one number.
+   (scale :initarg :scale :initform 1 :accessor compositor-scale)
+   ;; What the last frame drew, so the next frame can diff against it, and the
+   ;; region that diff (plus the clients' own damage) produces (D48).
+   (last-items :initform nil :accessor compositor-last-items)
+   ;; Whether a frame has been drawn at all.  A separate flag because the item
+   ;; list of an empty scene is NIL, which would otherwise look like "no frame
+   ;; yet" and turn every frame into a full repaint (an empty output is a real
+   ;; state, and repainting it costs nothing -- but knowing the difference is what
+   ;; makes the damage accounting honest).
+   (frame-history-p :initform nil :accessor compositor-frame-history-p)
+   (damage-region :initform nil :accessor compositor-damage-region)
+   ;; How many frames repainted less than the whole output, and the bounding box of
+   ;; the last frame's damage (:full or (X Y WIDTH HEIGHT)): evidence a gate can
+   ;; read instead of inferring it from timing.
+   (partial-frame-count :initform 0 :accessor compositor-partial-frame-count)
+   (last-damage :initform :full :accessor compositor-last-damage)
    (background :initarg :background :initform #xFF000000 :reader compositor-background)
    (target :initarg :target :accessor compositor-target)
    ;; A backend supplies the frame's destination and its presentation.  NIL is the
@@ -103,16 +133,20 @@ SLOT-VALUE shows a different one."))
    "A headless compositor: a display with wl_compositor, wl_shm, wl_output and
 xdg_wm_base, a pixman target, and the surfaces committed to it."))
 
-(defun send-output-events (output width height)
-  "The initial events of the headless output, done last (docs/protocol-layer.md §8)."
+(defun send-output-events (output width height &key (scale 1))
+  "The initial events of the headless output, done last (docs/protocol-layer.md §8).
+
+WIDTH and HEIGHT are layout coordinates; the mode is the hardware size, which is
+those times SCALE.  A client uses wl_output.scale to decide its buffer scale, so
+this one event is what makes a scale-2 output crisp instead of upscaled (D49)."
   (wl-output.geometry output 0 0 0 0 0 "cl-umbra" "headless" 0)
-  (wl-output.mode output 1 width height 60000)
-  (wl-output.scale output 1)
+  (wl-output.mode output 1 (* width scale) (* height scale) 60000)
+  (wl-output.scale output scale)
   (wl-output.name output "HEADLESS-1")
   (wl-output.description output "cl-compositor-framework headless output")
   (wl-output.done output))
 
-(defun make-headless-compositor (&key (width 256) (height 256)
+(defun make-headless-compositor (&key (width 256) (height 256) (scale 1)
                                       (display-name (uiop:getenv "WAYLAND_DISPLAY"))
                                       (runtime-dir (uiop:getenv "XDG_RUNTIME_DIR"))
                                       (background #xFF000000)
@@ -136,20 +170,22 @@ the framework without a hook table (D7: classes, not vtables)."
                               :name "seat0"
                               :capabilities (logior srv:+wl-seat-capability-pointer+
                                                     srv:+wl-seat-capability-keyboard+)))
+         (scale (max 1 (round scale)))
          (compositor (make-instance compositor-class
                                     :display display
                                     :width width
                                     :height height
+                                    :scale scale
                                     :background background
                                     :seat seat
-                                    :scene (scene:make-scene width height)
-                                    :target (render:make-target width height))))
+                                    :scene (scene:make-scene width height :scale scale)
+                                    :target (render:make-target (* width scale) (* height scale)))))
     ;; wl_compositor version 3: weston's window.c clients bind 3 unconditionally
     ;; (they were the reason this was not v1), so v3 is the lowest honest version
     ;; that lets a real pointer-using client connect.  v3 adds one request,
-    ;; set_buffer_scale, which this server accepts and validates but draws at 1:1
-    ;; until the renderer scales (2b); the output advertises scale 1, so a
-    ;; well-behaved client never asks for more.  v4 would promise damage_buffer.
+    ;; set_buffer_scale, which is honoured -- the output advertises the same scale
+    ;; and the renderer divides a client's buffer scale back out (D49).  v4 would
+    ;; promise damage_buffer.
     (srv:add-global display
                                :interface "wl_compositor"
                                :version 3
@@ -174,7 +210,14 @@ the framework without a hook table (D7: classes, not vtables)."
                                        (setf (gethash (srv:resource-client resource)
                                                       (compositor-outputs compositor))
                                              resource)
-                                       (send-output-events resource width height)))
+                                       ;; Read at bind time, not captured at start:
+                                       ;; a client that binds after the output was
+                                       ;; resized (a nested session following its
+                                       ;; parent) must be told the size it has now.
+                                       (send-output-events resource
+                                                           (compositor-width compositor)
+                                                           (compositor-height compositor)
+                                                           :scale (compositor-scale compositor))))
     (srv:add-global display
                                :interface "xdg_wm_base"
                                :version 1
@@ -451,11 +494,14 @@ something to draw now, without reaching into the compositor's state."
 ;;; ---------------------------------------------------------------------------
 
 (defmethod srv:surface-committed ((surface cf-surface) damage)
-  "Mark the output dirty and arrange one render at the end of this cycle.
+  "Mark the output dirty, remember what the client damaged, arrange one render.
 
-The damage list is ignored for now -- v0 repaints the whole target, and damage
-tracking is 2b's job (docs/memory-and-rendering.md §7)."
-  (declare (ignore damage))
+DAMAGE is the rectangles the client itself said changed, in surface-local
+coordinates.  They are kept on the surface until a frame paints them, because a
+frame is the only thing that knows where the surface is *now* -- the mapping to
+output pixels happens once per frame, in the scene (D48).  A commit with no damage
+at all (a client that only changed a region, or destroyed a callback) damages
+nothing: the frame that follows it has nothing to draw and will not draw it."
   (let* ((compositor (cf-compositor-headless (srv:surface-owner surface))))
     (unless (member surface (compositor-surfaces compositor))
       (setf (compositor-surfaces compositor)
@@ -481,6 +527,11 @@ tracking is 2b's job (docs/memory-and-rendering.md §7)."
                  (typep (grab:grab-node grab) 'scene:buffer-node)
                  (eq (scene:buffer-node-surface (grab:grab-node grab)) surface))
         (grab:grab-anchored grab)))
+    ;; What the client says it changed, unioned with what it said before: two
+    ;; commits between frames are two damages, and the frame owes both.
+    (when damage
+      (setf (surface-content-damage surface)
+            (append damage (surface-content-damage surface))))
     (mark-dirty compositor)
     surface))
 
@@ -1060,6 +1111,53 @@ that the render loop is walking; a session must not accumulate tombstones (D26).
               (not (srv:surface-mapped-p surface)))
       (forget-surface compositor surface))))
 
+(defun compositor-device-width (compositor)
+  "The target's width in device pixels: the layout width times the output scale."
+  (* (compositor-width compositor) (compositor-scale compositor)))
+
+(defun compositor-device-height (compositor)
+  "The target's height in device pixels."
+  (* (compositor-height compositor) (compositor-scale compositor)))
+
+(defun invalidate-output (compositor)
+  "Repaint the whole output on the next frame; returns COMPOSITOR.
+
+The honest escape hatch, and a REPL function in its own right: a mode change, a
+scale change, a rearranged stacking order, or a person who suspects the screen is
+stale calls it instead of waiting for something to be damaged.  A frame after it
+repaints everything, and the frame after that goes back to damage (D48)."
+  (setf (compositor-last-items compositor) nil
+        (compositor-frame-history-p compositor) nil)
+  (mark-dirty compositor)
+  compositor)
+
+(defun frame-damage (compositor items required)
+  "The device region this frame has to repaint, or :FULL.
+
+Two answers are merged here.  The *difference* between this frame's draw list and
+the last one, plus the damage clients reported since (SCENE-DAMAGE-BETWEEN), says
+what changed; REQUIRED -- what a backend with its own buffers says those buffers
+can still be trusted to hold -- is the floor under it (D50).  REQUIRED is :FULL,
+a region, or NIL for a target that keeps its pixels (headless)."
+  (let ((previous (compositor-last-items compositor)))
+    (cond
+      ((eq required :full) :full)
+      ((not (compositor-frame-history-p compositor)) :full)
+      (t
+       (let ((damage (or (compositor-damage-region compositor)
+                         (setf (compositor-damage-region compositor)
+                               (render:make-region)))))
+         (render:region-clear damage)
+         (cond
+           ((eq (scene:scene-damage-between previous items damage) :full) :full)
+           (t
+            (when required
+              (render:region-union damage damage required))
+            (render:region-intersect-rect
+             damage damage 0 0 (compositor-device-width compositor)
+             (compositor-device-height compositor))
+            damage)))))))
+
 (defun render-frame (compositor)
   "Draw the scene, present the frame, and fire the callbacks; returns the target.
 
@@ -1069,19 +1167,25 @@ frame when a buffer comes free.
 
 Frame callbacks fire here, after the draw and the presentation, which is the only
 moment the protocol allows (docs/framework.md §3).  Buffers are released after
-compositing and before the callbacks, for the clients whose surfaces were actually
-drawn (D25).
+compositing and before the callbacks, for the clients whose surfaces were mapped
+with a buffer (D25).
 
 The presenter runs after the scene is drawn, never before: it attaches and commits
 the target, and a target can be shared memory another process is compositing from
 (the nested backend's parent).  Committing a target that holds only the background
 paint makes every frame arrive blank, and the parent shows a window that is black
 or half-drawn depending on when it happens to read -- the flicker the manual test
-found (D38)."
+found (D38).
+
+A frame repaints its damage and nothing else.  A frame with no damage at all draws
+nothing and presents nothing -- but still releases buffers and fires callbacks,
+because those are answers to clients, not to pixels (D48)."
   (let* ((preparer (compositor-frame-preparer compositor))
-         (target (if preparer
-                     (funcall preparer compositor)
-                     (compositor-target compositor))))
+         (target nil)
+         (required nil))
+    (if preparer
+        (multiple-value-setq (target required) (funcall preparer compositor))
+        (setf target (compositor-target compositor)))
     (unless target
       (return-from render-frame nil))
     (setf (compositor-target compositor) target)
@@ -1095,19 +1199,38 @@ found (D38)."
       ;; thing a frame asks for (D41).  Before the draw, so the frame that is about
       ;; to be presented already has the right picture.
       (sync-cursor-image compositor)
-      (render:fill-target target (compositor-background compositor))
       (prune-surfaces compositor)
       ;; A popup's place is a function of its parent's place, and its parent may have
       ;; moved since the last frame (a drag, a resize, a cycle).  Asked here, before
       ;; the draw, for the same reason the pointer's image is (D41, D44).
       (sync-popup-positions compositor)
-      (let ((drawn (scene:scene-render scene target)))
+      ;; The tree is final now, so this is the one list both the damage and the
+      ;; draw read: they cannot disagree about what the frame contains (D48).
+      (let* ((items (scene:scene-draw-list scene))
+             (damage (frame-damage compositor items required))
+             (full (eq damage :full))
+             (empty (and (not full) (render:region-empty-p damage)))
+             (drawn '()))
+        (unless empty
+          (when (not full)
+            (render:target-set-clip target damage))
+          (render:fill-target target (compositor-background compositor))
+          (render:target-clear-clip target))
+        ;; Even an empty frame walks the items: no pixel is touched, but every
+        ;; mapped surface comes back in DRAWN, so its buffer is released and its
+        ;; frame callback fires.  A client that asks for a frame without damaging
+        ;; anything is waiting for exactly that, and a nested backend needs it to
+        ;; give back the parent buffer it was holding (D25, D48).
+        (setf drawn (scene:scene-render-items scene target :items items
+                                                    :damage (unless full damage)))
         ;; The pixels are in the target now, so this is the first moment at which
         ;; presenting them is truthful.  Presenting first was a real bug, not a
-        ;; style choice: see this function's docstring.
+        ;; style choice: see this function's docstring.  An empty frame is still
+        ;; announced: the backend decides whether that means anything to present
+        ;; (a nested buffer already holding these pixels has nothing to send).
         (let ((presenter (compositor-frame-presenter compositor)))
           (when presenter
-            (funcall presenter compositor target)))
+            (funcall presenter compositor target (if full :full damage))))
         (dolist (surface drawn)
           (enter-surface compositor surface)
           ;; The pixels are in the target now, so the client may have its buffer
@@ -1115,7 +1238,15 @@ found (D38)."
           ;; callback already knows which buffer is free.  A double-buffered client
           ;; deadlocks without this (D25).
           (srv:release-surface-buffer surface)
-          (srv:surface-presented surface)))
+          (srv:surface-presented surface))
+        ;; The damage has been paid; the next frame starts from this one's list.
+        (setf (compositor-frame-history-p compositor) t
+              (compositor-last-items compositor) items)
+        (scene:scene-consume-damage items)
+        (unless full
+          (incf (compositor-partial-frame-count compositor)))
+        (setf (compositor-last-damage compositor)
+              (if full :full (render:region-bounds damage))))
       (incf (compositor-frame-count compositor))
       (setf (compositor-dirty-p compositor) nil)
       (setf (compositor-surfaces compositor)
@@ -1162,25 +1293,56 @@ only the parts the framework owns change here."
           (scene:scene-height (compositor-scene compositor)) height)
     (unless (compositor-frame-preparer compositor)
       (render:destroy-target (compositor-target compositor))
-      (setf (compositor-target compositor) (render:make-target width height))
+      (setf (compositor-target compositor)
+            (render:make-target (* width (compositor-scale compositor))
+                                (* height (compositor-scale compositor))))
       (render:fill-target (compositor-target compositor)
                           (compositor-background compositor)))
     ;; The windows are the size they are; the output is not.  Anything that no longer
     ;; fits is brought back inside (D46).
     (reclamp-windows compositor)
+    ;; The target is new (headless) or the parent's buffer is (nested), so nothing
+    ;; it holds can be trusted: this is a full repaint (D48).
+    (setf (compositor-last-items compositor) nil
+          (compositor-frame-history-p compositor) nil)
     (setf (compositor-dirty-p compositor) t))
   compositor)
 
 (defun write-frame-png (compositor path)
-  "Write the current target to PATH as a PNG: the screenshot, and the gate's artefact."
+  "Write the current target to PATH as a PNG: the screenshot, and the gate's artefact.
+
+The image is the target's own size, so a scale-2 output writes 2x the layout size:
+a screenshot of what a screen would show, not of the coordinate space behind it."
   (let ((target (compositor-target compositor)))
     (png:write-png path (render:target-octets-copy target)
-                   (compositor-width compositor)
-                   (compositor-height compositor))))
+                   (render:target-width target)
+                   (render:target-height target))))
 
 (defun frame-pixel (compositor x y)
-  "The premultiplied 0xAARRGGBB pixel at X, Y of the current target."
+  "The premultiplied 0xAARRGGBB pixel at layout (X, Y) of the current target.
+
+X and Y are output-local *layout* coordinates, which is the space every policy and
+every test speaks; on a scale-2 output the pixel read is that coordinate's
+top-left device pixel.  A caller that wants a device pixel calls
+FRAME-PIXEL-DEVICE."
+  (render::target-pixel (compositor-target compositor)
+                        (* x (compositor-scale compositor))
+                        (* y (compositor-scale compositor))))
+
+(defun frame-octets (compositor)
+  "A copy of the current target's pixels (BGRA octets): a screenshot, or evidence.
+
+Copied out of the mapping, so a caller may keep it while the next frame is drawn --
+which is how a gate compares an incremental frame with a full one."
+  (render:target-octets-copy (compositor-target compositor)))
+
+(defun frame-pixel-device (compositor x y)
+  "The premultiplied 0xAARRGGBB pixel at device (X, Y) of the current target."
   (render::target-pixel (compositor-target compositor) x y))
+
+(defun output-damage-bounds (compositor)
+  "What the last frame repainted: :FULL, or (X Y WIDTH HEIGHT) of the damage."
+  (compositor-last-damage compositor))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Popups: placement, the grab, and the way back

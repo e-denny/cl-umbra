@@ -70,7 +70,10 @@ does not compile the world.
 
 The framework's files are flat (`render-pixman.lisp`, `scene.lisp`, `xkb.lisp`, `png.lisp`,
 `headless.lisp`) and will move into `render/`, `scene/` and `backend/` when there is more than
-one of each; the module tree drawn below the core is the plan for phases 2b-5.
+one of each; the module tree drawn below the core is the plan for phases 2b-5, and 2b's part of
+it (damage, buffer age, scale and transforms) landed inside `render-pixman.lisp`, `scene.lisp`
+and the two backends rather than as the separate `cf.render.damage` module the table in
+`docs/framework.md` §1 still lists.
 
 What is built, so a reader can tell the shape from the plan: the core (`wayland.wire`,
 `wayland.ffi`, `wayland.object`, `wayland.io`, `wayland.reactor`, `wayland.protocol`,

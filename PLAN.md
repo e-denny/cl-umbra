@@ -246,10 +246,19 @@ not four) and pool/buffer lifetime (`wl_shm_pool.destroy` may precede the buffer
 buffer keeps the mapping). Damage tracking, regions, transforms, pool resize and the scene
 graph are the 2b slice.
 
-**Status (phase 2b, partly done elsewhere):** `wl_region` (phase 3b), `wl_shm_pool.resize`
-(phase 3b), input regions acted on and `cf.scene` v0 (phase 3c) landed early because real
-clients needed them. Still open: damage regions with buffer age, buffer scale/transform
-actually applied, opaque-region culling.
+**Status (phase 2b): met.** `wl_region` (phase 3b), `wl_shm_pool.resize` (phase 3b), input
+regions acted on and `cf.scene` v0 (phase 3c) landed early because real clients needed them;
+this slice added the rest. **Damage** is the difference between this frame's draw list and the
+last one plus the damage each client reported, painted through a pixman clip region, with
+opaque surfaces culled and a frame that paints nothing still answering its clients (D48).
+**Buffer scale and the eight buffer transforms** are applied: the scene is in layout
+coordinates, the target in device pixels, and the conversion happens once per frame, with a
+client's buffer scale divided out (D49). **Buffer age** is tracked per slot for the nested
+backend's two buffers, which damage the parent surface with what they painted (D50). Gate
+clause 19 is a real client at buffer scale 1 and 2 on scale-1 and scale-2 outputs, with
+transforms 90 and 180, plus the invariant that an incrementally painted frame equals a full
+repaint pixel for pixel. What is still open: fractional scale (`wp-fractional-scale`, phase 5),
+`wp_viewport`, damage *buffer* coordinates (v4), and a themed cursor per scale (phase 5).
 
 ### Phase 3 — `cl-tinywl`, nested (3-4 weeks)
 
@@ -299,8 +308,8 @@ object lifetimes (`scripts/xdg-shell-gate.sh`).
 keymap generated from a table and sent as a memfd with `repeat_info` (D28); explicit keyboard
 and pointer focus that sends `set_activated` to the focused toplevel (D27); synthetic input as
 the backend seam, with `cf:inject-*` for tests; `wl_region` as a real rectangle set (D29);
-`wl_compositor` v3 with `set_buffer_scale`/`set_buffer_transform` accepted and drawn 1:1 until
-2b; `wl_shm_pool.resize` that grows and checks the file (D30); and end-of-cycle flushing, which
+`wl_compositor` v3 with `set_buffer_scale`/`set_buffer_transform` accepted (2b's renderer
+applies them, D49); `wl_shm_pool.resize` that grows and checks the file (D30); and end-of-cycle flushing, which
 input events need because they are produced outside any client's readable event. Gate clause
 12: `weston-eventdemo` prints the motion, button, scroll and key events we inject — including
 keycode 16 translated to "Q" with the shift mask — and a libxkbcommon probe parses the keymap

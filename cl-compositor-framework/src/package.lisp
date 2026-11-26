@@ -20,12 +20,35 @@ buffers, which are read in place: no copy, no texture, no upload.")
    #:make-target-over-pointer
    #:destroy-target
    #:target-octets-copy
+   #:target-width
+   #:target-height
+   #:target-stride
+   #:target-set-clip
+   #:target-clear-clip
    #:fill-target
    #:fill-rect
    #:composite-buffer
    #:composite-bitmap
-   #:render-surface
    #:pixman-format-for-shm
+   #:buffer-display-size
+   #:transform-matrix
+   #:region
+   #:make-region
+   #:destroy-region
+   #:region-clear
+   #:region-empty-p
+   #:region-add
+   #:region-add-box
+   #:region-add-box
+   #:region-union
+   #:region-intersect
+   #:region-subtract
+   #:region-copy
+   #:region-intersect-rect
+   #:region-set-rect
+   #:region-translate
+   #:region-rectangles
+   #:region-bounds
    #:+pixman-op-src+
    #:+pixman-op-over+))
 
@@ -70,9 +93,14 @@ already speak in keycodes and masks, so that change stays inside this package.")
                 #:surface-current-y
                 #:surface-input-region
                 #:surface-mapped-p
+                #:surface-opaque-region
+                #:surface-buffer-scale
+                #:surface-buffer-transform
+                #:surface-damage-since-frame
                 #:resource-destroyed-p
                 #:shm-buffer-width
-                #:shm-buffer-height)
+                #:shm-buffer-height
+                #:shm-buffer-format)
   (:documentation
    "The scene graph: nodes with positions, a stacking order, hit testing and
 compositing (docs/framework.md §4).  Policy stays outside; this package knows
@@ -93,7 +121,21 @@ nothing about seats, toplevels or focus.")
    #:scene-add-node
    #:scene-remove-node
    #:scene-hit-test
+   #:scene-scale
    #:scene-render
+   #:scene-render-items
+   #:scene-draw-list
+   #:scene-damage-between
+   #:scene-consume-damage
+   #:surface-layout-size
+   #:draw-item
+   #:draw-item-kind
+   #:draw-item-node
+   #:draw-item-surface
+   #:draw-item-x
+   #:draw-item-y
+   #:draw-item-width
+   #:draw-item-height
    ;; nodes
    #:scene-node
    #:node-parent
@@ -238,6 +280,14 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:compositor-display
    #:compositor-width
    #:compositor-height
+   #:compositor-scale
+   #:compositor-device-width
+   #:compositor-device-height
+   #:invalidate-output
+   #:output-damage-bounds
+   #:compositor-partial-frame-count
+   #:frame-pixel-device
+   #:frame-octets
    #:resize-compositor
    #:compositor-surfaces
    #:compositor-shells
@@ -349,6 +399,14 @@ owns, and the presentation step is attach + damage + commit.")
                 #:compositor-display
                 #:compositor-width
                 #:compositor-height
+                #:compositor-scale
+                #:compositor-device-width
+                #:compositor-device-height
+                #:invalidate-output
+                #:output-damage-bounds
+                #:compositor-partial-frame-count
+                #:frame-pixel-device
+                #:frame-octets
                 #:resize-compositor
                 #:compositor-surfaces
                 #:compositor-shells
@@ -418,7 +476,6 @@ owns, and the presentation step is attach + damage + commit.")
                 #:fill-rect
                 #:composite-buffer
                 #:composite-bitmap
-                #:render-surface
                 #:pixman-format-for-shm)
   (:import-from #:cf.backend.headless.png
                 #:write-png)
@@ -441,6 +498,14 @@ docs/framework.md §1 follow.")
    #:compositor-display
    #:compositor-width
    #:compositor-height
+   #:compositor-scale
+   #:compositor-device-width
+   #:compositor-device-height
+   #:invalidate-output
+   #:output-damage-bounds
+   #:compositor-partial-frame-count
+   #:frame-pixel-device
+   #:frame-octets
    #:resize-compositor
    #:compositor-surfaces
    #:compositor-shells
@@ -504,12 +569,16 @@ docs/framework.md §1 follow.")
    ;; the renderer
    #:make-target
    #:make-target-over-pointer
+   #:make-region
+   #:destroy-region
+   #:region-empty-p
+   #:region-bounds
+   #:region-rectangles
    #:destroy-target
    #:fill-target
    #:fill-rect
    #:composite-buffer
    #:composite-bitmap
-   #:render-surface
    #:pixman-format-for-shm
    ;; protocol subclasses
    #:cf-surface

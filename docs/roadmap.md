@@ -127,11 +127,13 @@ or `(wayland.server:make-demo-display)` from the REPL plus
 
 ## Phase 2 — Core globals, shm, headless, pixman (6-8 weeks)
 
-**Status: phase 2a landed.** `wl_shm`, the `wl_compositor`/`wl_surface` core state machine, the
-headless compositor, the pixman renderer and readback are in; regions, transforms, buffer
-scale, pool resize, damage tracking and the scene graph are the 2b slice, and the ticks below
-say which is which. Gate clause 10: a libwayland shm client draws through our compositor and
-the captured frame matches, pixel for pixel.
+**Status: phases 2a and 2b landed.** `wl_shm`, the `wl_compositor`/`wl_surface` core state
+machine, the headless compositor, the pixman renderer, readback, regions, transform and buffer
+scale, damage tracking with buffer age and opaque culling are in, as is the scene graph (PHASE
+3c landed it early). Gate clause 10: a libwayland shm client draws through our compositor and
+the captured frame matches, pixel for pixel; gate clause 19: the same client at buffer scale 1
+and 2, with 90- and 180-degree transforms, and an incremental frame that equals a full repaint.
+The ticks below say which is which.
 
 `cf.types.compositor`
 - [x] `wl_compositor.create_surface`; the surface state machine's core
@@ -140,9 +142,8 @@ the captured frame matches, pixel for pixel.
 - [x] surface pending/current state: attach, damage, commit, frame callbacks
 - [x] input regions acted on: hit testing honours them, and an empty region makes a surface
       click-through (phase 3c, D31.4)
-- [ ] opaque regions acted on (the opaque optimisation is 2b; the rectangles are stored and
-      snapshotted)
-- [ ] transform, scale, buffer scale (2b)
+- [x] opaque regions acted on: an opaque surface culls what is under it (phase 2b, D48)
+- [x] transform, scale, buffer scale (phase 2b, D49)
 - [x] `commit`: apply, release the replaced buffer, hand damage to the compositor
 - [x] `wl_surface.frame` → `done` after presentation, never at commit
 - [ ] error cases: no role, invalid scale, invalid transform, bad size (2b)
@@ -150,7 +151,7 @@ the captured frame matches, pixel for pixel.
 `cf.types.shm`
 - [x] pool fd → `mmap` (`PROT_READ`), descriptor closed with the pool object; buffers keep the
       mapping alive, the last buffer unmaps it
-- [ ] `wl_shm_pool.resize` (needs `mremap` and the in-flight-buffer rule; 2b)
+- [x] `wl_shm_pool.resize` (phase 3b)
 - [x] `create_buffer` with the §3 validation (stride, offset, 64-bit bounds, dimensions)
 - [x] format table + `wl_shm.format` ordering (`argb8888`, `xrgb8888`)
 - [x] `wl_buffer.destroy` / `release` exactly-once
@@ -177,8 +178,10 @@ the captured frame matches, pixel for pixel.
 **Gate:** `weston-simple-shm` renders into the headless backend and the PNG matches the
 reference within tolerance; surface-state trace tests pass; malicious-pool tests pass.
 Done in phase 3a for the first half (a real client draws through us; the pixel assertions are
-structural rather than a golden image, which arrives with 2b's damage work); surface-state
-trace tests and the malicious-pool cases are in `wayland.test.server`.
+structural rather than hashes, which is still the choice after 2b -- clause 19 asserts the
+quadrants each scale and transform implies), and completed by clause 10's frame and clause 19's
+scale/transform/damage checks; surface-state trace tests and the malicious-pool cases are in
+`wayland.test.server`.
 
 **Demo:** a client's pixels in a PNG, produced with no libwayland in the process.
 

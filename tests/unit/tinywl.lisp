@@ -41,13 +41,13 @@
     (wayland.ffi:chmod-path (string-right-trim "/" path) #o700)
     path))
 
-(defmacro with-tinywl ((tinywl &key (width 512) (height 512)) &body body)
+(defmacro with-tinywl ((tinywl &key (width 512) (height 512) (scale 1)) &body body)
   "A tinywl compositor on a private socket, and a quiet server."
   (let ((directory (gensym "DIRECTORY")))
     `(let ((,directory (make-test-directory))
            (srv:*log-level* :warn))
        (unwind-protect
-            (let ((,tinywl (tinywl:make-tinywl :width ,width :height ,height
+            (let ((,tinywl (tinywl:make-tinywl :width ,width :height ,height :scale ,scale
                                                :display-name "tinywl-test-0"
                                                :runtime-dir ,directory)))
               (unwind-protect (locally ,@body)
@@ -325,6 +325,29 @@ connection would make this a gate rather than a test."
       (cf:render-frame tinywl)
       (ok (= *background* (cf:frame-pixel tinywl 199 119))
           "a pixel only the new target has is readable"))))
+
+(deftest a-scaled-session-draws-at-the-outputs-density
+  ;; --scale N is how a session renders for a HiDPI output: the layout size the
+  ;; session was asked for does not change, the target is N times as many pixels,
+  ;; and a window's pixels land N pixels per layout pixel (D49).  A tinywl session
+  ;; is where the number is *reached*: the flag goes in at the command line, through
+  ;; START, to the compositor and the scene, and this is the arithmetic at the end.
+  (with-tinywl (tinywl :width 100 :height 80 :scale 2)
+    (ok (= 2 (cf:compositor-scale tinywl)) "the output is at scale 2")
+    (ok (= 100 (cf:compositor-width tinywl)) "its layout width is unchanged")
+    (ok (= 200 (cf:compositor-device-width tinywl)) "its target is twice as wide")
+    (ok (= 2 (scene:scene-scale (cf:compositor-scene tinywl)))
+        "and the scene converts with the same number")
+    ;; A rectangle is enough to show where layout becomes device pixels: a window
+    ;; needs a real shm buffer, and that is the render gate's business.
+    (scene:scene-add-node (cf:compositor-scene tinywl)
+                          (scene:make-rect-node 40 30 #xFF00FF00) :x 10 :y 10)
+    (setf (cf:compositor-cursor-visible-p tinywl) nil)
+    (cf:render-frame tinywl)
+    (ok (= #xFF00FF00 (cf:frame-pixel-device tinywl 20 20))
+        "the rectangle starts at device (20,20), which is layout (10,10)")
+    (ok (= *background* (cf:frame-pixel-device tinywl 19 19))
+        "and not one device pixel earlier")))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Finding the parent

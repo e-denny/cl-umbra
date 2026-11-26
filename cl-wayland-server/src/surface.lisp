@@ -37,6 +37,26 @@ compositor specialises this to mark its output dirty and schedule a frame.")
     (declare (ignore surface damage))
     nil))
 
+(defgeneric surface-damage-since-frame (surface)
+  (:documentation
+   "The damage SURFACE has reported since a frame last painted it, in
+surface-local coordinates: a list of (x y width height), or NIL.
+
+The protocol layer merely carries it.  A compositor accumulates here -- every
+commit's damage adds to it -- and clears it once a frame has painted those pixels,
+which is what makes a partial repaint possible without asking the client again
+(D48).  The default is NIL: a transport-only server has no frames.")
+  (:method ((surface surface))
+    (declare (ignore surface))
+    nil))
+
+(defgeneric (setf surface-damage-since-frame) (damage surface)
+  (:documentation
+   "Record DAMAGE as what a frame still owes SURFACE; NIL once it has been paid.")
+  (:method (damage (surface surface))
+    (declare (ignore damage surface))
+    nil))
+
 (defgeneric surface-presented (surface)
   (:documentation
    "The frame containing SURFACE's current contents has been presented, so its
@@ -118,36 +138,36 @@ wl_display.delete_id and the id becomes reusable."
       (release-shm-buffer buffer))))
 
 (defmethod wl-surface.set-buffer-transform ((surface surface) transform)
-  "Accept the transform a v2 client may set; apply none of it yet.
+  "Accept the transform a v2 client may set, and keep it for the renderer.
 
-The protocol has no error enum entry for a transform that is merely unimplemented,
-so the honest thing is to store it, say so once at :debug, and let 2b's renderer
-start honouring it.  Values outside the enum are a real error."
+This layer only checks and stores: turning the buffer is drawing, which belongs to
+the compositor's renderer, and it reads the value back at frame time (D49).  Values
+outside the enum are a real error."
   (when (or (minusp transform) (> transform 7))
     (protocol-error (resource-client surface) (resource-id surface)
                     +wl-surface-error-invalid-transform+
                     "transform ~D is not a wl_output.transform value" transform))
   (setf (surface-buffer-transform surface) transform)
   (when (plusp transform)
-    (log-message :debug "client ~D: surface ~D transform ~D stored, not applied yet"
+    (log-message :debug "client ~D: surface ~D buffer transform ~D"
                  (client-id (resource-client surface)) (resource-id surface)
                  transform))
   surface)
 
 (defmethod wl-surface.set-buffer-scale ((surface surface) scale)
-  "Accept a positive buffer scale; draw at 1:1 until the renderer scales.
+  "Accept a positive buffer scale, and keep it for the renderer.
 
-The headless output advertises scale 1, so a client that respects the output sets
-1 and nothing is lost.  A client that sets 2 anyway gets a correctly cropped
-window at half the size it expected, which is a documented 2b gap -- not a silent
-protocol error, and not a promise the version bump made."
+The surface's layout size is its buffer divided by this, so hit testing, configure
+sizes and grabs all follow a client that drew at a higher density; the renderer
+divides it out at draw time (D49).  A compositor that advertised scale 2 and ignored
+this would show a client's window at half the size it expected."
   (unless (plusp scale)
     (protocol-error (resource-client surface) (resource-id surface)
                     +wl-surface-error-invalid-scale+
                     "buffer scale ~D is not positive" scale))
   (setf (surface-buffer-scale surface) scale)
   (unless (= scale 1)
-    (log-message :debug "client ~D: surface ~D buffer scale ~D stored, drawn 1:1"
+    (log-message :debug "client ~D: surface ~D buffer scale ~D"
                  (client-id (resource-client surface)) (resource-id surface) scale))
   surface)
 

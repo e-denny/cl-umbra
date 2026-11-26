@@ -26,7 +26,7 @@ decomposition is the part worth copying.
 | `cf.render` | `wlr_renderer` | 2 | renderer protocol, format tables, `init-wl-display` |
 | `cf.render.pixman` | `wlr_renderer_pixman` | 2 | CPU reference renderer |
 | `cf.render.gles2` | `wlr_renderer_gles2` | 5 | GPU renderer, EGL/GBM, shaders |
-| `cf.render.damage` | `wlr_damage_ring` | 2 | damage regions, buffer age |
+| `cf.render.damage` | `wlr_damage_ring` | 2 | damage regions, buffer age — landed inside `cf.scene` and `cf.backend.*` (D48, D50) rather than as a module of its own: a region wrapper in the renderer, the diff in the scene, the buffer ring in the backend |
 | `cf.render.allocator`, `cf.render.swapchain`, `cf.render.dmabuf` | same names | 5 | GPU buffer lifecycle |
 | `cf.scene` | `wlr_scene` | 2, 5, 7 | retained node tree, output layers, hit testing, damage |
 | `cf.output` | `wlr_output` | 2 | mode/scale/transform state, commit, frame scheduling |
@@ -76,16 +76,21 @@ everything except *where the frame goes* and *what presenting it means*:
 
 ```lisp
 (setf (cf.backend.headless:compositor-frame-preparer c)
-      (lambda (compositor) ...))   ; -> the target to draw into, or NIL to defer
+      (lambda (compositor) ...))   ; -> the target to draw into, and its minimum damage
+                                   ;    (:full, a region, or NIL), or NIL to defer
 (setf (cf.backend.headless:compositor-frame-presenter c)
-      (lambda (compositor target) ...))  ; after the draw, before frame callbacks
+      (lambda (compositor target damage) ...))  ; after the draw, before frame callbacks
 ```
 
-The presenter is handed a target that already holds the frame it is presenting: fill, prune,
-draw, present, then release the clients' buffers and fire their callbacks. A nested target is
-the parent's `wl_shm` mapping and the parent reads it when it likes, so presenting before the
-draw commits the background paint and nothing else — a flickering, half-drawn window in the
-parent (D38).
+The presenter is handed a target that already holds the frame it is presenting: fill (clipped to
+the damage), prune, draw, present, then release the clients' buffers and fire their callbacks.
+`damage` is `:full` or a region in device pixels — what the frame actually painted — and a
+nested presenter turns exactly that into `wl_surface.damage`, so a nested frame costs its damage
+rather than its size (D48, D50). A nested target is the parent's `wl_shm` mapping and the parent
+reads it when it likes, so presenting before the draw commits the background paint and nothing
+else — a flickering, half-drawn window in the parent (D38). An empty frame is presented too, with
+an empty region: the backend decides that there is nothing to send, and returns the buffer it was
+holding.
 
 `cf.backend.nested` is a `nested-backend` object that *owns* a headless compositor and sets
 those two slots:
@@ -169,9 +174,17 @@ better than magic, so the default is a flag, and autocreate is a convenience wra
 
 ## 4. Scene graph
 
-*Phase 3c implements v0, in `cl-compositor-framework/src/scene.lisp` (D31): nodes, positions,
-stacking, hit testing and the cursor. Damage, clipping, culling, layers and per-output layout
-are still ahead, and the ticks below say which.*
+*Phase 3c implemented v0, in `cl-compositor-framework/src/scene.lisp` (D31): nodes, positions,
+stacking, hit testing and the cursor. Phase 2b added damage, clipping, opaque culling and the
+scale between layout coordinates and device pixels (D48, D49). Layers and per-output layout are
+still ahead.*
+
+*One frame is one list.* `scene-draw-list` turns the tree into draw items in device pixels, back
+to front, with the cursor last; `scene-render-items` draws them, each through a clip that is its
+rectangle minus everything opaque above it and minus everything undamaged; and the compositor
+diffs this frame's list against the last one to get the damage, so a moved node, a moved popup
+and a moved pointer need no bookkeeping of their own. A surface's damage from its commits is the
+*content* half of the damage, carried on its item.
 
 ```
 scene
@@ -187,7 +200,12 @@ with `offscreen` arriving with phase 7's effects. Every node has a position in i
 space, a visibility flag and a parent.
 
 - **Coordinates**: a node's position is in its parent's space; a root child's is therefore
-  output-local, which is the space the renderer and hit testing both use. A node's own position
+  output-local, which is the space every policy, the renderer and hit testing use. That space is
+  *layout* space: the target's pixels are layout times the output's scale, and the conversion
+  happens once per frame in `scene-draw-list`. A node's width is the *layout* size of its
+  surface — its buffer divided by the client's buffer scale, axes swapped for a quarter turn —
+  so hit testing, configure sizes and grabs are all in the same units the client was told about
+  (D49). A node's own position
   and its surface's `attach` offset are *different* things and are added at draw time: the
   compositor says where the window is, the client says where its content sits inside it. A
   surface with no shell role keeps the origin of the scene and is drawn at its attach offset —
@@ -199,6 +217,10 @@ space, a visibility flag and a parent.
 - **Placement** is a policy hook, not a framework rule:
   `(defmethod cf:on-new-toplevel ((c my-compositor) surface) ...)`. The default is a cascade
   at 32-pixel steps from the origin, which is enough to make two windows two windows.
+- **The cursor is drawn last** — literally last in the draw list, after every window, because a
+  pointer drawn under a window is a pointer nobody can see (a bug this slice had, and the scene
+  gate's cursor check found it). At output scale 2 it is drawn 32x32 device pixels rather than
+  resampled from a 16x16 theme image; a themed, per-size cursor is phase 5.
 - **Hit testing**: `(cf.scene:scene-hit-test scene x y)` walks front to back and returns
   `(values node local-x local-y)`; a `buffer-node` is hit only where it is mapped, inside its
   buffer, and inside its committed **input region** (an empty region makes it click-through).
@@ -235,8 +257,9 @@ space, a visibility flag and a parent.
   the window therefore still stops the drag: the parent sends no coordinates afterwards.
 - **Retained, not immediate**: the tree survives frames, which is what makes rules,
   workspaces, animations and overview possible without a rewrite (D10).
-- **Damage propagation**, clip rectangles and **culling** are open (2b): v0 repaints the whole
-  target and lets pixman clip to it, and nothing is culled by an opaque node above it.
+- **Damage, clipping and culling** are per frame and per item: the diff of two draw lists plus
+  the damage clients reported, painted through a pixman region; an item that is opaque hides
+  what is under it; a translucent one hides nothing (D48).
 
 `cl-tinywl` uses three node types. `cl-umbra` uses all of them plus per-workspace subtrees and
 animated transforms (phase 7).

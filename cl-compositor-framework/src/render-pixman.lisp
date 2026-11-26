@@ -71,8 +71,191 @@ the x bits are undefined and OVER would blend them."
   (if (= shm-format 1) +op-src+ +op-over+))
 
 ;;; ---------------------------------------------------------------------------
-;;; Targets
+;;; Regions: damage and clip
 ;;; ---------------------------------------------------------------------------
+;;
+;; A pixman region is a set of rectangles kept normalised by pixman (unioned,
+;; sorted, merged, emptied), and it is the currency of everything that decides *where*
+;; to draw: the damage a frame has to repaint, the clip an item is drawn through, and
+;; the area an opaque surface hides from the surfaces under it (docs/memory-and-rendering.md §7).
+;;
+;; pixman_region32_t is a box (four int32s) and a pointer to its rectangle array, so
+;; the Lisp side holds one address and pixman owns everything behind it.  The struct is
+;; never read field by field: the accessors below are the whole interface.
+
+(cffi:defcstruct pixman-region32
+  (x1 :int32) (y1 :int32) (x2 :int32) (y2 :int32)
+  (data :pointer))
+
+(cffi:defcfun ("pixman_region32_init" %region-init) :void
+  (region :pointer))
+
+(cffi:defcfun ("pixman_region32_init_rect" %region-init-rect) :void
+  (region :pointer) (x :int) (y :int) (width :unsigned-int) (height :unsigned-int))
+
+(cffi:defcfun ("pixman_region32_fini" %region-fini) :void
+  (region :pointer))
+
+(cffi:defcfun ("pixman_region32_clear" %region-clear-foreign) :void
+  (region :pointer))
+
+(cffi:defcfun ("pixman_region32_union" %region-union-foreign) :pointer
+  (destination :pointer) (a :pointer) (b :pointer))
+
+(cffi:defcfun ("pixman_region32_union_rect" %region-union-rect-foreign) :pointer
+  (destination :pointer) (source :pointer)
+  (x :int) (y :int) (width :unsigned-int) (height :unsigned-int))
+
+(cffi:defcfun ("pixman_region32_intersect" %region-intersect-foreign) :pointer
+  (destination :pointer) (a :pointer) (b :pointer))
+
+(cffi:defcfun ("pixman_region32_intersect_rect" %region-intersect-rect-foreign) :pointer
+  (destination :pointer) (source :pointer)
+  (x :int) (y :int) (width :unsigned-int) (height :unsigned-int))
+
+(cffi:defcfun ("pixman_region32_subtract" %region-subtract-foreign) :pointer
+  (destination :pointer) (a :pointer) (b :pointer))
+
+(cffi:defcfun ("pixman_region32_copy" %region-copy-foreign) :pointer
+  (destination :pointer) (source :pointer))
+
+(cffi:defcfun ("pixman_region32_translate" %region-translate-foreign) :void
+  (region :pointer) (x :int) (y :int))
+
+(cffi:defcfun ("pixman_region32_not_empty" %region-not-empty) :int
+  (region :pointer))
+
+(cffi:defcfun ("pixman_region32_n_rects" %region-n-rects) :int
+  (region :pointer))
+
+(cffi:defcfun ("pixman_region32_rectangles" %region-rectangles-foreign) :pointer
+  (region :pointer) (n :pointer))
+
+(cffi:defcfun ("pixman_region32_extents" %region-extents-foreign) :pointer
+  (region :pointer))
+
+(defstruct (region (:constructor %make-region (pointer)))
+  ;; A region is one allocation that pixman may resize behind it; the Lisp object
+  ;; is the address and nothing else.  Every function below takes regions, never
+  ;; bare pointers, so the address never leaks into the scene.
+  (pointer (cffi:null-pointer) :type cffi:foreign-pointer))
+
+(defun make-region (&key (x 0) (y 0) (width 0) (height 0))
+  "An empty region, or the single WIDTH x HEIGHT rectangle at X, Y.
+
+INIT-RECT initialises as well as sets, so calling INIT first would allocate a
+rectangle block that is then leaked."
+  (let* ((pointer (cffi:foreign-alloc '(:struct pixman-region32)))
+         (region (%make-region pointer)))
+    (if (and (plusp width) (plusp height))
+        (%region-init-rect pointer x y width height)
+        (%region-init pointer))
+    region))
+
+(defun destroy-region (region)
+  "Free REGION's rectangles and the region itself; a second call is a no-op."
+  (let ((pointer (region-pointer region)))
+    (unless (cffi:null-pointer-p pointer)
+      (%region-fini pointer)
+      (cffi:foreign-free pointer)
+      (setf (region-pointer region) (cffi:null-pointer))))
+  nil)
+
+(declaim (inline region-pointer-or-nil))
+(defun region-pointer-or-nil (region)
+  (and region (region-pointer region)))
+
+(defun region-clear (region)
+  "Empty REGION; returns it."
+  (%region-clear-foreign (region-pointer region))
+  region)
+
+(defun region-empty-p (region)
+  "True when REGION covers no pixels."
+  (or (null region)
+      (zerop (%region-not-empty (region-pointer region)))))
+
+(defun region-add (region x y width height)
+  "Add a WIDTH x HEIGHT rectangle at X, Y to REGION; returns REGION.
+
+A degenerate rectangle adds nothing -- a client is allowed to damage zero pixels,
+and pixman would rather not be asked."
+  (when (and (plusp width) (plusp height))
+    (%region-union-rect-foreign (region-pointer region) (region-pointer region)
+                                x y width height))
+  region)
+
+(defun region-add-box (region box)
+  "Add a (X Y WIDTH HEIGHT) rectangle to REGION."
+  (region-add region (first box) (second box) (third box) (fourth box)))
+
+(defun region-union (into a b)
+  "INTO := A union B.  Returns INTO; INTO may be A or B."
+  (%region-union-foreign (region-pointer into) (region-pointer a) (region-pointer b))
+  into)
+
+(defun region-intersect (into a b)
+  "INTO := A intersected with B.  Returns INTO; INTO may be A or B."
+  (%region-intersect-foreign (region-pointer into) (region-pointer a) (region-pointer b))
+  into)
+
+(defun region-subtract (into a b)
+  "INTO := A minus B.  Returns INTO; INTO may be A or B (pixman handles the alias)."
+  (%region-subtract-foreign (region-pointer into) (region-pointer a) (region-pointer b))
+  into)
+
+(defun region-copy (into from)
+  "INTO := FROM.  Returns INTO."
+  (%region-copy-foreign (region-pointer into) (region-pointer from))
+  into)
+
+(defun region-intersect-rect (into from x y width height)
+  "INTO := FROM intersected with a WIDTH x HEIGHT rectangle at X, Y."
+  (if (and (plusp width) (plusp height))
+      (%region-intersect-rect-foreign (region-pointer into) (region-pointer from)
+                                      x y width height)
+      (region-clear into))
+  into)
+
+(defun region-set-rect (region x y width height)
+  "REGION := the single WIDTH x HEIGHT rectangle at X, Y; returns REGION."
+  (region-clear region)
+  (region-add region x y width height))
+
+(defun region-translate (region dx dy)
+  "Move every rectangle of REGION by (DX, DY); returns it."
+  (%region-translate-foreign (region-pointer region) dx dy)
+  region)
+
+(defun region-rectangles (region)
+  "REGION as a list of (X Y WIDTH HEIGHT) rectangles.
+
+Read straight off pixman's array -- four int32 per box -- so this does not need the
+box struct to have been declared yet and cannot disagree with it about layout."
+  (if (region-empty-p region)
+      '()
+      (cffi:with-foreign-object (count :int)
+        (let ((pointer (%region-rectangles-foreign (region-pointer region) count))
+              (n (cffi:mem-ref count :int)))
+          (loop for index below n
+                for base = (* index 4)
+                collect (list (cffi:mem-aref pointer :int32 base)
+                              (cffi:mem-aref pointer :int32 (+ base 1))
+                              (- (cffi:mem-aref pointer :int32 (+ base 2))
+                                 (cffi:mem-aref pointer :int32 base))
+                              (- (cffi:mem-aref pointer :int32 (+ base 3))
+                                 (cffi:mem-aref pointer :int32 (+ base 1)))))))))
+
+(defun region-bounds (region)
+  "The smallest rectangle containing REGION, as (X Y WIDTH HEIGHT); NIL when empty."
+  (unless (region-empty-p region)
+    (let ((extents (%region-extents-foreign (region-pointer region))))
+      (let ((x1 (cffi:mem-aref extents :int32 0))
+            (y1 (cffi:mem-aref extents :int32 1))
+            (x2 (cffi:mem-aref extents :int32 2))
+            (y2 (cffi:mem-aref extents :int32 3)))
+        (list x1 y1 (- x2 x1) (- y2 y1))))))
+
 
 (defstruct (target (:constructor %make-target (pointer width height stride image
                                                          &aux (owned-p nil))))
@@ -90,6 +273,107 @@ the x bits are undefined and OVER would blend them."
   ;; True only for a target that allocated its own pixels, so DESTROY-TARGET knows
   ;; whether freeing the pointer would free someone else's mapping.
   (owned-p nil :type boolean))
+
+;;; ---------------------------------------------------------------------------
+;;; Solid colours and boxes
+;;; ---------------------------------------------------------------------------
+;;
+;; Two things every drawing call needs: a pixman colour (straight, not
+;; premultiplied, so a translucent colour is divided back out exactly once) and the
+;; boxes pixman fills.  They are declared here because the target fill and the
+;; scene's rectangles both use them.
+
+(cffi:defcstruct pixman-color
+  (red :uint16) (green :uint16) (blue :uint16) (alpha :uint16))
+
+(cffi:defcstruct pixman-box32
+  (x1 :int32) (y1 :int32) (x2 :int32) (y2 :int32))
+
+(cffi:defcfun ("pixman_image_fill_boxes" %pixman-fill-boxes) :int
+  (op :unsigned-int) (destination :pointer) (color :pointer)
+  (n-boxes :int) (boxes :pointer))
+
+(cffi:defcfun ("pixman_image_set_repeat" %set-repeat) :void
+  (image :pointer) (repeat :int))
+
+(defconstant +repeat-normal+ 1)
+
+(defun fill-box-premultiplied (target x y width height argb)
+  "Fill one rectangle with a premultiplied colour, translucent or not, correctly.
+
+One pixel in foreign memory, repeated across the rectangle and composited OVER: the
+only shape of a translucent fill this pixman gets right (see FILL-BOXES-WITH)."
+  (when (and (plusp width) (plusp height))
+    (let ((pixel (cffi:foreign-alloc :uint32 :count 1 :initial-element argb)))
+      (unwind-protect
+           (let ((image (%create-bits +format-a8r8g8b8+ 1 1 pixel 4)))
+             (when (cffi:null-pointer-p image)
+               (return-from fill-box-premultiplied nil))
+             (unwind-protect
+                  (progn
+                    (%set-repeat image +repeat-normal+)
+                    (%composite32 +op-over+ image (cffi:null-pointer)
+                                  (target-image target)
+                                  0 0 0 0 x y width height)
+                    t)
+               (%image-unref image)))
+        (cffi:foreign-free pixel)))))
+
+(defun straight-channel (premultiplied alpha shift)
+  "One 8-bit straight channel from a premultiplied pixel.
+
+pixman_colour_t is *not* premultiplied (pixman_image_fill_boxes multiplies), and
+our targets and buffers are, so a translucent rectangle has to be divided back
+out.  An opaque colour -- every rectangle v0 draws -- passes through unchanged."
+  (if (zerop alpha)
+      0
+      (min 255 (round (* 255 (ldb (byte 8 shift) premultiplied)) alpha))))
+
+(defun fill-boxes-with (target boxes count argb)
+  "Fill COUNT consecutive pixman boxes at BOXES with premultiplied ARGB.
+
+An *opaque* colour goes through pixman_image_fill_boxes, which writes it exactly and
+honours the target's clip region -- that is the common case, a background or a
+window border, and the reason a partial repaint costs what it damages.
+
+A translucent colour cannot: pixman 0.46's fill_boxes turns a pixman_color_t into a
+*straight* alpha pixel and then composites it as if it were premultiplied, so a 50%
+white rectangle comes out opaque white -- measured, not assumed (filltest in the
+2b session; the same call over a green destination gives #xFFFFFFFF instead of
+#xFF80FF80).  A one-pixel premultiplied image, repeated, is correct: it is the same
+call COMPOSITE-BITMAP makes and pixman blends it exactly.  Translucent rectangles are
+rare (a border, a veil), so the extra image per fill is not on any hot path, and a
+wrong pixel would be on the screen."
+  (when (plusp count)
+    (let ((alpha (ldb (byte 8 24) argb)))
+      (cffi:with-foreign-object (color '(:struct pixman-color))
+        (flet ((set-slot (name value)
+                 (setf (cffi:foreign-slot-value color '(:struct pixman-color) name)
+                       (* 257 value))))
+          (set-slot 'red (straight-channel argb alpha 16))
+          (set-slot 'green (straight-channel argb alpha 8))
+          (set-slot 'blue (straight-channel argb alpha 0))
+          (set-slot 'alpha alpha))
+        (cond
+          ((= alpha 255)
+           (plusp (%pixman-fill-boxes +op-over+ (target-image target) color count boxes)))
+          (t
+           (loop for index below count
+                 for box = (cffi:mem-aptr boxes '(:struct pixman-box32) index)
+                 do (fill-box-premultiplied
+                     target
+                     (cffi:foreign-slot-value box '(:struct pixman-box32) 'x1)
+                     (cffi:foreign-slot-value box '(:struct pixman-box32) 'y1)
+                     (- (cffi:foreign-slot-value box '(:struct pixman-box32) 'x2)
+                        (cffi:foreign-slot-value box '(:struct pixman-box32) 'x1))
+                     (- (cffi:foreign-slot-value box '(:struct pixman-box32) 'y2)
+                        (cffi:foreign-slot-value box '(:struct pixman-box32) 'y1))
+                     argb))
+           t))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Targets
+;;; ---------------------------------------------------------------------------
 
 (defun make-target (width height)
   "A cleared ARGB8888 target of WIDTH x HEIGHT, in allocated foreign memory."
@@ -142,15 +426,34 @@ pixman straight into the memory POINTER names."
       (setf (aref octets index)
             (cffi:mem-aref pointer :unsigned-char index)))))
 
+(cffi:defcfun ("pixman_image_set_clip_region32" %set-clip-region) :int
+  (image :pointer) (region :pointer))
+
+(defun target-set-clip (target region)
+  "Draw only inside REGION from now on; NIL removes the clip.
+
+pixman copies the region into the image, so the caller may free or reuse REGION as
+soon as this returns -- which is what the scene's per-item clips rely on."
+  (%set-clip-region (target-image target) (region-pointer-or-nil region))
+  target)
+
+(defun target-clear-clip (target)
+  "Remove TARGET's clip region: draw everywhere again."
+  (%set-clip-region (target-image target) (cffi:null-pointer))
+  target)
+
 (defun fill-target (target argb)
   "Fill TARGET with a premultiplied 0xAARRGGBB colour.
 
-A word at a time through MEM-AREF, which indexes elements, so the count is the
-octet length over four.  Foreign memory cannot be a vector, so this stays a loop;
-the colour is written exactly, not composited."
-  (let ((pointer (target-pointer target)))
-    (dotimes (index (/ (* (target-stride target) (target-height target)) 4))
-      (setf (cffi:mem-aref pointer :uint32 index) argb)))
+Through pixman, so the target's clip region applies: a partial repaint sets the
+clip to its damage and calls this, and only the damaged rectangles are painted.
+An opaque colour is written exactly (OVER with alpha 255), not blended."
+  (cffi:with-foreign-object (box '(:struct pixman-box32))
+    (setf (cffi:foreign-slot-value box '(:struct pixman-box32) 'x1) 0
+          (cffi:foreign-slot-value box '(:struct pixman-box32) 'y1) 0
+          (cffi:foreign-slot-value box '(:struct pixman-box32) 'x2) (target-width target)
+          (cffi:foreign-slot-value box '(:struct pixman-box32) 'y2) (target-height target))
+    (fill-boxes-with target box 1 argb))
   target)
 
 (declaim (inline target-pixel))
@@ -182,34 +485,119 @@ which RENDER-SURFACE guarantees by unref'ing in its own unwind-protect."
                        (wayland.server:shm-buffer-pointer buffer)
                        (wayland.server:shm-buffer-stride buffer)))))
 
-(defun composite-buffer (target buffer &key (x 0) (y 0) (width nil) (height nil))
-  "Draw BUFFER onto TARGET at X, Y.  Returns true when it was drawn.
+;;; ---------------------------------------------------------------------------
+;;; Transforms: buffer scale, and the eight buffer transforms
+;;; ---------------------------------------------------------------------------
+;;
+;; A surface's buffer is drawn into a rectangle whose size the scene decides: a
+;; client that drew at buffer scale 2 supplies twice the pixels of its surface, and
+;; an output at scale 2 wants twice the pixels of the layout coordinate.  The ratio
+;; between the two is a pixman transform, and pixman's transform maps *destination*
+;; to *source* -- which is why the matrices below read backwards at first glance
+;; (docs/memory-and-rendering.md §7).
+;;
+;; The eight wl_output.transform values are the protocol's: 90/180/270 are
+;; counter-clockwise rotations of the buffer contents, and the `flipped' family is a
+;; flip around a vertical axis followed by the rotation (protocols/wayland/wayland.xml,
+;; wl_output.transform).  Each matrix was checked against rendered pixels -- the
+;; scene suite draws a 3x2 source through all eight and asserts the result -- so the
+;; table is evidence, not an interpretation.
 
-Clipping is the target's job: pixman clips to the destination image, so a window
-hanging off the edge simply loses the outside part."
+(cffi:defcstruct pixman-transform32
+  (matrix :int32 :count 9))
+
+(cffi:defcfun ("pixman_image_set_transform" %set-transform) :int
+  (image :pointer) (transform :pointer))
+
+(cffi:defcfun ("pixman_image_set_filter" %set-filter) :void
+  (image :pointer) (filter :int) (filter-params :pointer) (n-filter-params :int))
+
+(defconstant +filter-nearest+ 0)
+(defconstant +filter-bilinear+ 1)
+
+(defvar *transform-scratch* nil
+  "One pixman_transform_t, allocated once and rewritten per draw.
+
+Compositing is single-threaded and pixman copies nothing out of the transform, so a
+frame that scales ten surfaces writes this ten times rather than allocating ten of
+them (docs/memory-and-rendering.md §11).")
+
+(defun buffer-display-size (buffer-width buffer-height transform)
+  "The size a BUFFER-WIDTH x BUFFER-HEIGHT buffer occupies, after TRANSFORM.
+
+A quarter turn swaps the axes; everything else keeps them."
+  (if (oddp transform)
+      (values buffer-height buffer-width)
+      (values buffer-width buffer-height)))
+
+(defun transform-matrix (buffer-width buffer-height display-width display-height transform)
+  "Nine 16.16 values, row-major, mapping a destination point to a source point.
+
+W/H are the buffer's pixels and DW/DH the rectangle it is drawn into.  For the
+rotated transforms the two disagree by a swap, which is why they are passed
+separately rather than derived here."
+  (let ((w buffer-width) (h buffer-height)
+        (dw (max 1 display-width)) (dh (max 1 display-height)))
+    (multiple-value-bind (a b tx c d ty)
+        (ecase transform
+          ;; Each case is sx = a*dx + b*dy + tx, sy = c*dx + d*dy + ty.
+          (0 (values (/ w dw) 0 0 0 (/ h dh) 0))
+          (1 (values 0 (- (/ w dh)) w (/ h dw) 0 0))          ; 90 CCW
+          (2 (values (- (/ w dw)) 0 w 0 (- (/ h dh)) h))     ; 180
+          (3 (values 0 (/ w dh) 0 (- (/ h dw)) 0 h))         ; 270 CCW
+          (4 (values (- (/ w dw)) 0 w 0 (/ h dh) 0))         ; flipped
+          (5 (values 0 (/ w dh) 0 (/ h dw) 0 0))             ; flipped 90
+          (6 (values (/ w dw) 0 0 0 (- (/ h dh)) h))         ; flipped 180
+          (7 (values 0 (- (/ w dh)) w (- (/ h dw)) 0 h)))    ; flipped 270
+      (list a b tx c d ty 0 0 1))))
+
+(defun %set-image-transform (image buffer-width buffer-height display-width display-height transform)
+  "Map IMAGE's destination rectangle back onto its pixels; returns IMAGE."
+  (let ((scratch (or *transform-scratch*
+                     (setf *transform-scratch*
+                           (cffi:foreign-alloc '(:struct pixman-transform32)))))
+        (index 0))
+    (dolist (value (transform-matrix buffer-width buffer-height
+                                     display-width display-height transform))
+      (setf (cffi:mem-aref scratch :int32 index) (round (* value 65536)))
+      (incf index))
+    ;; Nearest is faster *and* sharper for an integer ratio: a client that drew at
+    ;; the output's scale should be copied pixel for pixel, not blurred.
+    (%set-filter image +filter-nearest+ (cffi:null-pointer) 0)
+    (%set-transform image scratch)
+    image))
+
+(defun composite-buffer (target buffer &key (x 0) (y 0) width height (transform 0)
+                                             (filter :nearest))
+  "Draw BUFFER into the WIDTH x HEIGHT rectangle at X, Y of TARGET.
+
+WIDTH and HEIGHT default to the buffer's own size, which is the 1:1 case; a
+surface drawn at a buffer scale different from the output's passes the device size
+and is scaled to fit it.  TRANSFORM is a wl_output.transform value (the client's
+`set_buffer_transform'), applied on top of the scale.  Returns true when it drew.
+
+Clipping is the target's job: pixman clips to the destination image (and to its
+clip region), so a window hanging off the edge loses the outside part."
   (let ((image (buffer-image buffer)))
     (unless image
       (return-from composite-buffer nil))
     (unwind-protect
-         (progn
+         (let* ((buffer-width (wayland.server:shm-buffer-width buffer))
+                (buffer-height (wayland.server:shm-buffer-height buffer))
+                (display-width (or width buffer-width))
+                (display-height (or height buffer-height)))
+           (unless (and (= transform 0)
+                        (= display-width buffer-width)
+                        (= display-height buffer-height))
+             (%set-image-transform image buffer-width buffer-height
+                                   display-width display-height transform)
+             (unless (eq filter :nearest)
+               (%set-filter image +filter-bilinear+ (cffi:null-pointer) 0)))
            (%composite32 (op-for-shm-format (wayland.server:shm-buffer-format buffer))
                          image (cffi:null-pointer) (target-image target)
-                         0 0 0 0 x y
-                         (or width (wayland.server:shm-buffer-width buffer))
-                         (or height (wayland.server:shm-buffer-height buffer)))
+                         0 0 0 0 x y display-width display-height)
            t)
       (%image-unref image))))
-
-(defun render-surface (target surface)
-  "Draw SURFACE at its committed position; returns true when something was drawn.
-
-A surface with no buffer is not drawn at all -- attach(nil) means hidden, and a
-client that only moves its buffer commits position without content."
-  (let ((buffer (wayland.server:surface-current-buffer surface)))
-    (when (and buffer (wayland.server:surface-mapped-p surface))
-      (composite-buffer target buffer
-                        :x (wayland.server:surface-current-x surface)
-                        :y (wayland.server:surface-current-y surface)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Solid rectangles and images we own
@@ -217,67 +605,44 @@ client that only moves its buffer commits position without content."
 ;;
 ;; The scene needs two things the shm path does not: a solid rectangle (a
 ;; background, a border) and a bitmap that is ours rather than a client's (the
-;; cursor).  Both are ordinary pixman operations; doing them through pixman
-;; rather than a Lisp pixel loop keeps the reference renderer one code path, and
-;; keeps the cost of a full-window background out of interpreted code.
-
-(cffi:defcstruct pixman-color
-  (red :uint16) (green :uint16) (blue :uint16) (alpha :uint16))
-
-(cffi:defcstruct pixman-box32
-  (x1 :int32) (y1 :int32) (x2 :int32) (y2 :int32))
-
-(cffi:defcfun ("pixman_image_fill_boxes" %fill-boxes) :int
-  (op :unsigned-int) (destination :pointer) (color :pointer)
-  (n-boxes :int) (boxes :pointer))
-
-(defun straight-channel (premultiplied alpha shift)
-  "One 8-bit straight channel from a premultiplied pixel.
-
-pixman_colour_t is *not* premultiplied (pixman_image_fill_boxes multiplies), and
-our targets and buffers are, so a translucent rectangle has to be divided back
-out.  An opaque colour -- every rectangle v0 draws -- passes through unchanged."
-  (if (zerop alpha)
-      0
-      (min 255 (round (* 255 (ldb (byte 8 shift) premultiplied)) alpha))))
+;; cursor).  FILL-RECT and COMPOSITE-BITMAP are those two, and both go through
+;; pixman so a clip region is honoured without a Lisp pixel loop anywhere.
 
 (defun fill-rect (target x y width height argb)
   "Fill a X, Y, WIDTH x HEIGHT rectangle of TARGET with premultiplied ARGB.
 
-Clipped by pixman to the target, so a rectangle hanging off the edge is drawn as
-much as fits; a degenerate one draws nothing."
+Clipped by pixman to the target (and to the target's clip region, when one is
+set), so a rectangle hanging off the edge is drawn as much as fits; a degenerate
+one draws nothing."
   (when (and (plusp width) (plusp height))
-    (let ((alpha (ldb (byte 8 24) argb)))
-      (cffi:with-foreign-objects ((color '(:struct pixman-color))
-                                  (box '(:struct pixman-box32)))
-        (flet ((set-slot (name value)
-                 (setf (cffi:foreign-slot-value color '(:struct pixman-color) name)
-                       (* 257 value))))
-          (set-slot 'red (straight-channel argb alpha 16))
-          (set-slot 'green (straight-channel argb alpha 8))
-          (set-slot 'blue (straight-channel argb alpha 0))
-          (set-slot 'alpha alpha))
-        (setf (cffi:foreign-slot-value box '(:struct pixman-box32) 'x1) x
-              (cffi:foreign-slot-value box '(:struct pixman-box32) 'y1) y
-              (cffi:foreign-slot-value box '(:struct pixman-box32) 'x2) (+ x width)
-              (cffi:foreign-slot-value box '(:struct pixman-box32) 'y2) (+ y height))
-        (%fill-boxes +op-over+ (target-image target) color 1 box)
-        t))))
+    (cffi:with-foreign-object (box '(:struct pixman-box32))
+      (setf (cffi:foreign-slot-value box '(:struct pixman-box32) 'x1) x
+            (cffi:foreign-slot-value box '(:struct pixman-box32) 'y1) y
+            (cffi:foreign-slot-value box '(:struct pixman-box32) 'x2) (+ x width)
+            (cffi:foreign-slot-value box '(:struct pixman-box32) 'y2) (+ y height))
+      (fill-boxes-with target box 1 argb))))
 
-(defun composite-bitmap (target octets width height &key (x 0) (y 0))
+(defun composite-bitmap (target octets width height &key (x 0) (y 0)
+                                                  dest-width dest-height)
   "Draw premultiplied ARGB8888 OCTETS (WIDTH x HEIGHT) over TARGET at X, Y.
 
 OVER, not SRC: a bitmap has transparent pixels and the thing underneath must
 survive them -- which is exactly what the cursor needs.  The octets are pinned
-for the duration of the call, so pixman never reads a moved vector."
+for the duration of the call, so pixman never reads a moved vector.  DEST-WIDTH
+and DEST-HEIGHT scale the bitmap (the cursor is 16x16 pixels and an output at
+scale 2 draws it 32x32), nearest-neighbour so it stays an arrow."
   (when (and (plusp width) (plusp height))
     (cffi:with-pointer-to-vector-data (pointer octets)
-      (let ((image (%create-bits +format-a8r8g8b8+ width height pointer (* 4 width))))
+      (let* ((image (%create-bits +format-a8r8g8b8+ width height pointer (* 4 width)))
+             (draw-width (or dest-width width))
+             (draw-height (or dest-height height)))
         (when (cffi:null-pointer-p image)
           (return-from composite-bitmap nil))
         (unwind-protect
              (progn
+               (unless (and (= draw-width width) (= draw-height height))
+                 (%set-image-transform image width height draw-width draw-height 0))
                (%composite32 +op-over+ image (cffi:null-pointer) (target-image target)
-                             0 0 0 0 x y width height)
+                             0 0 0 0 x y draw-width draw-height)
                t)
           (%image-unref image))))))

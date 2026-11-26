@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus tinywl soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render tinywl soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus tinywl
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render tinywl
 
 test:
 	./scripts/run-tests.sh
@@ -54,6 +54,11 @@ grab:
 # sockets, one image, pixels and input crossing both.
 nested:
 	./scripts/nested-gate.sh
+
+# Buffer scale, buffer transform, damage and opaque culling: a real client at
+# scale 1 and 2, then an incremental frame that must equal a full one.
+render:
+	./scripts/render-gate.sh
 
 # A real client opens menus: a positioner's answer, the flipped constrained one,
 # pixels, Escape, and a click outside that dismisses without reaching the client.

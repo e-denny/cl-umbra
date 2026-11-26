@@ -3,9 +3,10 @@
 ;;;;
 ;;;; wl_region: a set of rectangles with real union and difference.
 ;;;;
-;;;; Regions describe the opaque and input parts of a surface.  Until the renderer
-;;;; and the seat act on them (2b), the only thing that can be wrong is the set
-;;;; arithmetic itself, so that is what this file is careful about:
+;;;; Regions describe the opaque and input parts of a surface: the scene hit-tests
+;;;; against the input region and culls what an opaque one covers (D31, D48), so the
+;;;; set arithmetic is what a person sees, and that is what this file is careful
+;;;; about:
 ;;;;
 ;;;;   add      union: keep the new rectangle, and keep the old ones too
 ;;;;   subtract difference: each existing rectangle is clipped against the removed
@@ -75,7 +76,7 @@
   (null (region-rects region)))
 
 (defun region-contains-p (region x y)
-  "Is (X, Y) inside the region?  A real question for input regions in 2b.
+  "Is (X, Y) inside the region?  The question hit testing asks of an input region.
 
 Half-open, as every rectangle in the protocol is: a 10-wide rectangle starting
 at 0 contains x = 0 .. 9, not 10."

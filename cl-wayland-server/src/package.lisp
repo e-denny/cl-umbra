@@ -446,6 +446,7 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:surface-shell-committed
    #:surface-shell-lost
    #:surface-committed
+   #:surface-damage-since-frame
    #:surface-presented
    #:fire-frame-callbacks
    #:release-surface-buffer

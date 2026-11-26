@@ -651,10 +651,10 @@ of lines of protocol."
                   (presenter (cf.backend.headless:compositor-frame-presenter compositor))
                   (lit '()))
              (setf (cf.backend.headless:compositor-frame-presenter compositor)
-                   (lambda (inner target)
+                   (lambda (inner target damage)
                      (declare (ignore target))
                      (push (lit-pixel-count inner) lit)
-                     (funcall presenter inner target)))
+                     (funcall presenter inner target damage)))
              (unwind-protect
                   (progn
                     ;; The clients have settled, so nothing is dirty: ask for the

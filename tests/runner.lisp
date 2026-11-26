@@ -40,6 +40,7 @@
     wayland.test.client
     wayland.test.server
     wayland.test.scene
+    wayland.test.render
     wayland.test.tinywl)
   "Test packages, in dependency order.  Each holds one file's tests.")
 

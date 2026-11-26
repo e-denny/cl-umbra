@@ -51,7 +51,14 @@
 (defstruct (buffer-slot (:constructor make-buffer-slot))
   (buffer nil)                    ; wayland.client:client-buffer
   (target nil)                    ; pixman target over the buffer's pixels
-  (free-p t))
+  (free-p t)
+  ;; The frame this slot's pixels belong to, or NIL for a buffer the parent has
+  ;; never seen.  It is the whole of the buffer-age bookkeeping: two slots and a
+  ;; frame number are enough to know how old a buffer is (D50).
+  (frame nil)
+  ;; The region this slot has to repaint before it can be presented again, reused
+  ;; per slot so a frame allocates nothing (D48).
+  (repaint nil))
 
 (defclass nested-backend ()
   ((display :initarg :display :reader nested-display)
@@ -71,6 +78,16 @@
    (pool :initform nil :accessor nested-pool)
    (buffers :initform nil :accessor nested-buffers)
    (current :initform nil :accessor nested-current)
+   ;; The damage the last two frames painted, newest first, as ((FRAME . REGION)
+   ;; ...).  With two buffers, a slot's contents are at most two frames old, so
+   ;; two entries are exactly what "what has this buffer missed?" needs (D50).
+   (damage-history :initform nil :accessor nested-damage-history)
+   ;; Two regions the history reuses, so recording a frame allocates nothing.
+   (history-regions :initform nil :accessor nested-history-regions)
+   ;; The frame number every prepare consumes, whether or not the frame reaches
+   ;; the parent: a frame that painted nothing still advances the sequence, or a
+   ;; slot taken for it could never be told apart from the one before (D50).
+   (sequence :initform 0 :accessor nested-sequence)
    (configure-serial :initform nil :accessor nested-configure-serial)
    (configured-p :initform nil :accessor nested-configured-p)
    (mapped-p :initform nil :accessor nested-mapped-p)
@@ -210,11 +227,26 @@ parent stopped offering one -- it will not be sent events either way."
               (nested-shm backend) shm)
         t))))
 
+(defun nested-scale (backend)
+  "Device pixels per layout coordinate for this session: the inner output's scale.
+
+One number, read from the compositor, so the output this session offers its clients,
+the buffers it hands the parent and the scene it draws cannot disagree (D49)."
+  (max 1 (round (headless:compositor-scale (nested-compositor backend)))))
+
 (defun create-parent-surface (backend)
-  "Create the parent-side wl_surface our output is presented into."
-  (let ((surface (wc:wl-compositor.create-surface
-                  (nested-parent-compositor backend))))
+  "Create the parent-side wl_surface our output is presented into.
+
+The surface says `set_buffer_scale' when the output is scaled: our buffers are
+device pixels, and the parent must divide that scale out to get the layout size it
+configures us at.  Without it a scale-2 session would ask for a window twice the
+size its buffer describes -- or, at scale 1, change nothing at all."
+  (let* ((surface (wc:wl-compositor.create-surface
+                   (nested-parent-compositor backend)))
+         (scale (nested-scale backend)))
     (setf (nested-surface backend) surface)
+    (when (> scale 1)
+      (wc:wl-surface.set-buffer-scale surface scale))
     surface))
 
 (defun pump-roundtrip (backend)
@@ -243,9 +275,13 @@ parent stopped offering one -- it will not be sent events either way."
     callback))
 
 (defun create-buffers (backend)
-  "One pool, two buffers, one pixman target per buffer, and their release hooks."
-  (let* ((width (nested-width backend))
-         (height (nested-height backend))
+  "One pool, two buffers, one pixman target per buffer, and their release hooks.
+
+The buffers are the output's *device* size: the layout size the parent configured
+times the output scale.  At scale 1 that is the same rectangle it always was."
+  (let* ((scale (nested-scale backend))
+         (width (* (nested-width backend) scale))
+         (height (* (nested-height backend) scale))
          (stride (* width 4))
          (frame-size (* stride height))
          (pool (wc:make-client-pool (nested-shm backend) (* 2 frame-size))))
@@ -257,6 +293,7 @@ parent stopped offering one -- it will not be sent events either way."
                                                 :stride stride :format 0))
              (slot (make-buffer-slot
                     :buffer buffer
+                    :repaint (render:make-region)
                     :target (render:make-target-over-pointer
                              (wc:client-buffer-pointer buffer) width height
                              :stride stride))))
@@ -292,7 +329,10 @@ buffer in `nested-current' is ours again by the time this runs."
     (dolist (slot (nested-buffers backend))
       (ignore-errors (wc:destroy-client-buffer (buffer-slot-buffer slot))))
     (setf (nested-buffers backend) nil
-          (nested-current backend) nil)
+          (nested-current backend) nil
+          ;; The new buffers hold nothing anyone has seen, and the old damage
+          ;; describes pixels that no longer exist (D50).
+          (nested-damage-history backend) nil)
     (when (nested-pool backend)
       (ignore-errors (wc:destroy-client-pool (nested-pool backend)))
       (setf (nested-pool backend) nil))
@@ -348,7 +388,7 @@ the configure is acknowledged and its size ignored (see the header)."
     (unless (wait-until backend (lambda () (nested-configured-p backend)) :timeout 10)
       (error "the parent never configured our toplevel"))))
 
-(defun start-nested (&key parent-path (width 256) (height 256)
+(defun start-nested (&key parent-path (width 256) (height 256) (scale 1)
                           (display-name "wayland-1")
                           runtime-dir
                           (pump nil)
@@ -375,7 +415,7 @@ when the input device is a parent pointer instead of a test's injection."
         (progn
           (setf display (wc:connect :path parent-path)
                 compositor (headless:make-headless-compositor
-                            :width width :height height
+                            :width width :height height :scale scale
                             :display-name display-name
                             :runtime-dir runtime-dir
                             :compositor-class compositor-class)
@@ -409,9 +449,9 @@ when the input device is a parent pointer instead of a test's injection."
                     (declare (ignore inner))
                     (prepare-nested-frame backend))
                   (headless:compositor-frame-presenter compositor)
-                  (lambda (inner target)
+                  (lambda (inner target damage)
                     (declare (ignore inner target))
-                    (present-nested-frame backend)))
+                    (present-nested-frame backend damage)))
             (headless:request-frame compositor)
             backend))
       (error (condition)
@@ -430,10 +470,70 @@ when the input device is a parent pointer instead of a test's injection."
 ;;; Drawing and presenting
 ;;; ---------------------------------------------------------------------------
 
+(defun slot-repaint-region (backend slot next-frame)
+  "What SLOT's buffer has to repaint before frame NEXT-FRAME can be shown.
+
+A buffer the parent has never seen is painted whole.  Otherwise the answer is the
+damage of every frame this slot missed -- and *unknown* damage counts as whole: a
+frame painted everything (a new buffer, a resize) is recorded as :full, so a slot
+that missed it must repaint everything too.  Two frames is the limit of the
+history, which is the limit of what two buffers can be apart (D50)."
+  (let ((last (buffer-slot-frame slot)))
+    (cond
+      ((null last) :full)
+      ((> (- next-frame last) 2) :full)
+      (t
+       (let* ((missed (- next-frame last 1))
+              (entries (remove-if (lambda (entry) (<= (car entry) last))
+                                  (nested-damage-history backend))))
+         (cond
+           ;; The history has to cover every frame between LAST and NEXT, or
+           ;; there is a frame whose damage nobody kept.
+           ((< (length entries) missed) :full)
+           ((some (lambda (entry) (null (cdr entry))) entries) :full)
+           (t
+            (let ((region (buffer-slot-repaint slot)))
+              (render:region-clear region)
+              (dolist (entry entries)
+                (render:region-union region region (cdr entry)))
+              region))))))))
+
+(defun record-frame-damage (backend frame damage)
+  "Remember what FRAME painted: DAMAGE (a region) or NIL for \"everything\".
+
+The history is the last two frames and no more: with two buffers, a slot can only
+be two frames behind, so anything older is a full repaint by definition.  The
+regions come from a fixed pair -- frame N uses region N mod 2, which is the entry
+that is about to fall off the end -- so recording a frame allocates nothing (D50)."
+  (let ((pool (or (nested-history-regions backend)
+                  (setf (nested-history-regions backend)
+                        (list (render:make-region) (render:make-region)))))
+        (entry nil))
+    (if (null damage)
+        (setf entry (cons frame nil))
+        (let ((region (nth (mod frame 2) pool)))
+          (render:region-copy region damage)
+          (setf entry (cons frame region))))
+    ;; Newest first, never more than two: frames arrive in order, so this is a
+    ;; push and a truncation, not a sort.  SUBSEQ would be out of bounds on a
+    ;; shorter list, which is exactly the first two frames.
+    (setf (nested-damage-history backend)
+          (let ((entries (cons entry (nested-damage-history backend))))
+            (if (cddr entries)
+                (list (first entries) (second entries))
+                entries)))
+    nil))
+
 (defun prepare-nested-frame (backend)
-  "The target for this frame: the first parent buffer the parent has released."
-  ;; One frame in flight: the parent's frame callback is the clock, so a second
-  ;; commit before it arrives would be a second frame the parent never asked for.
+  "The target for this frame, and the least it must repaint; NIL when it cannot draw.
+
+The target is the first parent buffer the parent has released.  One frame in flight:
+the parent's frame callback is the clock, so a second commit before it arrives would
+be a second frame the parent never asked for.
+
+The second value is this buffer's own damage requirement -- :FULL for a buffer the
+parent has not seen, else the damage of the frames this buffer missed -- which the
+compositor merges with what changed since its last frame (D48, D50)."
   (when (or (nested-closing-p backend)
             (nested-awaiting-frame-p backend))
     (return-from prepare-nested-frame nil))
@@ -442,23 +542,61 @@ when the input device is a parent pointer instead of a test's injection."
       (return-from prepare-nested-frame nil))
     (setf (buffer-slot-free-p slot) nil
           (nested-current backend) slot)
-    (buffer-slot-target slot)))
+    (let ((next-frame (1+ (nested-sequence backend))))
+      (prog1 (values (buffer-slot-target slot)
+                     (slot-repaint-region backend slot next-frame))
+        (setf (nested-sequence backend) next-frame)
+        ;; The frame this buffer will be, decided before it is drawn so that the
+        ;; presenter's history and the next prepare agree about age.
+        (setf (buffer-slot-frame slot) next-frame)))))
 
-(defun present-nested-frame (backend)
-  "Attach the frame we just drew, damage all of it, commit, ask for a frame.
+(defun damage-in-surface-coordinates (compositor damage)
+  "DAMAGE (device pixels) as (X Y WIDTH HEIGHT) rectangles in surface-local units.
+
+wl_surface.damage takes surface-local coordinates, so a scaled output divides by the
+scale -- rounding outwards, because a damage rectangle that is a pixel too small
+leaves a stale pixel on screen and one too large only repaints it."
+  (let ((scale (max 1 (round (headless:compositor-scale compositor)))))
+    (loop for (x y width height) in (render:region-rectangles damage)
+          collect (list (floor x scale)
+                        (floor y scale)
+                        (ceiling (+ x width) scale)
+                        (ceiling (+ y height) scale)))))
+
+(defun present-nested-frame (backend damage)
+  "Attach the frame we just drew, damage what changed, commit, ask for a frame.
 
 Presenting before the inner clients' buffers are released is deliberate: the
-pixels are in the parent's buffer now, so the frame that contains them exists."
+pixels are in the parent's buffer now, so the frame that contains them exists.
+
+DAMAGE is what the compositor painted: :FULL (a new buffer, or one too old to
+trust), or a device-pixel region.  The parent is told exactly that, in surface
+coordinates, instead of the whole buffer -- which is what makes a nested frame cost
+its damage rather than its size (D48, D50)."
   (let ((slot (nested-current backend)))
     (unless slot
       (return-from present-nested-frame nil))
     (let ((surface (nested-surface backend))
-          (width (nested-width backend))
-          (height (nested-height backend)))
+          (compositor (nested-compositor backend))
+          (frame (buffer-slot-frame slot)))
+      (when (and (not (eq damage :full))
+                 (render:region-empty-p damage))
+        ;; Nothing changed since the last frame, so the buffer this slot holds is
+        ;; already what the parent is showing: do not attach, do not commit, and
+        ;; give the slot straight back.  Committing an unchanged frame every time
+        ;; the compositor was dirty for a non-visual reason would cost a round trip
+        ;; and a parent repaint for nothing (D48, D50).
+        (setf (buffer-slot-free-p slot) t)
+        (record-frame-damage backend frame damage)
+        (return-from present-nested-frame nil))
       (wc:wl-surface.attach surface (buffer-slot-buffer slot) 0 0)
-      ;; v0 damages everything: the renderer repaints the whole target, so saying
-      ;; anything smaller would be a lie (2b's damage tracking changes both).
-      (wc:wl-surface.damage surface 0 0 width height)
+      (cond
+        ((eq damage :full)
+         (wc:wl-surface.damage surface 0 0 (nested-width backend) (nested-height backend)))
+        (t
+         (dolist (rect (damage-in-surface-coordinates compositor damage))
+           (wc:wl-surface.damage surface (first rect) (second rect)
+                                 (third rect) (fourth rect)))))
       (request-parent-frame backend
                             :after (lambda ()
                                      (when (and (not (nested-closing-p backend))
@@ -468,6 +606,9 @@ pixels are in the parent's buffer now, so the frame that contains them exists."
                                         (nested-compositor backend)))))
       (wc:wl-surface.commit surface)
       (wc:flush (nested-display backend))
+      ;; Only after the commit is the buffer's contents the parent's business, so
+      ;; this frame's damage is what the slots will owe when they come round again.
+      (record-frame-damage backend frame (unless (eq damage :full) damage))
       (setf (nested-awaiting-frame-p backend) t
             (nested-mapped-p backend) t)
       (incf (nested-frame-count backend))))

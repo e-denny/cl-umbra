@@ -204,8 +204,8 @@ mode on bind so that wayland-info has something true to print."))
    (mapped-p :initform nil :accessor surface-mapped-p)
    (committed-p :initform nil :accessor surface-committed-p)
    ;; wl_surface.set_buffer_transform (since 2) and set_buffer_scale (since 3).
-   ;; Stored and validated; *applied* only at the values this output advertises
-   ;; (transform 0, scale 1).  Honouring other values is the renderer's 2b work.
+   ;; Validated and stored here; read by the compositor's renderer at frame time,
+   ;; which turns the buffer and divides its scale out (D49).
    (buffer-transform :initform 0 :accessor surface-buffer-transform)
    (buffer-scale :initform 1 :accessor surface-buffer-scale)
    ;; The wl_compositor resource that created this surface.  A framework

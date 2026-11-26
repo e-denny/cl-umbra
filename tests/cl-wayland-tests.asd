@@ -56,6 +56,7 @@
                              (:file "client")
                              (:file "server")
                              (:file "scene")
+                             (:file "render")
                              (:file "tinywl"))))
   ;; The perform body is read while this file is loaded, long before the runner
   ;; is on the system, so its symbols are looked up by name.

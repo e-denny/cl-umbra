@@ -17,7 +17,9 @@
   --headless            render into memory; input must be injected (a test backend)
   --nested              run as a window inside the compositor in WAYLAND_DISPLAY
   --parent PATH         the parent's socket (implies --nested)
-  --size WxH            output size in pixels (default 1280x800)
+  --size WxH            output size in layout pixels (default 1280x800)
+  --scale N             device pixels per layout pixel (default 1); 2 draws at
+                        the density of a HiDPI output
   --launch CMD          start CMD (default weston-terminal) as a client of ours:
                         immediately, and again on Alt+Shift+Return
   --display NAME        the name of our own socket (default wayland-0 headless,
@@ -65,6 +67,12 @@ is the one interface that must not need a library to read."
                  ((string= argument "--size")
                   (multiple-value-bind (width height) (parse-size (value))
                     (setf options (list* :width width :height height options)))
+                  (skip))
+                 ((string= argument "--scale")
+                  (let ((scale (parse-integer (value) :junk-allowed t)))
+                    (unless (and scale (plusp scale))
+                      (error "~A is not a scale; it must be a positive integer" (value)))
+                    (setf options (list* :scale scale options)))
                   (skip))
                  ((string= argument "--display") (setf options (list* :display-name (value) options)) (skip))
                  ;; One executable, not a shell command line: what to launch is policy, and a

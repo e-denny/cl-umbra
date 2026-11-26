@@ -19,13 +19,21 @@
 ;;;; keeping them separate is what lets the compositor move a window without
 ;;;; lying to the client about its buffer.
 ;;;;
+;;;; Two spaces, one tree.  Layout (also called output-local or surface-local)
+;;;; coordinates are what a compositor's policies, configure sizes, hit tests and
+;;;; grabs speak; the target's device pixels are layout times the output scale.
+;;;; The scene is retained in layout coordinates and turns them into device
+;;;; pixels exactly once per frame, in SCENE-DRAW-LIST (D49).  A client that drew
+;;;; at its own buffer scale is divided out on the way: a scale-2 buffer shown on
+;;;; a scale-2 output is a 1:1 copy, which is the whole point of the protocol's
+;;;; buffer scale.
+;;;;
 ;;;; The tree is retained, not rebuilt per frame, because rules, workspaces,
 ;;;; overview and animations all need the node to exist between frames (D10).
 ;;;;
-;;;; Deliberately *not* here yet: damage regions (the compositor repaints the
-;;;; whole target, 2b), clip rectangles (pixman clips to the target, which is
-;;;; enough until a node can overflow its parent), culling, and layers
-;;;; (layer-shell arrives with the shell that needs them, phase 6).
+;;;; Deliberately *not* here yet: layers (layer-shell arrives with the shell that
+;;;; needs them, phase 6), fractional scaling (wp-fractional-scale, phase 5), and
+;;;; the effects passes (phase 7).
 
 (in-package #:cl-user)
 
@@ -113,15 +121,44 @@ phase 5)."))
   "A node drawing premultiplied ARGB8888 OCTETS, WIDTH x HEIGHT pixels."
   (make-instance 'image-node :octets octets :width width :height height))
 
+;;; ---------------------------------------------------------------------------
+;;; Layout size: what a surface occupies
+;;; ---------------------------------------------------------------------------
+;;
+;; A buffer is pixels; a surface is a size in layout coordinates.  The two differ
+;; by the client's buffer scale and, for a rotated buffer, by a swapped pair of
+;; axes.  Everything a compositor *decides* -- where a window goes, what a click
+;; hits, what a configure asks for -- is in layout coordinates, so the conversion
+;; happens here and nowhere else (D49).
+
+(defun surface-layout-size (surface)
+  "SURFACE's size in layout coordinates; two values, zero when it has no buffer.
+
+buffer size / buffer scale, with the axes swapped for the quarter turns.  Rounded
+up: a client whose buffer is not a whole multiple of its scale is malformed, and
+covering a pixel too many is the failure a person does not see."
+  (let ((buffer (and surface (surface-current-buffer surface))))
+    (if buffer
+        (let ((scale (max 1 (or (and surface (surface-buffer-scale surface)) 1))))
+          (multiple-value-bind (width height)
+              (render:buffer-display-size (shm-buffer-width buffer)
+                                          (shm-buffer-height buffer)
+                                          (or (surface-buffer-transform surface) 0))
+            (values (max 1 (ceiling width scale))
+                    (max 1 (ceiling height scale)))))
+        (values 0 0))))
+
 (defmethod node-width ((node buffer-node))
-  (let ((buffer (and (buffer-node-surface node)
-                     (surface-current-buffer (buffer-node-surface node)))))
-    (if buffer (shm-buffer-width buffer) 0)))
+  (let ((surface (buffer-node-surface node)))
+    (if surface
+        (nth-value 0 (surface-layout-size surface))
+        0)))
 
 (defmethod node-height ((node buffer-node))
-  (let ((buffer (and (buffer-node-surface node)
-                     (surface-current-buffer (buffer-node-surface node)))))
-    (if buffer (shm-buffer-height buffer) 0)))
+  (let ((surface (buffer-node-surface node)))
+    (if surface
+        (nth-value 1 (surface-layout-size surface))
+        0)))
 
 (defmethod node-width ((node scene-node))
   "A group has no size of its own: it is exactly its children's extent."
@@ -153,22 +190,44 @@ phase 5)."))
    ;; pointer never disappears over the bare output.
    (cursor-surface :initform nil :accessor scene-cursor-surface)
    (cursor-hotspot-x :initform 0 :accessor scene-cursor-hotspot-x)
-   (cursor-hotspot-y :initform 0 :accessor scene-cursor-hotspot-y))
+   (cursor-hotspot-y :initform 0 :accessor scene-cursor-hotspot-y)
+   ;; Layout coordinate -> device pixel.  The tree, its positions, its sizes and
+   ;; everything a compositor decides stay in layout coordinates; this is the one
+   ;; number that turns them into the target's pixels (D49).
+   (scale :initarg :scale :initform 1 :accessor scene-scale)
+   ;; Scratch regions for the per-frame clip and damage arithmetic, kept and
+   ;; reused rather than allocated: a frame allocates none of them in steady
+   ;; state, and growing the pool once is cheaper than a malloc per item per
+   ;; frame (docs/memory-and-rendering.md §11).
+   (regions :initform nil :accessor scene-regions))
   (:documentation
    "One output's tree plus its cursor.
 
-The output size is here because the scene is the thing that knows what fits; the
-compositor still owns the target, the background fill and the frame clock."))
+The output size is here because the scene is the thing that knows what fits;
+SCALE is the device pixels per layout coordinate; the compositor still owns the
+target, the background fill and the frame clock."))
 
-(defun make-scene (width height &key (cursor-image (make-cursor-image)))
-  "A scene for a WIDTH x HEIGHT output, with the built-in cursor image."
+(defun make-scene (width height &key (cursor-image (make-cursor-image)) (scale 1))
+  "A scene for a WIDTH x HEIGHT output at SCALE device pixels per coordinate."
   (let* ((root (make-instance 'tree-node))
          (cursor (make-instance 'image-node
                                 :octets cursor-image
                                 :width +cursor-width+
                                 :height +cursor-height+)))
-    (make-instance 'scene :width width :height height
+    (make-instance 'scene :width width :height height :scale scale
                           :root root :cursor cursor)))
+
+(defun scene-region (scene index)
+  "Scratch region number INDEX for SCENE, created on first use and reused after.
+
+A region is only valid until the next frame uses the same index, which is what lets
+one pool serve the clip arithmetic without being cleared by hand."
+  (let ((pool (scene-regions scene)))
+    (if (< index (length pool))
+        (nth index pool)
+        (let ((region (render:make-region)))
+          (setf (scene-regions scene) (append pool (list region)))
+          region))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Tree operations
@@ -284,46 +343,128 @@ in v0, so the bare output is genuinely nothing, and the compositor treats it as
   (node-at (scene-root scene) x y))
 
 ;;; ---------------------------------------------------------------------------
-;;; Drawing
+;;; Drawing: what to draw, where, and what has to be repainted
 ;;; ---------------------------------------------------------------------------
+;;
+;; A frame is three passes over one list.  SCENE-DRAW-LIST turns the tree into
+;; draw items in device pixels, back to front; SCENE-DAMAGE-BETWEEN compares this
+;; frame's list with the last one and says which pixels differ; SCENE-RENDER-ITEMS
+;; draws the items, each through a clip that is its own rectangle minus everything
+;; opaque above it and minus everything undamaged (D48, D50).
+;;
+;; One list is why the passes cannot disagree: the same rectangles decide the
+;; damage and the draw, so a window that moved and a window that redrew are the
+;; same kind of event to both.
 
-(defun node-drawn-surface (node)
-  "The wl_surface NODE draws, or NIL for any other node kind."
-  (and (buffer-node-p node) (buffer-node-surface node)))
+(defstruct (draw-item (:constructor %make-draw-item))
+  ;; NODE is what the damage diff matches on, and for the cursor item it is always
+  ;; the scene's cursor node -- a client's cursor image and the built-in arrow are
+  ;; the same item with a different picture, not two things that come and go.
+  node
+  (kind :rect)
+  ;; device pixels
+  (x 0) (y 0) (width 0) (height 0)
+  ;; where surface-local (0,0) is, in device pixels (buffer items)
+  (surface-x 0) (surface-y 0)
+  surface
+  buffer
+  (transform 0)
+  colour
+  octets
+  ;; the bitmap's own pixel size, when it is not its drawn size (the cursor)
+  (source-width 0) (source-height 0)
+  ;; device rectangles this item hides completely (opaque culling)
+  opaque
+  ;; device rectangles this item's content changed in since the last frame
+  damage
+  (cursor-p nil)
+  ;; the region this item is drawn through; NIL means "unclipped"
+  clip)
 
-(defun render-node (target node base-x base-y)
-  "Draw NODE and its children at (BASE-X, BASE-Y); return the surfaces drawn.
+(defun draw-item-signature (item)
+  "What has to stay equal for two frames to draw the same pixels for ITEM.
 
-The list is returned rather than pushed into a caller's variable, because a
-pushed list is a *new* head: the caller would keep the old, empty one and the
-compositor would never release the buffers it drew (found by the xdg gate: the
-client stopped after one frame, waiting for a wl_buffer.release)."
-  (let ((drawn '()))
-    (when (node-visible-p node)
-      (let ((x (+ base-x (node-x node)))
-            (y (+ base-y (node-y node))))
-        (cond
-          ((tree-node-p node)
-           (dolist (child (node-children node))
-             (setf drawn (append drawn (render-node target child x y)))))
-          ((buffer-node-p node)
-           (let ((surface (buffer-node-surface node)))
-             (when (and (surface-mapped-p surface)
-                        (surface-current-buffer surface)
-                        ;; The attach offset is the client's own coordinate: it
-                        ;; says where its buffer sits inside the surface.
-                        (render:composite-buffer target (surface-current-buffer surface)
-                                                 :x (+ x (surface-current-x surface))
-                                                 :y (+ y (surface-current-y surface))))
-               (setf drawn (list surface)))))
-          ((rect-node-p node)
-           (render:fill-rect target x y (node-width node) (node-height node)
-                             (rect-node-color node)))
-          ((image-node-p node)
-           (render:composite-bitmap target (image-node-octets node)
-                                    (node-width node) (node-height node)
-                                    :x x :y y)))))
-    drawn))
+Geometry is compared separately (the damage diff needs the old rectangle as well
+as the new one); this is the *content*: which buffer, which bitmap, which colour."
+  (list (draw-item-kind item)
+        (draw-item-surface item)
+        (draw-item-buffer item)
+        (draw-item-transform item)
+        (draw-item-colour item)
+        (draw-item-octets item)
+        (draw-item-width item)
+        (draw-item-height item)))
+
+(declaim (inline scale-coordinate))
+(defun scale-coordinate (value scale)
+  "VALUE in layout coordinates as a device pixel index, rounded to nearest."
+  (round (* value scale)))
+
+(defun scale-length (value scale)
+  "VALUE as a device length, at least one pixel: a visible thing is never zero wide."
+  (max 1 (round (* value scale))))
+
+(defun surface-local-rect-to-device (rect surface-x surface-y scale)
+  "RECT (X Y WIDTH HEIGHT), surface-local, as a device rectangle.
+
+SURFACE-X/Y are where the surface's own origin is in device pixels, so this needs
+no origin for the node: a damage rectangle or an opaque region is relative to the
+surface, which is relative to nothing else."
+  (destructuring-bind (x y width height) rect
+    (list (+ surface-x (scale-coordinate x scale))
+          (+ surface-y (scale-coordinate y scale))
+          (scale-length width scale)
+          (scale-length height scale))))
+
+(defun opaque-rects-from-surface (surface surface-x surface-y scale)
+  "SURFACE's committed opaque region as device rectangles; NIL when it hides nothing.
+
+An XRGB8888 buffer is opaque everywhere by definition -- its alpha bits are
+undefined and must not be blended -- so a client need not set a region to get the
+benefit.  An ARGB buffer hides only what the client says it does (D48)."
+  (let ((buffer (and surface (surface-current-buffer surface))))
+    (when buffer
+      (if (= (shm-buffer-format buffer) 1)
+          (multiple-value-bind (layout-width layout-height) (surface-layout-size surface)
+            (list (list surface-x surface-y
+                        (scale-length layout-width scale)
+                        (scale-length layout-height scale))))
+          (let ((region (surface-opaque-region surface)))
+            (when region
+              (loop for rect in region
+                    collect (surface-local-rect-to-device rect surface-x surface-y scale))))))))
+
+(defun make-buffer-item (node surface scale)
+  "A draw item for SURFACE drawn at NODE's position, in device pixels."
+  (let* ((buffer (surface-current-buffer surface))
+         (buffer-scale (max 1 (or (surface-buffer-scale surface) 1)))
+         (node-x (scale-coordinate (node-x node) scale))
+         (node-y (scale-coordinate (node-y node) scale))
+         (x (scale-coordinate (+ (node-x node) (surface-current-x surface)) scale))
+         (y (scale-coordinate (+ (node-y node) (surface-current-y surface)) scale))
+         (transform (or (surface-buffer-transform surface) 0)))
+    ;; A rotated buffer occupies the swapped rectangle: the client's bytes are
+    ;; width x height, the space they fill is the other way round.
+    (multiple-value-bind (display-width display-height)
+        (render:buffer-display-size (shm-buffer-width buffer) (shm-buffer-height buffer)
+                                    transform)
+      (%make-draw-item
+       :node node
+       :kind :buffer
+       :surface surface
+       :buffer buffer
+       :transform transform
+       ;; The destination size is what the client's pixels occupy *now*: its own
+       ;; buffer scale divided out, the output's scale multiplied in (D49).
+       :x x :y y
+       :width (max 1 (round (/ (* display-width scale) buffer-scale)))
+       :height (max 1 (round (/ (* display-height scale) buffer-scale)))
+       :surface-x node-x
+       :surface-y node-y
+       :opaque (opaque-rects-from-surface surface node-x node-y scale)
+       :damage (loop for rect in (surface-damage-since-frame surface)
+                     collect (surface-local-rect-to-device rect node-x node-y scale))
+       :cursor-p nil))))
 
 (defun client-cursor-usable-p (surface)
   "Is SURFACE a pointer image that can be drawn right now?
@@ -336,29 +477,282 @@ window -- it is drawn whenever the client has put pixels in it."
        (not (resource-destroyed-p surface))
        (surface-current-buffer surface)))
 
-(defun scene-render (scene target)
-  "Draw the scene onto TARGET; returns the list of surfaces that were drawn.
+(defun make-cursor-item (scene scale)
+  "The pointer's item: the client's image when there is one, the arrow otherwise.
 
-The cursor is drawn last, from its own node position: the client's image if the client
-installed one, otherwise the built-in arrow and only when SCENE-CURSOR-VISIBLE-P.  A
-client's image is drawn at (pointer - hotspot), which is what makes the hotspot mean
-what the protocol says it means.  It is not returned as *drawn*: the compositor holds
-a cursor image until the client replaces it rather than releasing it per frame, which
-is what cursor images expect (D41)."
-  (let ((drawn (render-node target (scene-root scene) 0 0)))
-    (let ((surface (scene-cursor-surface scene)))
+The built-in arrow is drawn at 16x16 layout pixels -- it is a cursor, not a
+client's pixels -- so it grows with the output scale instead of being resampled to
+some other size (nearest-neighbour, so it stays an arrow)."
+  (let ((cursor (scene-cursor scene))
+        (surface (scene-cursor-surface scene)))
+    (cond
+      ((client-cursor-usable-p surface)
+       (let* ((buffer (surface-current-buffer surface))
+              (buffer-scale (max 1 (or (surface-buffer-scale surface) 1)))
+              (transform (or (surface-buffer-transform surface) 0))
+              ;; The hotspot is in layout coordinates, so it is subtracted
+              ;; *before* scaling: that is what makes it mean what the protocol
+              ;; says it means.
+              (x (scale-coordinate (- (node-x cursor) (scene-cursor-hotspot-x scene)) scale))
+              (y (scale-coordinate (- (node-y cursor) (scene-cursor-hotspot-y scene)) scale)))
+         (multiple-value-bind (display-width display-height)
+             (render:buffer-display-size (shm-buffer-width buffer) (shm-buffer-height buffer)
+                                         transform)
+           (%make-draw-item
+            :node cursor
+            :kind :buffer
+            :surface surface
+            :buffer buffer
+            :transform transform
+            :x x :y y
+            :width (max 1 (round (/ (* display-width scale) buffer-scale)))
+            :height (max 1 (round (/ (* display-height scale) buffer-scale)))
+            :surface-x x
+            :surface-y y
+            :damage (loop for rect in (surface-damage-since-frame surface)
+                          collect (surface-local-rect-to-device rect x y scale))
+            :cursor-p t))))
+      ((and (scene-cursor-visible-p scene) (node-visible-p cursor))
+       (%make-draw-item
+        :node cursor
+        :kind :image
+        :x (scale-coordinate (node-x cursor) scale)
+        :y (scale-coordinate (node-y cursor) scale)
+        :width (scale-length (node-width cursor) scale)
+        :height (scale-length (node-height cursor) scale)
+        :octets (image-node-octets cursor)
+        :source-width (node-width cursor)
+        :source-height (node-height cursor)
+        :cursor-p t))
+      (t nil))))
+
+(defun collect-draw-items (node base-x base-y scale items)
+  "Push NODE's subtree's draw items onto ITEMS, back to front; return ITEMS."
+  (when (node-visible-p node)
+    (let ((x (+ base-x (node-x node)))
+          (y (+ base-y (node-y node))))
       (cond
-        ((client-cursor-usable-p surface)
-         (render:composite-buffer target (surface-current-buffer surface)
-                                  :x (- (node-x (scene-cursor scene))
-                                        (scene-cursor-hotspot-x scene))
-                                  :y (- (node-y (scene-cursor scene))
-                                        (scene-cursor-hotspot-y scene))))
-        ((and (scene-cursor-visible-p scene)
-              (node-visible-p (scene-cursor scene)))
-         (setf drawn (append drawn (render-node target (scene-cursor scene) 0 0))))))
-    drawn))
+        ((tree-node-p node)
+         (dolist (child (node-children node))
+           (setf items (collect-draw-items child x y scale items))))
+        ((buffer-node-p node)
+         (let ((surface (buffer-node-surface node)))
+           (when (and surface (surface-mapped-p surface) (surface-current-buffer surface))
+             (push (make-buffer-item node surface scale) items))))
+        ((rect-node-p node)
+         (let* ((colour (rect-node-color node))
+                (x0 (scale-coordinate x scale))
+                (y0 (scale-coordinate y scale))
+                (w (scale-length (node-width node) scale))
+                (h (scale-length (node-height node) scale)))
+           (push (%make-draw-item
+                  :node node
+                  :kind :rect
+                  :x x0 :y y0 :width w :height h
+                  :colour colour
+                  ;; A rectangle with a translucent colour hides nothing; an
+                  ;; opaque one hides everything under it.
+                  :opaque (when (= 255 (ldb (byte 8 24) colour))
+                            (list (list x0 y0 w h)))
+                  :cursor-p nil)
+                 items)))
+        ((image-node-p node)
+         (push (%make-draw-item :node node :kind :image
+                                :x (scale-coordinate x scale)
+                                :y (scale-coordinate y scale)
+                                :width (scale-length (node-width node) scale)
+                                :height (scale-length (node-height node) scale)
+                                :octets (image-node-octets node)
+                                :source-width (node-width node)
+                                :source-height (node-height node)
+                                :cursor-p nil)
+               items))))
+    items))
 
+(defun scene-draw-list (scene &key (scale nil))
+  "Everything the scene would draw this frame, back to front, in device pixels.
+
+The cursor comes last, after everything in the tree, and it is the only item that
+is not in the tree: a pointer is above every window and must never be hit-tested
+(D31).  The list is what the damage diff and the draw both read, so they cannot
+disagree about what a frame contains (D48)."
+  (let* ((scale (or scale (scene-scale scene)))
+         ;; SETF, not a bare call: PUSH extends a *local* head, so the returned
+         ;; list is the only one that has the tree's items in it (the same trap
+         ;; RENDER-NODE documented before this list existed).
+         (items (nreverse (collect-draw-items (scene-root scene) 0 0 scale nil)))
+         (cursor (make-cursor-item scene scale)))
+    ;; Appended, not pushed: the cursor is drawn *after* everything in the tree,
+    ;; and a pointer that is drawn under a window is a pointer nobody can see.
+    (if cursor (append items (list cursor)) items)))
+
+;;; ---------------------------------------------------------------------------
+;;; Damage: what changed since the last frame
+;;; ---------------------------------------------------------------------------
+
+(defun item-rect (item)
+  "ITEM's device rectangle as (X Y WIDTH HEIGHT)."
+  (list (draw-item-x item) (draw-item-y item)
+        (draw-item-width item) (draw-item-height item)))
+
+(defun same-rect-p (a b)
+  (and (= (draw-item-x a) (draw-item-x b))
+       (= (draw-item-y a) (draw-item-y b))
+       (= (draw-item-width a) (draw-item-width b))
+       (= (draw-item-height a) (draw-item-height b))))
+
+(defun item-order (items)
+  "The nodes of ITEMS, in order: what has to be equal for stacking not to change."
+  (mapcar #'draw-item-node items))
+
+(defun scene-damage-between (previous current into)
+  "Union into INTO the pixels that differ between PREVIOUS and CURRENT; returns INTO.
+
+Returns :FULL instead when the whole output has to be repainted: a stacking change
+(raising a window uncovers the pixels under it and covers the pixels over it, and
+a rectangle diff cannot see either).  The first frame is the caller's business --
+an empty scene and a never-drawn scene have the same item list, and only the
+compositor knows which it has (D48).
+
+Two sources of damage, and both are needed.  *Geometry* -- a node that is new,
+gone or somewhere else -- is the difference between the two lists, which is why
+moving a window, moving a popup or moving the pointer needs no bookkeeping at all.
+*Content* -- a client that repainted part of its window -- is the damage the client
+itself reported at commit, carried on the item.  A frame with no damage is a frame
+with nothing to draw (D48)."
+  (cond
+    ((not (equal (item-order previous) (item-order current))) :full)
+    (t
+     (dolist (item current)
+       (let ((old (find (draw-item-node item) previous :key #'draw-item-node)))
+         (cond
+           ((null old)
+            (render:region-add-box into (item-rect item)))
+           (t
+            (unless (same-rect-p old item)
+              (render:region-add-box into (item-rect old))
+              (render:region-add-box into (item-rect item)))
+            (unless (equal (draw-item-signature old) (draw-item-signature item))
+              (render:region-add-box into (item-rect item)))
+            (dolist (rect (draw-item-damage item))
+              (render:region-add-box into rect))))))
+     (dolist (old previous)
+       (unless (find (draw-item-node old) current :key #'draw-item-node)
+         (render:region-add-box into (item-rect old))))
+     into)))
+
+(defun scene-consume-damage (items)
+  "Clear the content damage ITEMS carried, after a frame has painted it.
+
+Called once per drawn frame, not per built list: a frame that could not be drawn
+(no buffer from the parent yet) must keep its damage for the frame that can."
+  (dolist (item items)
+    (let ((surface (draw-item-surface item)))
+      (when surface
+        (setf (surface-damage-since-frame surface) nil))))
+  nil)
+
+;;; ---------------------------------------------------------------------------
+;;; The draw
+;;; ---------------------------------------------------------------------------
+
+(defun scene-clip-regions (scene items damage)
+  "One clip per item: its rectangle, minus everything opaque above it, minus damage.
+
+Front to back, because that is the only order in which \"what is above\" is known
+without looking ahead: the region covered so far is the union of the opaque
+rectangles already passed.  A NIL clip means \"draw the item as it is\" -- no clip
+is needed when nothing opaque is above it and the whole output is being repainted,
+which is the common frame (D48)."
+  (let* ((count (length items))
+         (clips (make-list count))
+         (covered (scene-region scene 0))
+         (visible (scene-region scene 1))
+         (pool-index 2))
+    (render:region-clear covered)
+    (loop for index from (1- count) downto 0
+          for item = (nth index items)
+          do (if damage
+                 (render:region-intersect-rect
+                  visible damage
+                  (draw-item-x item) (draw-item-y item)
+                  (draw-item-width item) (draw-item-height item))
+                 (render:region-set-rect
+                  visible
+                  (draw-item-x item) (draw-item-y item)
+                  (draw-item-width item) (draw-item-height item)))
+             (render:region-subtract visible visible covered)
+             (setf (nth index clips)
+                   (cond
+                     ;; :empty is "not drawn at all"; NIL is "drawn unclipped".
+                     ((render:region-empty-p visible) :empty)
+                     ((and (null damage) (render:region-empty-p covered)) nil)
+                     (t (let ((clip (scene-region scene pool-index)))
+                          (incf pool-index)
+                          (render:region-copy clip visible)))))
+             (dolist (rect (draw-item-opaque item))
+               (render:region-add-box covered rect)))
+    clips))
+
+(defun draw-item (target item)
+  "Draw ITEM through its clip, if it has one."
+  (let ((clip (draw-item-clip item)))
+    (if clip
+        (render:target-set-clip target clip)
+        (render:target-clear-clip target)))
+  (ecase (draw-item-kind item)
+    (:buffer
+     (render:composite-buffer target (draw-item-buffer item)
+                              :x (draw-item-x item)
+                              :y (draw-item-y item)
+                              :width (draw-item-width item)
+                              :height (draw-item-height item)
+                              :transform (draw-item-transform item)))
+    (:rect
+     (render:fill-rect target (draw-item-x item) (draw-item-y item)
+                       (draw-item-width item) (draw-item-height item)
+                       (draw-item-colour item)))
+    (:image
+     (render:composite-bitmap target (draw-item-octets item)
+                              (draw-item-source-width item)
+                              (draw-item-source-height item)
+                              :x (draw-item-x item) :y (draw-item-y item)
+                              :dest-width (draw-item-width item)
+                              :dest-height (draw-item-height item)))))
+
+(defun scene-render-items (scene target &key items damage)
+  "Draw ITEMS onto TARGET; return the surfaces to release and present.
+
+DAMAGE is a region in device pixels, or NIL for \"the whole target\".  An item with
+an empty clip after damage and occlusion is not drawn at all -- but its surface is
+still returned, because a client whose window is hidden behind another still has to
+get its buffer back and its frame callback (D25).
+
+The cursor is drawn last and is not returned: the compositor holds a cursor image
+until the client replaces it rather than releasing it per frame, which is what
+cursor images expect (D41)."
+  (let* ((items (or items (scene-draw-list scene)))
+         (clips (scene-clip-regions scene items damage))
+         (drawn '()))
+    (loop for item in items
+          for clip in clips
+          do (setf (draw-item-clip item) (if (eq clip :empty) nil clip))
+             (unless (eq clip :empty)
+               (draw-item target item))
+             (when (and (eq (draw-item-kind item) :buffer)
+                        (not (draw-item-cursor-p item)))
+               (push (draw-item-surface item) drawn)))
+    (render:target-clear-clip target)
+    (nreverse drawn)))
+
+(defun scene-render (scene target &key (scale nil) damage items)
+  "Draw the scene onto TARGET; returns (values drawn-surfaces items).
+
+The one call for a compositor that does not track damage: SCENE-DRAW-LIST plus
+SCENE-RENDER-ITEMS with the whole target as the damage."
+  (let ((items (or items (scene-draw-list scene :scale scale))))
+    (values (scene-render-items scene target :items items :damage damage)
+            items)))
 ;;; ---------------------------------------------------------------------------
 ;;; The built-in cursor
 ;;; ---------------------------------------------------------------------------

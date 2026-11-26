@@ -1970,3 +1970,215 @@ so leaving the nested window still ends the drag (the parent sends no coordinate
 advertise. The lesson: **a coordinate outside the output and a pointer that no longer exists are
 different statements, and a compositor that infers the second from the first throws away the
 first.**
+
+---
+
+## D48 — Damage is what changed since the last frame, and a frame that paints nothing still answers its clients
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** phase 2b, rendering (damage tracking, opaque culling)
+
+Phase 2a repainted the whole output every frame: a full background fill, then every window
+composited again, whether or not anything had changed. The note in
+`docs/memory-and-rendering.md` §10 was that damage tracking is worth "5-10× on typical
+desktops", and it is the first rung of that ladder. Getting it wrong is invisible until it
+is not: a stale pixel is a pixel nobody repaints, and the frame still "looks right" for
+every static screenshot a gate can take.
+
+The design problem is *where the damage comes from*. A compositor that accumulates damage
+in every operation that could change a pixel (a move, a raise, a popup following its
+parent, a pointer moving, a client commit, a resize) has to remember one more thing in
+each of them, and forgets one. This compositor instead keeps **the draw list of the last
+frame** and diffs against it: a node that is new, gone, moved or given a different buffer
+is the difference between two lists, and nothing has to remember to say so.
+
+**Decision.**
+
+1. **The frame is one list, computed once, and both the damage and the draw read it.**
+   `scene-draw-list` turns the tree into draw items in device pixels, back to front; the
+   cursor appended last. `scene-damage-between` compares it with the previous frame's list
+   (geometry, content signature, and the damage each surface reported at commit);
+   `scene-render-items` draws it. Because both passes read the same rectangles they cannot
+   disagree, which is the failure that makes damage tracking look like magic.
+2. **Client damage is the content half.** A commit's `wl_surface.damage` rectangles are
+   accumulated on the surface (`surface-damage-since-frame`) and only mapped to output
+   pixels once per frame, because that is the only moment the compositor knows where the
+   surface *is*. A frame that paints them clears them; a frame that could not be drawn (the
+   nested backend had no parent buffer) keeps them.
+3. **A stacking change is a full repaint.** Raising a window uncovers the pixels under it
+   and covers the pixels over it, and neither shows up in a rectangle diff of the *new*
+   list. Comparing the node order costs one list walk and is honest; everything else is
+   incremental.
+4. **Each item is drawn through a clip: its rectangle, minus what opaque items above it
+   cover, minus what is not damaged.** A surface is opaque if its buffer is `xrgb8888`
+   (the alpha bits are undefined and must not be blended) or if the client's committed
+   opaque region says so; a translucent rectangle hides nothing. An item whose clip is
+   empty is not drawn at all, and that is what makes culling free.
+5. **An empty frame still walks the list.** With nothing damaged, no pixel is touched --
+   but every mapped surface still comes back from the walk, so its buffer is released and
+   its frame callback fires. A client that asks for a frame without damaging anything is
+   waiting for exactly that (D25), and a nested backend needs it to give back the parent
+   buffer it was holding.
+6. **`cf:invalidate-output` is the escape hatch** and a REPL function in its own right:
+   after a mode change, a scale change, or suspicion, the next frame repaints everything and
+   the frame after it goes back to damage.
+7. **Translucent rectangles are filled through a repeated one-pixel premultiplied image,
+   not through `pixman_image_fill_boxes`.** Measured, not assumed: pixman 0.46's
+   `fill_boxes` turns a `pixman_color_t` into a *straight* alpha pixel and composites it as
+   if it were premultiplied, so 50% white over green comes out `#xFFFFFFFF` instead of
+   `#xFF80FF80`. Opaque colours -- every background and border -- still take the fast path.
+
+**Evidence.** `tests/unit/render.lisp` (22 tests) checks the diff arithmetic (a moved node
+damages both rectangles; an untouched output damages nothing; `invalidate-output` is whole
+for exactly one frame), opaque culling (a covered window's pixels come back when it is
+removed, which only works because the diff damages what disappeared), and the blend. The
+strong test is `a-partial-repaint-is-a-full-repaint`: a scene of two opaque rectangles and
+a translucent veil is moved four times, and the incremental frame is compared with a full
+repaint of the same scene *pixel for pixel*. Gate clause 19 does the same through the
+public API, and asserts that the last partial frame repainted 60x41 of a 120x90 output --
+so the comparison is not passing because damage quietly became a full repaint. The bugs
+this slice found, each now impossible to re-introduce quietly: the cursor item was
+appended to the wrong end of the list and drawn *under* the windows (found by the scene
+gate's cursor check); and an empty scene's item list is `NIL`, which the diff read as "no
+frame yet" and turned every frame into a full repaint (found by the damage test, fixed with
+an explicit `frame-history-p` flag).
+
+**Consequences.** A typing client repaints its own damage rectangle; a still desktop
+repaints nothing; two overlapping windows cost their visible area rather than their sum.
+The list is consed per frame (one draw item per node, one clip region per item from a
+pooled set), which is the honest cost of this design until a frame-budget test exists:
+`docs/memory-and-rendering.md` §11's "no allocation per frame" is still a target, and the
+pool is what keeps the largest part of it (the regions) out of the allocator. What this
+does not do: per-surface damage *regions* (the clip is pixman's, the client's damage is a
+list of rectangles), damage buffer coordinates (`wl_surface.damage_buffer` is v4 and we
+advertise v3), or skipping a frame that nobody asked for. The lesson: **a compositor that
+wants to know what changed should keep what it drew last time, rather than remember to
+report every change.**
+
+---
+
+## D49 — Layout coordinates and device pixels are different spaces, and one number separates them
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** phase 2b, rendering (buffer scale, buffer transform)
+
+The output scale question had been deferred since D29: `wl_compositor` v3 accepts
+`set_buffer_scale` and `set_buffer_transform`, and drew them 1:1, "until the renderer
+scales (2b)". The consequence was visible on the user's own output: Umbriel runs HDMI-A-1 at
+scale 2, and a nested session inside it drew at scale 1 and let the parent upscale it, so
+every glyph was doubled by a blit instead of drawn at the right density.
+
+The trap is that two different numbers are called "scale". The *output* scale says how many
+device pixels a layout coordinate occupies. A *client's* buffer scale says how many buffer
+pixels that client drew per layout coordinate of its own surface, because it was told the
+output's scale and drew at it. When they are equal the buffer maps 1:1 to the target, which
+is the whole point of the protocol's buffer scale; when they differ (a scale-1 client on a
+scale-2 output) the buffer is magnified.
+
+**Decision.**
+
+1. **The scene speaks layout coordinates; the target is device pixels; the conversion
+   happens once per frame, in `scene-draw-list`.** Positions, sizes, hit tests, configure
+   sizes, grabs, clamping and every policy stay layout. A node's width is the *layout* size
+   of its surface: its buffer divided by its buffer scale, with the axes swapped for a
+   quarter turn. `scene-scale` is the one number between the spaces.
+2. **A client's buffer scale is divided out, and the output's scale multiplied in.**
+   A buffer is drawn into `round(buffer-display-width * output-scale / buffer-scale)`
+   device pixels, nearest-neighbour, so a client that drew at the output's scale is copied
+   pixel for pixel rather than resampled.
+3. **The eight `wl_output.transform` values are applied on top**, as pixman transforms
+   mapping the destination rectangle back to the buffer. The matrices are derived from the
+   protocol's own words ("90 degrees counter-clockwise"; the flipped family as "an initial
+   flip around a vertical axis followed by rotation"), written out in `transform-matrix`,
+   and checked twice: as numbers in `tests/unit/render.lisp`, and as rendered pixels of a
+   real client's buffer in gate clause 19.
+4. **The output advertises its scale**: `wl_output.scale` is the scene's scale and the mode
+   is the layout size times it, so a well-behaved client draws at the right density.
+5. **A nested session tells its parent the same scale** (`wl_surface.set_buffer_scale` on
+   the parent surface) and sizes its parent buffers in device pixels. The layout size the
+   parent configured it at is unchanged, so the window is the size it asked for and the
+   pixels are the density it draws at.
+6. **`cf:frame-pixel` reads layout coordinates and `cf:frame-pixel-device` reads device
+   ones.** Every existing gate and test speaks layout, so they kept working unchanged at
+   scale 1 and became meaningful at scale 2.
+
+**Evidence.** `tests/unit/render.lisp`: `a-surfaces-layout-size-divides-out-its-buffer-scale`,
+`a-buffer-node-is-hit-in-layout-coordinates` (a 64x32 buffer at scale 2 is a 32x16 window,
+and a click past 32 misses it), `the-draw-list-turns-layout-into-device-pixels` (the same
+window is 128x64 device on a scale-2 output and 64x32 when the client also drew at scale 2),
+`a-transform-matrix-maps-destination-to-source` (all eight), and
+`a-scale-two-output-draws-at-twice-the-size`. Gate clause 19 runs a real libwayland client
+that decides its own `set_buffer_scale` and `set_buffer_transform`: at scale 1, on a scale-2
+output (magnified to 128x64), at buffer scale 2 on a scale-2 output (1:1, 64x32), and with
+transforms 90 and 180 -- four quadrants each, all landing where the rotation says. Its last
+section starts a scale-2 nested session inside a scale-1 parent and checks that the parent's
+server saw `buffer_scale 2`, a 200x160 buffer for a 100x80 layout, and the window drawn at
+100x80 layout pixels.
+
+**Consequences.** A nested session on a scale-2 output now draws text at its native density
+-- the reason this slice was asked for. What it does not do: fractional scale
+(`wp-fractional-scale` is phase 5), scaled *output* rotation (a per-surface rotation is what
+is implemented; rotating the whole output is phase 4's scanout concern), or viewports
+(`wp_viewport`), so a client that wants a non-integral scale still gets nearest-neighbour.
+The cursor is drawn at 16x16 *layout* pixels, so it is 32x32 device pixels at scale 2: twice
+the size a themed cursor would be, which is the "acceptable for now" the user named before
+this slice and which phase 5's theme lookup replaces. The lesson: **a scale is a statement
+about a space, so give the space a name and convert in exactly one place.**
+
+---
+
+## D50 — A buffer's age is how many frames it missed, and two frames is all a two-buffer session can be behind
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** phase 2b, rendering (buffer age for the nested path)
+
+D48's damage is only useful for the nested backend if the buffer it paints into still holds
+what the parent is showing. With two buffers, a buffer is either the last frame's (age 1) or
+the one before it (age 2) -- and after two frames it must be painted whole. The old code
+avoided the question by damaging the whole surface on every commit, which is correct and
+wastes the whole frame.
+
+**Decision.**
+
+1. **Two damage entries, newest first, and a frame number per slot.** A slot is painted
+   whole if it has never been presented; otherwise the frame repaints the union of the
+   damage of every frame this slot missed. Two entries is not a tuning constant: with two
+   buffers, a slot can only ever be two frames behind, so a third entry would describe a
+   state no slot can be in.
+2. **A frame recorded as `:full` makes every slot that missed it full.** A resize or a new
+   buffer paints everything, so the *other* slot's contents are unknown rather than
+   partially known; recording "whole" and treating an unknown entry as whole is what keeps
+   the arithmetic honest after a configure.
+3. **A frame that paints nothing gives its slot back without a commit.** The compositor
+   still calls the presenter with an empty region; the nested presenter then attaches and
+   commits nothing, marks the slot free, and records the frame. Presenting an unchanged
+   buffer would cost a parent round trip and a parent repaint for no pixels, and *not*
+   returning the slot was a real deadlock found the first time a client mapped after an
+   idle frame: both slots were taken by frames that had nothing to draw, and no frame could
+   ever be prepared again.
+4. **The frame sequence and the presented-frame count are separate numbers.** A frame that
+   paints nothing still occupies a sequence number (the history has to be able to say "that
+   frame painted nothing"); `nested-frame-count` stays what the gate reads as "frames the
+   parent was shown".
+
+**Evidence.** The deadlock above is the evidence for 3: a nested session with one client
+presented exactly one frame and then stopped, with both slots busy and `frame-dirty` still
+true. After the fix the same probe shows 259 frames in 1.5 seconds (a client that redraws on
+every frame callback), and the nested gate's pixel grid passes. Gate clause 19's nested
+section checks the scale plumbing end to end; the nested gate and the tinywl parity script
+(both runs) check that partial presenting did not change what the parent sees. The
+`record-frame-damage` ring reuses two regions, so recording a frame allocates nothing, and five
+unit tests pin the age arithmetic: a slot nobody has seen, a slot that missed one frame (the
+region is that frame's damage), one that missed a full frame, one whose missing frame was never
+recorded, and a history that keeps two frames and no more.
+
+**Consequences.** The nested path now damages what changed, in surface-local coordinates
+(device pixels divided by the scale, rounded outwards -- a damage rectangle a pixel too
+small leaves a stale pixel, one too large only repaints it). What this does not do: more
+than two buffers, `wp_commit_timing`/explicit sync, or presenting a frame that is still
+being read by the parent (the one-frame-in-flight rule from phase 3e still holds). The
+lesson: **incremental drawing is only sound against a buffer whose age you know, so count
+the frames a buffer missed and stop pretending after two.**

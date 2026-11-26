@@ -127,13 +127,13 @@ comes back through wl_display.delete_id without the client doing anything."
   (send-request surface (interface-request (proxy-interface surface) 6)))
 
 (defmethod wl-surface.set-buffer-transform ((surface surface) transform)
-  "Ask for the buffer to be drawn rotated/flipped; stored, not applied (D29)."
+  "Ask for the buffer to be drawn rotated/flipped; the compositor applies it (D29, D49)."
   (check-live surface)
   (send-request surface (interface-request (proxy-interface surface) 7)
                 transform))
 
 (defmethod wl-surface.set-buffer-scale ((surface surface) scale)
-  "Ask for the buffer to be drawn at SCALE; stored, not applied (D29)."
+  "Ask for the buffer to be drawn at SCALE; the compositor applies it (D29, D49)."
   (check-live surface)
   (send-request surface (interface-request (proxy-interface surface) 8)
                 scale))
