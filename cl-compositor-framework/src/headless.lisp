@@ -108,12 +108,18 @@ xdg_wm_base, a pixman target, and the surfaces committed to it."))
                                       (display-name (uiop:getenv "WAYLAND_DISPLAY"))
                                       (runtime-dir (uiop:getenv "XDG_RUNTIME_DIR"))
                                       (background #xFF000000)
-                                      (reactor nil))
+                                      (reactor nil)
+                                      (compositor-class 'headless-compositor))
   "A display offering wl_compositor, wl_shm, wl_output and xdg_wm_base, rendering
 into memory.
 
 Returns the compositor; the display is `(compositor-display ...)`, and
-`(render-frame ...)` draws the current state."
+`(render-frame ...)` draws the current state.
+
+COMPOSITOR-CLASS is the class of the object returned: a compositor (cl-tinywl,
+cl-umbra) subclasses HEADLESS-COMPOSITOR and passes its own class, which is how
+policy -- placement, what a pointer press means, what a key does -- is added to
+the framework without a hook table (D7: classes, not vtables)."
   (let* ((display (srv:make-display :display-name display-name
                                                :runtime-dir runtime-dir
                                                :reactor (or reactor
@@ -122,7 +128,7 @@ Returns the compositor; the display is `(compositor-display ...)`, and
                               :name "seat0"
                               :capabilities (logior srv:+wl-seat-capability-pointer+
                                                     srv:+wl-seat-capability-keyboard+)))
-         (compositor (make-instance 'headless-compositor
+         (compositor (make-instance compositor-class
                                     :display display
                                     :width width
                                     :height height
@@ -235,6 +241,20 @@ node and remembering it stays the framework's job either way.")
                          (srv:resource-id surface) x y)
         node))))
 
+(defun cursor-surface-p (compositor surface)
+  "Did a client install SURFACE as the pointer's image (wl_pointer.set_cursor)?
+
+v0 draws its own cursor and does not composite a client's -- cursor surfaces are
+phase 5 -- but the seat records which surface was offered, and that is enough to
+keep it out of the scene.  A cursor surface given a node is drawn at the top-left of
+the output, is hit-testable, and is first in the stack order, which is where a
+cycling or click-to-focus policy would find it and raise a tiny arrow instead of a
+window (the tinywl parity gate found it)."
+  (let ((seat (compositor-seat compositor)))
+    (loop for binding in (srv:seat-bindings seat)
+          thereis (loop for pointer in (srv:seat-resource-pointers binding)
+                        thereis (eq (srv:pointer-cursor-surface pointer) surface)))))
+
 (defun ensure-scene-node (compositor surface)
   "The node SURFACE is drawn through, creating it on the first mapped commit.
 
@@ -242,9 +262,10 @@ A surface with a shell role is placed by ON-NEW-TOPLEVEL.  A bare wl_surface has
 no role and no compositor policy about where it goes, so its node stays at the
 scene origin and its attach offset -- the client's own statement about its
 content -- puts its pixels where the client asked.  That is exactly what phase 2a
-did, and the shm gate still checks it pixel by pixel."
+did, and the shm gate still checks it pixel by pixel.  A cursor surface gets no
+node at all (CURSOR-SURFACE-P)."
   (let ((node (surface-scene-node surface)))
-    (unless node
+    (unless (or node (cursor-surface-p compositor surface))
       (setf node (if (srv:surface-shell-surface surface)
                      (on-new-toplevel compositor surface)
                      (scene:scene-add-node (compositor-scene compositor)
@@ -405,14 +426,23 @@ toplevel gets an empty array rather than a stale `activated`."
   "Ask the main loop to stop at the end of this cycle (tinywl's Alt+Esc)."
   (reactor:request-stop (srv:display-reactor (compositor-display compositor))))
 
+(defun window-node-p (node)
+  "Is NODE a window: a mapped surface with a shell role?
+
+Not every buffer node is a window.  A client's cursor surface is a buffer node with
+no role, and so is any surface a client maps without asking for one; cycling or
+click-to-raise that treated those as windows would raise an arrow."
+  (and (typep node 'scene:buffer-node)
+       (let ((surface (scene:buffer-node-surface node)))
+         (and surface (srv:surface-shell-surface surface) t))))
+
 (defun cycle-views (compositor)
   "Bring the bottom window to the top and give it the keyboard (tinywl's Alt+F1).
 
 The bottom is draw order, so cycling visits every window once and the old one ends
 up at the back -- the same rule tinywl's view list has."
   (let* ((root (scene:scene-root (compositor-scene compositor)))
-         (windows (remove-if-not (lambda (node) (typep node 'scene:buffer-node))
-                                 (scene:node-children root))))
+         (windows (remove-if-not #'window-node-p (scene:node-children root))))
     (when windows
       (let ((node (first windows)))
         (scene:node-raised node)
@@ -508,6 +538,40 @@ not sent motion events for a drag it is not doing."
   '((:left . #x110) (:right . #x111) (:middle . #x112)))
 
 ;;; ---------------------------------------------------------------------------
+;;; Who a pointer press belongs to
+;;; ---------------------------------------------------------------------------
+;;
+;; The framework's rule is "the window under the pointer takes the keyboard on a
+;; press, and then the client hears the click".  That is one policy among several
+;; -- a compositor that binds Alt+drag to move has to see the press first, and a
+;; click-to-raise compositor has to raise before the client redraws -- so the
+;; decision is a generic function dispatched on the compositor, like
+;; ON-NEW-TOPLEVEL, and policy is added by subclassing (D7, D36).
+
+(defgeneric on-pointer-button (compositor button state)
+  (:documentation
+   "BUTTON (:left, :right, :middle, or a numeric evdev code when a backend
+reports a button we have no name for) was pressed or released over COMPOSITOR,
+with no grab active.
+
+The default method focuses the window under the pointer on a press and forwards
+the event to the client.  A compositor specialises this for the presses it wants
+for itself (a modifier drag, click-to-raise) and calls CALL-NEXT-METHOD for the
+ones it does not: an event this method does not send is an event the client never
+sees, and a client that never saw a press must not see its release.")
+  (:method ((compositor headless-compositor) button state)
+    (let ((seat (compositor-seat compositor))
+          (code (or (cdr (assoc button +pointer-buttons+)) button)))
+      (when (eq state :pressed)
+        (multiple-value-bind (surface x y) (surface-under-cursor compositor)
+          (when surface
+            (unless (eq surface (srv:seat-pointer-focus seat))
+              (srv:set-pointer-focus seat surface x y))
+            (unless (eq surface (srv:seat-keyboard-focus seat))
+              (focus-surface compositor surface)))))
+      (srv:send-pointer-button seat code state))))
+
+;;; ---------------------------------------------------------------------------
 ;;; A client asking to be moved or resized
 ;;; ---------------------------------------------------------------------------
 ;;
@@ -518,17 +582,30 @@ not sent motion events for a drag it is not doing."
 ;; left one: a client may ask from a middle-button drag, and a grab that ends on
 ;; the wrong button would either end immediately or never.
 
-(defun dragged-button (compositor &optional (default #x110))
-  (or (first (srv:seat-pressed-buttons (compositor-seat compositor))) default))
+(defun dragged-button (compositor)
+  "The button that is physically down, or NIL when none is.
+
+A move or resize request is only meaningful while its button is held: the grab ends
+on that button's release.  A request that arrives with nothing down describes an
+interaction that is already over -- a click whose press and release were read in one
+dispatch, which is exactly what injected input does -- and starting a grab for it
+leaves the pointer owned by a drag nobody is making, so the next click goes to the
+grab instead of to the window."
+  (first (srv:seat-pressed-buttons (compositor-seat compositor))))
 
 (defmethod srv:toplevel-move-requested ((surface cf-surface) toplevel serial seat)
   "A validated xdg_toplevel.move: start an interactive move of this window."
   (declare (ignore seat))
   (let* ((compositor (cf-compositor-headless (srv:surface-owner surface)))
-         (node (surface-scene-node surface)))
+         (node (surface-scene-node surface))
+         (button (dragged-button compositor)))
     (cond
       ((null node)
        (srv:log-message :debug "toplevel ~D asked to move but has no scene node"
+                        (srv:resource-id toplevel))
+       nil)
+      ((null button)
+       (srv:log-message :debug "toplevel ~D asked to move with no button down"
                         (srv:resource-id toplevel))
        nil)
       (t
@@ -536,7 +613,7 @@ not sent motion events for a drag it is not doing."
                    (grab:begin-move-grab node
                                          (compositor-cursor-x compositor)
                                          (compositor-cursor-y compositor)
-                                         :button (dragged-button compositor)))
+                                         :button button))
        (srv:log-message :debug "toplevel ~D: interactive move (serial ~D)"
                         (srv:resource-id toplevel) serial)
        t))))
@@ -545,10 +622,15 @@ not sent motion events for a drag it is not doing."
   "A validated xdg_toplevel.resize: start an interactive resize from EDGES."
   (declare (ignore seat))
   (let* ((compositor (cf-compositor-headless (srv:surface-owner surface)))
-         (node (surface-scene-node surface)))
+         (node (surface-scene-node surface))
+         (button (dragged-button compositor)))
     (cond
       ((null node)
        (srv:log-message :debug "toplevel ~D asked to resize but has no scene node"
+                        (srv:resource-id toplevel))
+       nil)
+      ((null button)
+       (srv:log-message :debug "toplevel ~D asked to resize with no button down"
                         (srv:resource-id toplevel))
        nil)
       (t
@@ -557,7 +639,7 @@ not sent motion events for a drag it is not doing."
                                            (compositor-cursor-x compositor)
                                            (compositor-cursor-y compositor)
                                            edges
-                                           :button (dragged-button compositor)
+                                           :button button
                                            :min-width (max 1 (srv:xdg-toplevel-min-width toplevel))
                                            :min-height (max 1 (srv:xdg-toplevel-min-height toplevel))))
        (srv:log-message :debug "toplevel ~D: interactive resize (serial ~D, edges ~D)"
@@ -567,27 +649,16 @@ not sent motion events for a drag it is not doing."
 (defun inject-pointer-button (compositor button state)
   "SYNTHETIC pointer button (:left, :right, :middle), pressed or released.
 
-A press is also the click that focuses: the window under the pointer takes the
-keyboard, which is what makes clicking another window work at all (D32).  A press
-on the bare output changes nothing -- there is no click-to-raise or
-click-to-dismiss policy in v0."
-  (let* ((seat (compositor-seat compositor))
-         (code (or (cdr (assoc button +pointer-buttons+)) button))
-         (grab (compositor-grab compositor)))
-    (cond
-      ;; A grab owns the pointer: the grab decides, and the event is not also
-      ;; delivered as a click to the client under it.
-      (grab
-       (grab:grab-button grab code state))
-      (t
-       (when (eq state :pressed)
-         (multiple-value-bind (surface x y) (surface-under-cursor compositor)
-           (when surface
-             (unless (eq surface (srv:seat-pointer-focus seat))
-               (srv:set-pointer-focus seat surface x y))
-             (unless (eq surface (srv:seat-keyboard-focus seat))
-               (focus-surface compositor surface)))))
-       (srv:send-pointer-button seat code state)))))
+Two rules, in this order.  A grab owns the pointer while one is active: the grab
+decides, and the event is not also delivered as a click to the client under it.
+With no grab, the compositor's own policy decides (`on-pointer-button`), which by
+default means -- D32 -- a press focuses the window under the pointer (the click
+that makes clicking another window work at all) and the client then hears it.  A
+press on the bare output changes nothing: v0 has no click-to-dismiss policy."
+  (let ((grab (compositor-grab compositor)))
+    (if grab
+        (grab:grab-button grab (or (cdr (assoc button +pointer-buttons+)) button) state)
+        (on-pointer-button compositor button state))))
 
 (defun inject-pointer-axis (compositor axis value)
   (srv:send-pointer-axis (compositor-seat compositor) axis value))

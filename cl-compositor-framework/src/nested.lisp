@@ -292,7 +292,8 @@ the configure is acknowledged and its size ignored (see the header)."
 (defun start-nested (&key parent-path (width 256) (height 256)
                           (display-name "wayland-1")
                           runtime-dir
-                          (pump nil))
+                          (pump nil)
+                          (compositor-class 'headless:headless-compositor))
   "Run a compositor inside the compositor at PARENT-PATH.
 
 Returns a NESTED-BACKEND.  The nested compositor's own display is
@@ -303,7 +304,11 @@ wayland-1, which is wrong if the parent is also wayland-1: pass one.
 PUMP takes a timeout in seconds and is for the case where the parent compositor is
 in *this* image (the gate); it is NIL by default, which is right when the parent is
 another process, because then our own socket read is the only thing that has to
-wait."
+wait.
+
+COMPOSITOR-CLASS is passed through to MAKE-HEADLESS-COMPOSITOR: a nested session
+is a session of *this* compositor, so its policy (cl-tinywl's, cl-umbra's) applies
+when the input device is a parent pointer instead of a test's injection."
   (let ((display nil)
         (compositor nil)
         (backend nil))
@@ -313,7 +318,8 @@ wait."
                 compositor (headless:make-headless-compositor
                             :width width :height height
                             :display-name display-name
-                            :runtime-dir runtime-dir)
+                            :runtime-dir runtime-dir
+                            :compositor-class compositor-class)
                 backend (make-instance 'nested-backend
                                        :display display
                                        :compositor compositor

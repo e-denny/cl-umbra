@@ -356,25 +356,40 @@ advertised version is exercised.
 
 ## 9. What a compositor author writes
 
-The whole of `cl-tinywl` should look like this — policy only:
+This is the sketch this document was written around, and `cl-tinywl` now exists in that shape
+(D36). The real thing is `cl-tinywl/src/tinywl.lisp`; what it comes down to is a class and two
+methods — the framework owns everything else:
 
 ```lisp
-(defclass tinywl (cf:compositor) ())
+(defclass tinywl-compositor (cf:headless-compositor) ())
 
-(defmethod cf:on-new-toplevel ((c tinywl) (toplevel cf:toplevel))
-  (let ((node (cf.scene:buffer-node (cf:scene c) toplevel)))
-    (cf.scene:set-position node 100 100)
-    (push toplevel (views c))
-    (cf:focus-toplevel (cf:seat c) toplevel)))
+;; Placement: tinywl.c puts every window at the origin, so the stack is the layout.
+(defmethod cf:on-new-toplevel ((tinywl tinywl-compositor) surface)
+  (let ((node (call-next-method)))          ; the framework made the node
+    (scene:set-node-position node 0 0)      ; the compositor decides where it goes
+    node))
 
-(defmethod cf:on-key ((c tinywl) (kb cf:keyboard) key state mods)
-  (when (and (eq state :pressed) (member :alt mods))
-    (eswitch ((cf:key-name key) :test #'string=)
-      ("Escape" (cf:stop c))
-      ("F1"     (cycle-views c)))))
+;; A press: Alt+left moves, Alt+right resizes, anything else focuses and is a click.
+(defmethod cf:on-pointer-button ((tinywl tinywl-compositor) button state)
+  (if (and (eq state :pressed) (member button '(:left :right)) (alt-held-p tinywl))
+      (multiple-value-bind (surface) (desktop-toplevel-at tinywl (cursor-x tinywl) (cursor-y tinywl))
+        (when surface
+          (focus-toplevel tinywl surface)
+          (begin-interactive tinywl surface (if (eq button :left) :move :resize))))
+      (call-next-method)))                  ; the framework's rule, unchanged
+```
 
-(defmethod cf:on-frame ((c tinywl) (output cf:output))
-  (cf:render c output))
+Keys are a table, not a method:
+
+```lisp
+(cf:add-keybinding tinywl "Escape" (lambda () (quit tinywl))
+                   :modifiers cf.input:+modifier-mod1+ :description "quit")
+```
+
+And a session — a display of its own, in memory or as a window in another compositor:
+
+```lisp
+(tinywl:main '("--nested" "--size" "1024x768"))
 ```
 
 `cl-umbra` adds layouts, workspaces, rules, config and control on top of the same surface

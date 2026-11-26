@@ -1157,3 +1157,80 @@ a copy; `target-octets` is gone. `fill-target` writes word at a time through `cf
 (slower than a vector loop, and invisible next to compositing). The nested backend and the
 headless backend now share one target representation, which is why the nested path could render
 straight into the parent's buffer with no copy in the first place.
+
+---
+
+## D36 — A compositor is a subclass, a press is policy, and tinywl places at the origin
+
+**Status:** accepted
+
+**Context.** Phase 3's exit slice is `cl-tinywl`: a working port of tinywl.c over the
+framework. Everything tinywl.c is *made of* — the event loop, xdg-shell, the seat, the keymap,
+the scene, the renderer, the frame clock — already existed, so the slice was going to be small.
+Two things stood in the way of it being only policy. The framework built a fixed class
+(`headless-compositor`) with no way to specialise behaviour, and it decided for the compositor
+what a pointer press meant. And a client's `set_cursor` surface, which nothing draws yet, was
+being given a scene node like any other surface: at (0,0), hit-testable, and first in the stack
+order, where the parity gate's Alt+F1 promptly raised a 32x32 arrow instead of a window.
+
+**Decision.**
+
+1. **`make-headless-compositor` takes `:compositor-class`,** defaulting to `headless-compositor`,
+   and `headless-compositor` is exported. A compositor subclasses it and passes its own class;
+   `cf:on-new-toplevel` and the new `cf:on-pointer-button` dispatch on that object, so the class
+   *is* the policy (D7: classes, not vtables). `start-nested` takes the same keyword and passes
+   it through, because a nested session is a session of *this* compositor: the same methods must
+   see input that arrived through a parent's seat.
+2. **A pointer press is a generic function** (`cf:on-pointer-button`). Its default method is
+   D32's rule unchanged: focus what is under the pointer, then send the button. A compositor
+   specialises it and calls `call-next-method` for the presses it does not want — and a press
+   it consumes is a press the client never sees, so the client must not see the release either.
+   A grab still takes precedence: while one holds the pointer, no policy is consulted.
+3. **A client's cursor surface is not a window.** `wl_pointer.set_cursor` records the surface;
+   `ensure-scene-node` refuses it, so it is neither drawn, nor hit-tested, nor raised. Drawing
+   it is phase 5, and a compositor's own cursor is what v0 draws.
+4. **`cycle-views` cycles windows, not buffer nodes** (`window-node-p`: a buffer node whose
+   surface has a shell role). The two bugs in 3 and 4 are the same mistake, and the parity gate
+   found both.
+5. **A move or resize request whose button is already up starts no grab.** The grab must end on
+   the button that began it; a request that arrives after that release (a click whose press and
+   release were read in one dispatch, which is what injected input does) would otherwise leave
+   the pointer owned by a drag nobody is making, and the next click would go to the grab instead
+   of the window. This is how `dragged-button`'s `#x110` default went away.
+6. **cl-tinywl is tinywl.c's policy, including its placement.** Every window goes to the output
+   origin, overriding the framework's cascade: the stack is the layout, and a port that quietly
+   improved on the original would make the comparison meaningless. Where it differs, it says so:
+   tinywl.c has no compositor-side drag (its moves and resizes come from a client's titlebar
+   request, gate clause 14), and PLAN.md's exit gate asks for one, so Alt+left moves a window and
+   Alt+right resizes it from the edge under the pointer, choosing the edge with a 12-pixel margin
+   and defaulting to the bottom-right. `install-keybindings` *replaces* the framework's default
+   table rather than adding to it, and Alt+Esc sends `xdg_toplevel.close` to every mapped window
+   before stopping the loop — one request, and the difference between a session that ends and one
+   that is cut off.
+
+**Evidence.** Gate clause 16 (`scripts/tinywl-parity.sh`), which runs the same scenario twice:
+31 checks headless and 33 nested (the two extra are the parent's teardown), each with two real
+libwayland clients — `weston-eventdemo` printing every key and every configure, and the compiled
+move client as a uniform green window. Headless and nested: both windows land at (0,0); the top
+window's pixels are at the sample point and the lower one's come back when it is dragged aside
+by exactly the pointer's delta; the click moves the keyboard; the focused client prints
+`key key: 16, unicode: 81` and the unfocused one prints nothing further; Alt+right at the corner
+puts `resize width: 240, height: 180` in the client's output and yields a 240x180 buffer; Alt+F1
+raises the bottom window; Alt+Esc stops the loop with both clients still connected, closes them
+by request, and no `wl_display.error` in either client's `WAYLAND_DEBUG=1` stream, which is also
+checked for an ordered `get_registry` → `configure` → `ack_configure`. The nested run ends with
+the parent holding no window and no clients of ours. Eleven unit tests (`wayland.test.tinywl`)
+pin the parts a gate cannot isolate: `edges-at` at every side and corner, placement at the
+origin and stacking, a move grab following the pointer's delta and stopping, a resize grab asking
+for the size the drag implies without resizing the node, Alt+left/Alt+right starting the right
+grabs, a plain press not starting one, Alt over the bare output not starting one, the bindings
+being tinywl's own, Alt+Esc stopping the reactor, and `:compositor-class` being honoured. The
+suite is 212 tests in 10 suites.
+
+**Consequences.** Adding a compositor's behaviour no longer needs a framework change: subclass
+what is there, specialise the two `on-*` generics, and pass the class in. Anything that treats a
+`buffer-node` as a window must now ask `cf.backend.headless:window-node-p` (or check the shell
+role itself), because cursor surfaces and roleless surfaces are buffer nodes too. Client cursor
+surfaces are recorded and ignored rather than drawn — a visible gap, listed as phase 5, not a
+silent one. Popups, the focus stack, edge-anchored resizing and a nested window on a *foreign*
+compositor remain the rest of phase 3.

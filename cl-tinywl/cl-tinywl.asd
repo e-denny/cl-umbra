@@ -7,4 +7,6 @@
   :version "0.0.1"
   :depends-on ("cl-compositor-framework")
   :serial t
-  :components ((:file "src/package")))
+  :components ((:file "src/package")
+               (:file "src/tinywl")
+               (:file "src/main")))

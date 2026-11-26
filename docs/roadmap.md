@@ -189,12 +189,13 @@ trace tests and the malicious-pool cases are in `wayland.test.server`.
 **Status: phase 3a landed (xdg-shell toplevels), 3b landed (seats and input), 3c landed (the
 scene: placement, hit testing, click-to-focus, a drawn cursor), 3d landed (grabs and
 keybindings), 3e landed (the client library completed, and a nested session that draws and
-takes input).** The v1 state machine is in
+takes input), and the exit slice landed (`cl-tinywl` itself: the parity script runs it headless
+and nested).** The v1 state machine is in
 `cl-wayland-server/src/xdg-shell.lisp` and the policy seam is `cf:on-new-toplevel`. Gates:
 clause 11 `./scripts/xdg-shell-gate.sh`, clause 12 `./scripts/seat-gate.sh`, clause 13
 `./scripts/scene-gate.sh`, clause 14 `./scripts/grab-gate.sh`, clause 15
-`./scripts/nested-gate.sh`. The focus stack, tinywl, popups and a nested window on a foreign
-compositor are open below.
+`./scripts/nested-gate.sh`, clause 16 `./scripts/tinywl-parity.sh`. The focus stack, popups and
+a nested window on a foreign compositor are open below.
 
 `cf.types.xdg-shell` (core)
 - [x] `xdg_wm_base` ping/pong; error conditions (`role`, `defunct_surfaces`)
@@ -252,18 +253,26 @@ compositor are open below.
 - [ ] resize when the parent configures (the nested output's size is fixed at start in v0)
 - [ ] scale from the parent output; more than two buffers; a merged reactor wait
 
-`cl-tinywl`
-- [ ] the parity table in `PLAN.md` §7
-- [ ] keybindings: `Alt+Esc`, `Alt+F1`
-- [ ] `save-lisp-and-die` binary + `--nested`/`--headless` flags
+`cl-tinywl` (the exit slice, D36)
+- [x] the parity table in `PLAN.md` §7, as built — the table now records the real names
+- [x] policy: `on-new-toplevel` (origin placement), `focus-toplevel`, `desktop-toplevel-at`,
+      `begin-interactive` + `edges-at`, `on-pointer-button` (Alt+left moves, Alt+right resizes)
+- [x] keybindings: `Alt+Esc` (closes the clients, then quits), `Alt+F1`
+- [x] a session in either mode (`tinywl:start`/`advance`/`run`/`stop`) and `(tinywl:main)` with
+      `--headless`/`--nested`/`--parent`/`--size`/`--display`
+- [x] a client's `set_cursor` surface is not drawn as a window (phase 5 draws it properly)
+- [ ] a `save-lisp-and-die` binary and an `sbcl --script` launcher (packaging, not behaviour)
+- [ ] kitty as the demo client: it needs the EGL/GLES path, so it arrives with phase 4; the
+      parity gate uses weston's clients, which draw through shm
 
-**Gate:** the tinywl parity script (PLAN §5, phase 3) passes nested, and headless with
-synthetic input. Clause 15 already proves the nested half of that with a real client:
-`./scripts/nested-gate.sh` runs our compositor inside our compositor in one image.
+**Gate:** clause 16, `./scripts/tinywl-parity.sh` — the parity script run twice, headless with
+injected input and nested inside another compositor, with two real clients and the clauses
+PLAN §5 lists (placement, click-to-focus, typing to the focused window only, drag, edge resize,
+Alt+F1, Alt+Esc, an ordered `WAYLAND_DEBUG` stream).
 
-**Demo:** `cl-tinywl` in a window, kitty inside, moved/resized with the mouse. The nested
-backend can do this now; calling it on a live session is a separate, explicitly authorized
-step (it maps a window on the user's desktop).
+**Demo:** `cl-tinywl` in a window, with a client inside, moved/resized with the mouse. The
+parity gate does exactly this in one image. Running it on a live session is a separate,
+explicitly authorized step (it maps a window on the user's desktop).
 
 ---
 

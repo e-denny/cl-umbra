@@ -41,7 +41,7 @@
   :license "GPL-3.0-or-later"
   :version "0.0.1"
   :depends-on ("rove" "cl-wayland-core" "cl-wayland-protocols" "cl-wayland-client"
-               "cl-wayland-server" "cl-compositor-framework")
+               "cl-wayland-server" "cl-compositor-framework" "cl-tinywl")
   :serial t
   :components ((:file "runner")
                (:module "unit"
@@ -54,7 +54,8 @@
                              (:file "codegen")
                              (:file "client")
                              (:file "server")
-                             (:file "scene"))))
+                             (:file "scene")
+                             (:file "tinywl"))))
   ;; The perform body is read while this file is loaded, long before the runner
   ;; is on the system, so its symbols are looked up by name.
   :perform (test-op (operation component)

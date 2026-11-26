@@ -6,8 +6,9 @@ The repository is named for where the stack is going: `cl-umbra`, a daily-driver
 Everything that makes it possible is here too — the protocol implementation, the server, the
 compositor framework, and a tinywl port — as the six systems below.
 
-**Status: phase 0, phase 1, phase 2a, phase 3a, phase 3b, phase 3c, phase 3d and phase 3e
-gates passing.** `./scripts/gate.sh` checks fifteen clauses. Phase 0: the unit suite (201 tests), every vendored protocol compiling,
+**Status: phase 0, phase 1, phase 2a, phase 3a, phase 3b, phase 3c, phase 3d, phase 3e and
+phase 3's exit gate — `cl-tinywl` — passing.** `./scripts/gate.sh` checks sixteen clauses.
+Phase 0: the unit suite (212 tests), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections
@@ -31,7 +32,12 @@ Phase 3e: our compositor runs *inside* our compositor — one image, two sockets
 `weston-eventdemo` inside the nested session; the parent sees a titled, activated window, its
 frame is the nested compositor's own frame pixel for pixel, and a pointer motion and a key
 injected into the parent come out of the client at the same coordinates with the same modifier
-mask. Purity (no libwayland, no wlroots) runs over all of it. The gate exits 0.
+mask. Phase 3's exit gate is the tinywl parity script, run **twice**: `cl-tinywl` is driven by
+hand with two real clients — click to focus, typing to the focused window only, Alt+left to
+drag, Alt+right to resize from the edge under the pointer, Alt+F1 to cycle, Alt+Esc to close the
+clients and quit — once with its output in memory and once nested inside another compositor,
+with the client's own `WAYLAND_DEBUG` stream checked for an ordered, acked configure. Purity (no
+libwayland, no wlroots) runs over all of it. The gate exits 0.
 
 Three roadmap quality items are still open and are not gate clauses: fixed-size in/out
 rings, `WAYLAND_DEBUG`-compatible tracing, and surplus-descriptor detection (which needs a
@@ -85,7 +91,7 @@ Six systems, built in order, each useful on its own:
 | `cl-wayland-client` | Client-side display and proxies | libwayland-client | 0, 3 |
 | `cl-wayland-server` | Display, globals, resources, clients, serials, error policy | libwayland-server | 1 |
 | `cl-compositor-framework` | Backends, renderers, scene graph, seat/input, output, shell protocol state machines | **wlroots** | 2-5 |
-| `cl-tinywl` | The tutorial compositor | tinywl | 3 |
+| `cl-tinywl` | The tutorial compositor: one file of policy over the framework | tinywl | 3 |
 | `cl-umbra` | A compositor for daily use | Umbriel / niri / sway | 6-7 |
 
 Two build-time systems sit beside those six: `cl-wayland-asdf` (the
@@ -246,6 +252,27 @@ to be resized. Alt+F1 and Alt+Esc are asserted in the same run.
 ```
 ./scripts/grab-gate.sh
 ```
+
+## Hello, tinywl
+
+The phase-3 exit gate, in one command: `cl-tinywl` itself, run twice. A real `weston-eventdemo`
+and a compiled xdg-shell client are placed, focused, typed at, dragged, resized, cycled and
+closed; then the same scenario runs with tinywl nested inside another compositor and the input
+injected into the *parent*.
+
+```
+./scripts/tinywl-parity.sh     # both runs;  ./scripts/gate.sh runs it as clause 16
+```
+
+Run it as a compositor, with a client of your own:
+
+```
+sbcl --eval '(asdf:load-system "cl-tinywl")' \
+     --eval '(tinywl:main (list "--nested" "--size" "1024x768"))'
+```
+
+`--headless` renders into memory instead, and `--help` lists the rest. The policy is
+`cl-tinywl/src/tinywl.lisp`: five functions and one class, no framework changes.
 
 ## Hello, nested
 

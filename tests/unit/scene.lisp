@@ -277,7 +277,13 @@ into it; it failed 100% of the time before targets moved to foreign memory (D35)
   (push (list width height) (requests grab)))
 
 (defun window-node (compositor x y &key (width 100) (height 80))
-  "A cf-surface with a mapped buffer, a node at (X, Y); returns (values surface node)."
+  "A cf-surface with a mapped buffer, a shell role and a node at (X, Y).
+
+The role matters: a window is a surface a shell gave a role to, and CF's cycle-views
+(and anything else that asks what a window is) says so.  A bare xdg_surface with no
+role of its own is enough here -- nothing in this file goes through xdg-shell's
+state machine -- but a *roleless* surface is not a window and must not be cycled.
+Returns (values surface node)."
   (let* ((surface (make-instance 'cf:cf-surface
                                  :client nil :id 9 :interface nil :version 1))
          (node (scene:scene-add-node (cf:compositor-scene compositor)
@@ -288,6 +294,9 @@ into it; it failed 100% of the time before targets moved to foreign memory (D35)
                          :pool nil :offset 0 :width width :height height
                          :stride (* 4 width) :format 0)
           (srv:surface-mapped-p surface) t
+          (srv:surface-shell-surface surface)
+          (make-instance 'srv:xdg-surface
+                         :client nil :id 11 :interface nil :version 1)
           (cf:surface-scene-node surface) node)
     (values surface node)))
 

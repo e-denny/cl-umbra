@@ -265,7 +265,30 @@ Phase 3e (the client library and a nested session) adds the fifteenth:
     descriptor count where it started. A PNG of the parent's frame is written and validated —
     it shows the inner client's window inside the inner session's output.
 
-All fifteen clauses pass. Two details worth knowing: the protocol clause
+Phase 3's exit gate adds the sixteenth, and it is the one clause that is a *script run
+twice*:
+
+16. **The tinywl parity script, headless and nested** (`scripts/tinywl-parity.sh`,
+    `scripts/tinywl-parity.lisp`, `tests/c-client/wayland-move-client.c`). Two real
+    libwayland clients — `weston-eventdemo` (which prints every key it receives and every
+    size it is configured to) and the compiled move client (a uniform `#xFF3C8C3C`
+    window) — are driven by hand through cl-tinywl: click to focus, typing, Alt+left drag,
+    Alt+right resize, Alt+F1, Alt+Esc. The assertions are the ones `PLAN.md` §5 lists: both
+    windows land at (0,0) because that is what tinywl.c places (the framework's cascade is
+    overridden on purpose), the top window's pixels are there and the lower one's come back
+    when it is dragged aside, the click moves the keyboard, the focused client prints
+    `key key: 16, unicode: 81` while the unfocused one prints nothing further, the drag
+    moves the node by the pointer's delta and stops on the release, Alt+right at the corner
+    produces `resize width: 240, height: 180` in the *client's* output and a 240x180 buffer,
+    Alt+F1 raises the bottom window, and Alt+Esc sends `xdg_toplevel.close` to both clients
+    and stops the loop with no `wl_display.error` anywhere. One client runs with
+    `WAYLAND_DEBUG=1` and its coloured log (ANSI escapes stripped) is checked for an ordered
+    `get_registry` → `configure` → `ack_configure`. The whole scenario then runs a second
+    time with tinywl *nested* inside a headless parent, injecting input into the parent, which
+    exercises the same policy through `cf.backend.nested`'s translation; the nested run also
+    checks that the parent ends with no window and no clients of ours.
+
+All sixteen clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs

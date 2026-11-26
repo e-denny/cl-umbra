@@ -206,6 +206,7 @@ a debugging artefact and a test fixture, not a compression benchmark.")
    "The headless backend: an in-memory target of a configured size, an idle-driven
 frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §8.1).")
   (:export
+   #:headless-compositor
    #:make-headless-compositor
    #:request-frame
    #:render-frame
@@ -227,6 +228,8 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:on-new-toplevel
    #:surface-under-cursor
    #:update-pointer
+   #:on-pointer-button
+   #:window-node-p
    #:surface-scene-node
    #:compositor-grab
    #:compositor-keybindings
@@ -291,6 +294,7 @@ owns, and the presentation step is attach + damage + commit.")
    #:nested-configured-p
    #:nested-mapped-p
    #:nested-awaiting-frame-p
+   #:nested-closing-p
    #:nested-frame-count
    #:nested-pointer-event-count
    #:nested-key-count
@@ -299,6 +303,7 @@ owns, and the presentation step is attach + damage + commit.")
 (defpackage #:cf
   (:nicknames #:cl-compositor-framework)
   (:import-from #:cf.backend.headless
+                #:headless-compositor
                 #:make-headless-compositor
                 #:request-frame
                 #:write-frame-png
@@ -321,6 +326,8 @@ owns, and the presentation step is attach + damage + commit.")
                 #:on-new-toplevel
                 #:surface-under-cursor
                 #:update-pointer
+                #:on-pointer-button
+                #:window-node-p
                 #:surface-scene-node
                 #:compositor-grab
                 #:compositor-keybindings
@@ -353,6 +360,7 @@ owns, and the presentation step is attach + damage + commit.")
                 #:nested-key-count
                 #:nested-pointer-event-count
                 #:nested-parent-keymap-size
+                #:nested-closing-p
                 #:nested-mapped-p)
   (:import-from #:cf.render.pixman
                 #:make-target
@@ -376,6 +384,7 @@ output path that needs no privileges, no display and no hardware
 docs/framework.md §1 follow.")
   (:export
    ;; the headless compositor
+   #:headless-compositor
    #:make-headless-compositor
    #:request-frame
    #:render-frame
@@ -397,6 +406,8 @@ docs/framework.md §1 follow.")
    #:on-new-toplevel
    #:surface-under-cursor
    #:update-pointer
+   #:on-pointer-button
+   #:window-node-p
    #:surface-scene-node
    #:compositor-grab
    #:compositor-keybindings
@@ -428,6 +439,7 @@ docs/framework.md §1 follow.")
    #:nested-key-count
    #:nested-pointer-event-count
    #:nested-parent-keymap-size
+   #:nested-closing-p
    #:nested-mapped-p
    ;; the renderer
    #:make-target

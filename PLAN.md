@@ -280,8 +280,8 @@ actually applied, opaque-region culling.
 it, moved and resized by mouse.
 
 **Status (phase 3a — xdg-shell toplevels —, 3b — seats and input —, 3c — the scene —, 3d —
-grabs — and 3e — the client library and the nested backend — met; tinywl, popups and a nested
-window on a foreign compositor are the rest of the phase):**
+grabs —, 3e — the client library and the nested backend — and the exit slice, `cl-tinywl` —
+met; popups and a nested window on a foreign compositor are what is left of the phase):**
 `xdg-shell` v1 is implemented in `cl-wayland-server/src/xdg-shell.lisp`: `xdg_wm_base`
 (ping/pong, `defunct_surfaces`), `xdg_surface` (initial configure after the first commit,
 serial bookkeeping, `ack_configure`, `invalid_serial`, `defunct_role_object`,
@@ -348,9 +348,29 @@ nested compositor's own target, a motion and a Shift+q injected into the parent 
 `weston-eventdemo` inside the nested session, and teardown leaks nothing
 (`scripts/nested-gate.sh`).
 
-Not in these slices, and needed before tinywl: `xdg_popup` + `xdg_positioner`, the focus stack,
-edge-anchored resizing, layer-shell, and a nested window on a *foreign* compositor (which
-needs a window on a live session, and therefore its own authorization).
+**The exit slice, `cl-tinywl`** (D36), is policy and nothing else: `tinywl:tinywl-compositor` is
+a `cf:headless-compositor` subclass (the framework now builds the class it is given), and five
+methods or functions on it are the whole compositor — `cf:on-new-toplevel` places every window
+at the origin the way tinywl.c does (the framework's cascade is overridden deliberately),
+`focus-toplevel` raises and focuses, `desktop-toplevel-at` hit-tests, `begin-interactive` with
+`edges-at` starts a `cf.grab`, and `cf:on-pointer-button` binds Alt+left to move and Alt+right
+to resize from the edge under the pointer (tinywl.c has no compositor-side drag: its moves and
+resizes come from a client's titlebar request, which is gate clause 14; PLAN.md's exit gate asks
+for the drag, so the port adds it). `install-keybindings` replaces the framework's default table
+with tinywl's own Alt+Esc and Alt+F1, and Alt+Esc asks every client to close
+(`xdg_toplevel.close`) before stopping the loop instead of letting them find a closed socket.
+`tinywl:start`/`advance`/`run`/`stop` are a session in either mode, `--headless` or `--nested`,
+and `(tinywl:main)` is the command line. Gate clause 16 runs the whole parity scenario twice —
+headless with injected input, and nested inside another compositor with input injected into the
+*parent* — with two real clients, and checks placement, click-to-focus, that typing reaches only
+the focused window, that a drag moves and a release stops it (with the pixels moving too), that
+Alt+right produces `resize width: 240, height: 180` in the client's own output, Alt+F1, Alt+Esc,
+and an ordered `WAYLAND_DEBUG` stream (`scripts/tinywl-parity.sh`).
+
+Not in these slices: `xdg_popup` + `xdg_positioner`, the focus stack, edge-anchored resizing,
+layer-shell, client cursor surfaces (a client's `set_cursor` surface is now kept out of the scene
+rather than drawn as a window), and a nested window on a *foreign* compositor (which needs a
+window on a live session, and therefore its own authorization).
 
 ### Phase 4 — Real hardware: DRM dumb buffers + libinput (6-8 weeks)
 
@@ -507,28 +527,27 @@ promise; half-implemented protocols are the main source of “works in sway, cra
 
 ## 7. `cl-tinywl` parity checklist (`tinywl.c` → Lisp)
 
+Built in phase 3's exit slice; the right-hand column is what exists (D36), not what was
+imagined when this table was first written. *framework* marks the rows tinywl.c writes itself
+and CF already owned, so the port calls them instead of writing them again.
+
 | `tinywl.c` | `cl-tinywl` |
 |---|---|
-| `struct tinywl_server` | `tinywl` class, framework slots instead of listeners |
-| `wl_display_create` | `wayland.server:make-display` |
-| `wlr_backend_autocreate` | `cf:make-backend` (nested/headless/drm by env) |
-| `wlr_renderer_init_wl_display` | `cf.render:init-wl-display` → `wl_shm` formats |
-| `wlr_compositor_create` | `cf.types.compositor` global from the registry table |
-| `wlr_data_device_manager_create` | phase 6 (clipboard), stubbed in `cl-tinywl` |
-| `wlr_output_layout_create` | `cf.util.output-layout` |
-| `server_new_output` / `output_frame` | `on-new-output`, `on-output-frame` methods |
-| `render_surface` | `cf.scene:for-each-surface` + `cf.render:render-buffer` |
-| `server_new_xdg_surface` | `on-new-toplevel` |
-| `xdg_surface_map/unmap/destroy` | `on-map`, `on-unmap`, `on-destroy` |
-| `xdg_toplevel_request_move/resize` | `on-request-move`, `on-request-resize` |
-| `focus_view` | `focus-toplevel` (seat policy) |
-| `desktop_view_at`, `view_at` | `cf.scene:surface-at` |
-| `begin_interactive`, `process_cursor_*` | `cf.seat:begin-move`/`begin-resize` + grab |
-| `server_cursor_*` | `cf.seat` pointer handlers |
-| `server_new_keyboard` (xkb keymap) | `cf.input:keyboard-from-device` |
-| `handle_keybinding` | `cf.seat:keybinding` table lookup |
-| `seat_request_cursor`, `seat_request_set_selection` | `on-request-cursor`, `on-request-selection` |
-| `main` | `(tinywl:main)` + `save-lisp-and-die` binary |
+| `struct tinywl_server` | `tinywl:tinywl-compositor`, a `cf:headless-compositor` subclass |
+| `wl_display_create` | `(cf:make-headless-compositor :compositor-class 'tinywl-compositor)` |
+| `wlr_backend_autocreate` | `tinywl:start` — `:headless` (memory, injected input) or `:nested` |
+| `wlr_renderer_init_wl_display`, `wlr_compositor_create` | *framework*: the globals `make-headless-compositor` creates |
+| `wlr_output_layout_create`, `server_new_output`, `output_frame` | *framework*: one output, one scene root, one frame clock |
+| `render_surface` | *framework*: `cf.scene:scene-render` |
+| `server_new_xdg_surface`, `xdg_toplevel_map` | `(defmethod cf:on-new-toplevel ((tinywl tinywl-compositor) surface))` |
+| `focus_view`, `desktop_view_at` | `tinywl:focus-toplevel`, `tinywl:desktop-toplevel-at` |
+| `begin_interactive`, `process_cursor_*` | `tinywl:begin-interactive` + `tinywl:edges-at`, driven by a `cf.grab` |
+| `server_cursor_button` | `(defmethod cf:on-pointer-button ...)`: Alt+left moves, Alt+right resizes from the edge, any other press focuses and raises |
+| `xdg_toplevel_request_move/resize` | *framework*: `srv:toplevel-move-requested`/`-resize-requested` start the same grabs |
+| `handle_keybinding` | `tinywl:install-keybindings` (Alt+Esc quits, Alt+F1 cycles) |
+| `main` | `(tinywl:main)` in `src/main.lisp`: `--headless`, `--nested`, `--parent`, `--size`, `--display` |
+| `wlr_data_device_manager_create`, `seat_request_set_selection` | phase 6 (clipboard) |
+| `seat_request_cursor` | phase 5 (client cursor surfaces; a `set_cursor` surface is not a window and is not composited) |
 
 ## 8. `cl-umbra` v1 scope (from Umbriel's feature list)
 

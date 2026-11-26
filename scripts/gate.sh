@@ -69,6 +69,13 @@
 #
 # Phase 3e (nested):
 #
+#  16. the tinywl parity script, run twice -- once with tinywl's output in memory
+#      and input injected, once nested inside another compositor: a real client
+#      maps and is drawn where tinywl places it, a click focuses and typing reaches
+#      only the focused window, Alt+left drags it, Alt+right resizes it from the
+#      edge, Alt+F1 cycles and Alt+Esc closes the clients and stops the loop, with
+#      the client's own WAYLAND_DEBUG stream showing an acked configure
+#
 #  15. our compositor runs as a client of another compositor, in one image and two
 #      sockets: the parent sees a mapped, titled, activated xdg_toplevel; the
 #      parent's pixels equal the nested compositor's own target; a pointer motion
@@ -246,6 +253,15 @@ else
   fail 'nested session' 'a client inside a nested session was not drawn or did not get input' "$log_dir/nested.log"
 fi
 
+# 16. The tinywl parity script, twice ---------------------------------------
+printf '\nphase 3 exit gate: tinywl parity, headless and nested\n\n'
+
+if gb "$log_dir/tinywl.log" "$repo_root/scripts/tinywl-parity.sh"; then
+  pass 'tinywl parity' "$(grep -ac '^  ok   ' "$log_dir/tinywl.log") checks in two runs"
+else
+  fail 'tinywl parity' 'a real client was not placed, focused, typed at, dragged, resized, cycled or quit' "$log_dir/tinywl.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -265,7 +281,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 3a, 3b, 3c, 3d and 3e clauses)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 3a, 3b, 3c, 3d, 3e and tinywl parity)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

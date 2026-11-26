@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested tinywl soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested tinywl
 
 test:
 	./scripts/run-tests.sh
@@ -54,6 +54,10 @@ grab:
 # sockets, one image, pixels and input crossing both.
 nested:
 	./scripts/nested-gate.sh
+
+# tinywl itself: the parity script, run headless and nested, with two real clients.
+tinywl:
+	./scripts/tinywl-parity.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:
