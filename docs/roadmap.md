@@ -233,7 +233,9 @@ compositor is open below.
 - [x] a *visible* switcher (phase 3i, D51): the scene's overlay root plus a text node in a
       built-in 5x7 font (`cf.font`), `cf.switcher` listing the focus stack from its tail, Tab
       walking it, and the release making the one focus-and-raise call the cycle makes
-- [ ] `xdg_activation`-style "demands attention", and a thumbnail in a switcher row
+- [x] a thumbnail in a switcher row (D52): a snapshot of the window taken once, at the
+      resolution the row shows it at, so a repainting client cannot repaint the panel
+- [ ] `xdg_activation`-style "demands attention", and a live preview rather than a snapshot
 - [x] clamping: a resize stops with the dragged edge at the output's border and the opposite
       edge anchored, and every window is re-clamped when the output shrinks (D46)
 - [ ] edge-anchored resizing: still open -- the node is placed from the client's answer on every

@@ -98,9 +98,10 @@
 #
 #  20. the visible switcher: Alt+Tab opened over three real clients, the panel, the
 #      outline and the selection bar read back at the coordinates the layout gives,
-#      each row's text measured to the width of that client's own title at scale 2,
-#      Tab damaging two rows rather than the output, the release focusing and raising
-#      the row that was showing, the frame afterwards byte-identical to a full
+#      each row's picture matched pixel for pixel against the snapshot it was taken
+#      from, each row's text measured to the width of that client's own title at
+#      scale 2, Tab damaging two rows rather than the output, the release focusing and
+#      raising the row that was showing, the frame afterwards byte-identical to a full
 #      repaint, Escape and a click cancelling without moving the focus, and an
 #      overlay that is never hit-tested
 #

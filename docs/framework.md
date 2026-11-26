@@ -30,7 +30,7 @@ decomposition is the part worth copying.
 | `cf.render.allocator`, `cf.render.swapchain`, `cf.render.dmabuf` | same names | 5 | GPU buffer lifecycle |
 | `cf.scene` | `wlr_scene` | 2, 5, 7 | retained node tree, output layers, hit testing, damage |
 | `cf.font` | (none) | 3i | a 5x7 bitmap font and its rasteriser: wlroots draws no text, so every compositor brings its own (D51) |
-| `cf.switcher` | (none) | 3i | the visible Alt+Tab overlay over the focus stack (D51) |
+| `cf.switcher` | (none) | 3i | the visible Alt+Tab overlay over the focus stack, a picture and a title per row (D51, D52) |
 | `cf.output` | `wlr_output` | 2 | mode/scale/transform state, commit, frame scheduling |
 | `cf.util.output-layout` | `wlr_output_layout` | 2 | arrangement in layout coordinates |
 | `cf.types.compositor`, `.surface`, `.region` | `wlr_compositor`, `wlr_surface` | 2 | core protocol objects + surface state machine |
@@ -179,7 +179,8 @@ better than magic, so the default is a flag, and autocreate is a convenience wra
 *Phase 3c implemented v0, in `cl-compositor-framework/src/scene.lisp` (D31): nodes, positions,
 stacking, hit testing and the cursor. Phase 2b added damage, clipping, opaque culling and the
 scale between layout coordinates and device pixels (D48, D49). The Alt+Tab switcher added the
-overlay root and a text node (`cf.font`, D51). Layers and per-output layout are still ahead.*
+overlay root and a text node (`cf.font`, D51), and the picture in each of its rows (a
+`snapshot-node`, D52). Layers and per-output layout are still ahead.*
 
 *One frame is one list.* `scene-draw-list` turns the tree into draw items in device pixels, back
 to front, with the cursor last; `scene-render-items` draws them, each through a clip that is its
@@ -195,14 +196,16 @@ scene
 │   └── rect-node     ← background, border, letterboxing
 ├── overlay (tree-node)        ← the switcher: above every window, never hit-tested
 │   ├── rect-node              ← the panel, the outline, the selection bar
+│   ├── snapshot-node          ← one picture per row: the window, taken once (D52)
 │   └── text-node              ← one row per window, in the built-in font
 └── cursor (image-node)   ← drawn after the root, never hit-tested
 ```
 
 Node types: `tree` (a group; the root and the overlay are two), `buffer` (a mapped surface, sized
-by its buffer), `rect` (solid premultiplied colour), `image` (pixels we own — today the cursor)
-and `text` (a string in the 5x7 font, D51), with `offscreen` arriving with phase 7's effects.
-Every node has a position in its parent's space, a visibility flag and a parent.
+by its buffer), `rect` (solid premultiplied colour), `bitmap` (pixels we own: `image`, today the
+cursor, and `snapshot`, a window's picture taken once, D52), and `text` (a string in the 5x7 font,
+D51), with `offscreen` arriving with phase 7's effects. Every node has a position in its parent's
+space, a visibility flag and a parent.
 
 - **Coordinates**: a node's position is in its parent's space; a root child's is therefore
   output-local, which is the space every policy, the renderer and hit testing use. That space is
@@ -280,10 +283,24 @@ Every node has a position in its parent's space, a visibility flag and a parent.
   cached on the text, the colour and the scale, so a frame that redraws the same title allocates
   nothing for it. No shaping, no kerning, no BiDi, one size, and a character outside ASCII draws
   as `?`; a real font arrives when something needs one.
+- **A row's picture is a snapshot, taken once** (D52). `scene:snapshot-surface` reads a
+  surface's current buffer into premultiplied ARGB8888 at *the resolution it will be drawn at*
+  (the layout box times the output scale), and `make-snapshot-node` draws those octets as a box.
+  Drawing is then a 1:1 copy -- no filter, no per-frame resample -- and the picture is a constant,
+  which is what makes it honest with the damage diff: the item's signature carries the octets,
+  and a vector we allocated does not change, so a client that keeps repainting its window does
+  not keep repainting its thumbnail. It is a `bitmap-node`, not a `buffer-node`, for exactly that
+  reason: a buffer node's size and content are the client's, a snapshot's are ours. The single
+  downscale happens at open, bilinear -- pictures, unlike glyphs, do not want nearest. A window
+  with no buffer gets no picture rather than a placeholder.
+- **`set-node-size` resizes what the compositor owns**: a rectangle (a selection bar is as tall as
+  the row it selects, D52) and a bitmap's drawn size. A buffer node's size is the client's answer,
+  a text node's is its font's, and a snapshot's is the box it was taken for; setting those would
+  be a second truth about the same pixels (D10).
 
-`cl-tinywl` uses four node types (a buffer, the rectangles of the switcher's panel and bar, the
-switcher's titles and the cursor's image). `cl-umbra` uses all of them plus per-workspace
-subtrees and animated transforms (phase 7).
+`cl-tinywl` uses every node type: a buffer, the rectangles of the switcher's panel, outline and
+bar, one snapshot per row, one title per row, and the cursor's image. `cl-umbra` adds
+per-workspace subtrees and animated transforms (phase 7).
 
 ## 5. Seat, focus and grabs
 
@@ -346,8 +363,11 @@ focus stack, cursor shapes and touch are still ahead.*
   overlay listing the focus stack from its *tail* -- so row 0 is what one tap of the cycle would
   choose -- and `cf:advance-switcher` walks it, wrapping; releasing Alt calls the same
   focus-and-raise the cycle calls, and `cf:cancel-switcher` takes the overlay down without
-  touching anything. Nothing is decided while it is open: not the stack, not the keyboard, not
-  the stacking order. A window that closed while it was up is not chosen. The modal part is two
+  touching anything. A row is a picture of the window and its title (D52): the picture is taken
+  once, when the overlay opens, at the size the row will show it, which is why a client that
+  repaints while a person is choosing cannot make the panel repaint. Nothing is decided while it
+  is open: not the stack, not the keyboard, not the stacking order. A window that closed while it
+  was up is not chosen. The modal part is two
   generic functions with no-op defaults -- `switcher-key`, asked before grabs and bindings, and
   `switcher-pointer-press` -- so a compositor with no switcher pays one dispatch per key. The
   *rules* are the key list below: Tab walks (Shift walks backwards), a modifier press cancels

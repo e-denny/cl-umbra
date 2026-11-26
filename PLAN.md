@@ -401,6 +401,12 @@ changed what you see and not what the key means. Gate clause 20 drives three tit
 it and reads the panel, the bar and every title back out of the frame
 (`scripts/switcher-gate.sh`).
 
+A row's picture followed as its own slice (3i, continued; D52): `snapshot-node` in the scene holds a
+window's pixels copied *once*, when the overlay opens, downscaled to the resolution the row will
+show -- so drawing it is a 1:1 copy, and a client that keeps repainting cannot make the panel
+repaint. Rows are as tall as their content and the selection bar resizes with them. Clause 20 now
+matches every row's picture pixel for pixel against the snapshot it was taken from.
+
 Not in these slices: edge-anchored resizing, `reposition` and reactive positioning (v3, so the
 global stays v1), layer-shell, client cursor surfaces (a client's `set_cursor` surface is now kept
 out of the scene rather than drawn as a window), a themed or fractional-scaled cursor (phase 5),

@@ -8,7 +8,7 @@ compositor framework, and a tinywl port — as the six systems below.
 
 **Status: phase 0, phase 1, phase 2a, phase 2b, phase 3a, phase 3b, phase 3c, phase 3d,
 phase 3e, phase 3f, phase 3g, phase 3i and phase 3's exit gate — `cl-tinywl` — passing.**
-`./scripts/gate.sh` checks twenty clauses. Phase 0: the unit suite (312 tests, thirteen suites), every vendored protocol compiling,
+`./scripts/gate.sh` checks twenty clauses. Phase 0: the unit suite (318 tests, thirteen suites), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections

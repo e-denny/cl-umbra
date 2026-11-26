@@ -125,7 +125,9 @@ rather than upscaled.")
                 #:resource-destroyed-p
                 #:shm-buffer-width
                 #:shm-buffer-height
-                #:shm-buffer-format)
+                #:shm-buffer-format
+                #:shm-buffer-pool
+                #:shm-pool-mapping)
   (:documentation
    "The scene graph: nodes with positions, a stacking order, hit testing and
 compositing (docs/framework.md §4).  Policy stays outside; this package knows
@@ -171,6 +173,7 @@ nothing about seats, toplevels or focus.")
    #:node-y
    #:node-position
    #:set-node-position
+   #:set-node-size
    #:node-visible-p
    #:node-width
    #:node-height
@@ -186,6 +189,14 @@ nothing about seats, toplevels or focus.")
    #:image-node
    #:make-image-node
    #:image-node-octets
+   #:bitmap-node
+   #:bitmap-node-octets
+   #:bitmap-node-source-width
+   #:bitmap-node-source-height
+   #:snapshot-node
+   #:make-snapshot-node
+   #:buffer-drawable-p
+   #:snapshot-surface
    #:text-node
    #:make-text-node
    #:text-node-text
@@ -450,14 +461,19 @@ that, so a compositor chooses it by binding START-SWITCHER.")
    #:switcher-index
    #:switcher-selected
    #:switcher-titles
+   #:switcher-snapshots
    #:switcher-layout
+   #:thumbnail-size
    #:switcher-highlight
    #:switcher-modifier
    #:+switcher-panel-colour+
    #:+switcher-border-colour+
    #:+switcher-highlight-colour+
    #:+switcher-text-colour+
-   #:+switcher-fallback-title+))
+   #:+switcher-fallback-title+
+   #:+switcher-thumbnail-width+
+   #:+switcher-thumbnail-height+
+   #:+switcher-thumbnail-gap+))
 
 (defpackage #:cf
   (:nicknames #:cl-compositor-framework)

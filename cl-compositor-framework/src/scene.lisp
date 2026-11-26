@@ -3,14 +3,17 @@
 ;;;;
 ;;;; cf.scene v0: a retained node tree per output (docs/framework.md §4).
 ;;;;
-;;;; Five node kinds cover everything this compositor draws -- the compositing
-;;;; phase 2a already did, and the text the switcher needs:
+;;;; Six node kinds cover everything this compositor draws -- the compositing
+;;;; phase 2a already did, the text the switcher needs, and the picture in each of
+;;;; its rows:
 ;;;;
-;;;;   TREE-NODE    a group with children, drawn in order: the root is one
-;;;;   BUFFER-NODE  a mapped wl_surface, drawn from its current buffer
-;;;;   RECT-NODE    a solid rectangle: backgrounds, borders, letterboxing
-;;;;   IMAGE-NODE   premultiplied ARGB8888 pixels: the software cursor
-;;;;   TEXT-NODE    a string in the built-in 5x7 font: the switcher's titles
+;;;;   TREE-NODE      a group with children, drawn in order: the root is one
+;;;;   BUFFER-NODE    a mapped wl_surface, drawn from its current buffer
+;;;;   RECT-NODE      a solid rectangle: backgrounds, borders, letterboxing
+;;;;   BITMAP-NODE    premultiplied ARGB8888 pixels we own:
+;;;;     IMAGE-NODE     the software cursor
+;;;;     SNAPSHOT-NODE  a window's picture, taken once (the switcher's thumbnails)
+;;;;   TEXT-NODE      a string in the built-in 5x7 font: the switcher's titles
 ;;;;
 ;;;; One tree is what the compositor arranges; one overlay is what it draws on top
 ;;;; of everything without arranging it.  The overlay is a second root -- above the
@@ -93,15 +96,49 @@ where there is nothing to see."))
    "A solid rectangle in premultiplied 0xAARRGGBB: backgrounds, borders, and
 letterboxing when an output's aspect ratio and a fullscreen client's disagree."))
 
-(defclass image-node (scene-node)
-  ((octets :initarg :octets :reader image-node-octets)
-   (width :initarg :width :accessor node-width)
+(defclass bitmap-node (scene-node)
+  ((octets :initarg :octets :reader bitmap-node-octets)
+   ;; The bitmap's own pixel size, which is not always the size it is drawn: the
+   ;; cursor is 16x16 pixels and is drawn 32x32 at scale 2, while a snapshot is
+   ;; taken at the size it will be drawn and the two agree (D52).
+   (source-width :initarg :source-width :initform 0 :reader bitmap-node-source-width)
+   (source-height :initarg :source-height :initform 0 :reader bitmap-node-source-height))
+  (:documentation
+   "Pixel memory we own, not a client's: premultiplied ARGB8888, row-major.
+
+What a bitmap node has that a buffer node does not is a lifetime of its own: the
+client that supplied the pixels may redraw, resize or disconnect, and the picture
+stays what it was.  That is what a cursor needs (it must survive the client that
+set it) and what a thumbnail needs (it must not change under a draw item whose
+signature says it did not) (D52)."))
+
+(defclass image-node (bitmap-node)
+  ((width :initarg :width :accessor node-width)
    (height :initarg :height :accessor node-height))
   (:documentation
    "Premultiplied ARGB8888 pixels owned by us, not by a client: today only the
 software cursor, because a cursor is composited last and must not be a client
 surface (a client may set a cursor *surface*, which is a different object --
 phase 5)."))
+
+(defclass snapshot-node (bitmap-node)
+  ((width :initarg :width :accessor node-width)
+   (height :initarg :height :accessor node-height))
+  (:documentation
+   "A picture of a client's buffer, taken once and drawn into a box we chose.
+
+Not a buffer node, and the difference is the whole point: a buffer node draws
+whatever the client last committed, at the size the client chose, and its size is
+never a value the compositor invented.  A snapshot is a *copy* whose size and
+lifetime are ours -- downscaled once, at the resolution it will be shown at, so
+drawing it later is a 1:1 copy rather than a resample per frame (D52).
+
+It is also what makes a row's picture honest with the damage diff: the draw item's
+signature carries the octets, and a vector we allocated does not change, so a
+client that keeps repainting its window does not keep repainting its thumbnail.
+Whether the picture is *current* is then a policy question with one answer -- no:
+it is what the window looked like when the picture was taken -- instead of an
+accident of what happened to be damaged."))
 
 (defclass text-node (scene-node)
   ((text :initarg :text :initform "" :accessor text-node-text)
@@ -124,12 +161,19 @@ draws nothing -- which is what lets a row with no title still have a row."))
 ;;; ---------------------------------------------------------------------------
 ;;; DEFCLASS defines no type predicates (that is DEFSTRUCT), and the walk below
 ;;; reads better with names than with TYPEP forms in every branch.
-(declaim (inline tree-node-p buffer-node-p rect-node-p image-node-p text-node-p))
+(declaim (inline tree-node-p buffer-node-p rect-node-p bitmap-node-p image-node-p
+                 snapshot-node-p text-node-p))
 (defun tree-node-p (node) (typep node 'tree-node))
 (defun buffer-node-p (node) (typep node 'buffer-node))
 (defun rect-node-p (node) (typep node 'rect-node))
+(defun bitmap-node-p (node) (typep node 'bitmap-node))
 (defun image-node-p (node) (typep node 'image-node))
+(defun snapshot-node-p (node) (typep node 'snapshot-node))
 (defun text-node-p (node) (typep node 'text-node))
+
+(defun image-node-octets (node)
+  "NODE's pixels; the reader IMAGE-NODE used to have, now on BITMAP-NODE."
+  (bitmap-node-octets node))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Constructors
@@ -145,7 +189,20 @@ draws nothing -- which is what lets a row with no title still have a row."))
 
 (defun make-image-node (octets width height)
   "A node drawing premultiplied ARGB8888 OCTETS, WIDTH x HEIGHT pixels."
-  (make-instance 'image-node :octets octets :width width :height height))
+  (make-instance 'image-node :octets octets :width width :height height
+                             :source-width width :source-height height))
+
+(defun make-snapshot-node (octets pixel-width pixel-height width height)
+  "A node drawing OCTETS (PIXEL-WIDTH x PIXEL-HEIGHT pixels) as a
+WIDTH x HEIGHT layout box.
+
+The two sizes are given separately because they mean different things: PIXEL-WIDTH
+is how many pixels the picture has, WIDTH is how much of the output it covers.  A
+snapshot is normally taken at exactly the device size it will be drawn at, which is
+what makes drawing it a copy rather than a resample (D52)."
+  (make-instance 'snapshot-node :octets octets
+                                :source-width pixel-width :source-height pixel-height
+                                :width width :height height))
 
 (defun make-text-node (text &key (colour #xFFFFFFFF))
   "A node drawing TEXT in the built-in font, in premultiplied ARGB8888 COLOUR."
@@ -363,6 +420,21 @@ what they were covering."
   (setf (node-x node) x
         (node-y node) y)
   node)
+
+(defun set-node-size (node width height)
+  "Resize NODE to WIDTH x HEIGHT layout pixels; returns it.
+
+Only the sizes that are the compositor's to set: a rectangle's (a border, a
+selection bar) and a bitmap's (a cursor image).  A buffer node's size is its
+client's answer, a text node's is its font's, and a snapshot's is the box it was
+taken for -- setting those would be a second truth about the same pixels, which is
+exactly what D10 refused."
+  (typecase node
+    ((or rect-node image-node)
+     (setf (node-width node) width
+           (node-height node) height)
+     node)
+    (t (error "~S has no size of its own to set" node))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Hit testing
@@ -617,6 +689,83 @@ some other size (nearest-neighbour, so it stays an arrow)."
         :cursor-p t))
       (t nil))))
 
+;;; ---------------------------------------------------------------------------
+;;; Pictures we own: a snapshot of a client's buffer, taken once
+;;; ---------------------------------------------------------------------------
+;;
+;; A thumbnail is a *copy*, and the copy is the design (D52).  Drawing the client's
+;; buffer straight into a small rectangle looks simpler and is wrong three ways: the
+;; buffer changes whenever the client draws, so the item's signature changes and the
+;; panel repaints on every client frame; the client may destroy the buffer while the
+;; overlay is up; and the result is a picture whose freshness depends on what else
+;; happened to be damaged that frame.  Copying once, at the resolution it will be
+;; shown at, makes the thumbnail a constant -- and a constant is something a damage
+;; diff can reason about.
+
+(defun buffer-drawable-p (buffer)
+  "Can BUFFER be read as pixels right now?
+
+A buffer is pixels when its pool is still mapped and the buffer has not been
+destroyed.  The protocol's state machine refuses everything else, but a buffer can
+outlive the mapping that gave it a pointer for a moment, and a snapshot must not be
+the thing that follows it there."
+  (and buffer
+       (not (resource-destroyed-p buffer))
+       (plusp (shm-buffer-width buffer))
+       (plusp (shm-buffer-height buffer))
+       (let ((pool (shm-buffer-pool buffer)))
+         (and pool (shm-pool-mapping pool) t))))
+
+(defun snapshot-surface (surface width height &key (scale 1))
+  "SURFACE's current buffer, downscaled into a WIDTH x HEIGHT layout box.
+
+Three values -- (values OCTETS PIXEL-WIDTH PIXEL-HEIGHT), premultiplied ARGB8888 at
+the output's resolution for that box -- or NIL when there are no pixels to take.
+
+SCALE is the output's scale, so a 72x48 box on a scale-2 output becomes a 144x96
+picture: the resolution it will be drawn at, never more and never less.  Drawing it
+is then a 1:1 copy with no filter, which is why the resample happens here, once per
+opening, instead of once per frame.
+
+The filter is bilinear, and that is a judgement about pictures rather than text: a
+window's content is not a glyph grid, so nearest-neighbour turns a downscaled title
+bar into a row of dropped pixels.  Text is the case where nearest is right (D51); a
+picture is the case where it is not."
+  (let ((buffer (and surface (surface-current-buffer surface))))
+    (when (buffer-drawable-p buffer)
+      (let* ((pixel-width (scale-length width scale))
+             (pixel-height (scale-length height scale))
+             (target (render:make-target pixel-width pixel-height)))
+        (unwind-protect
+             (progn
+               (render:composite-buffer target buffer
+                                        :width pixel-width :height pixel-height
+                                        :transform (or (surface-buffer-transform surface) 0)
+                                        :filter :bilinear)
+               (values (render:target-octets-copy target)
+                       pixel-width pixel-height))
+          (render:destroy-target target))))))
+
+(defun make-bitmap-item (node x y scale)
+  "A draw item for bitmap NODE whose accumulated parent position is layout (X, Y).
+
+The picture's own size and the size it is drawn are two different numbers: the
+cursor's are 16x16 pixels into 16x16 layout coordinates (so 32x32 device at scale
+2), a snapshot's are equal by construction, and neither is the other's business."
+  (let ((width (scale-length (node-width node) scale))
+        (height (scale-length (node-height node) scale))
+        (source-width (bitmap-node-source-width node))
+        (source-height (bitmap-node-source-height node)))
+    (%make-draw-item :node node
+                     :kind :image
+                     :x (scale-coordinate x scale)
+                     :y (scale-coordinate y scale)
+                     :width width :height height
+                     :octets (bitmap-node-octets node)
+                     :source-width (if (plusp source-width) source-width width)
+                     :source-height (if (plusp source-height) source-height height)
+                     :cursor-p nil)))
+
 (defun collect-draw-items (node base-x base-y scale items)
   "Push NODE's subtree's draw items onto ITEMS, back to front; return ITEMS."
   (when (node-visible-p node)
@@ -647,17 +796,11 @@ some other size (nearest-neighbour, so it stays an arrow)."
                             (list (list x0 y0 w h)))
                   :cursor-p nil)
                  items)))
-        ((image-node-p node)
-         (push (%make-draw-item :node node :kind :image
-                                :x (scale-coordinate x scale)
-                                :y (scale-coordinate y scale)
-                                :width (scale-length (node-width node) scale)
-                                :height (scale-length (node-height node) scale)
-                                :octets (image-node-octets node)
-                                :source-width (node-width node)
-                                :source-height (node-height node)
-                                :cursor-p nil)
-               items))
+        ((bitmap-node-p node)
+         ;; A cursor image and a window's snapshot are the same kind of thing to
+         ;; the renderer -- our pixels, drawn into a device rectangle -- and differ
+         ;; only in whether that rectangle is the picture's own size (D52).
+         (push (make-bitmap-item node x y scale) items))
         ((text-node-p node)
          ;; Rasterised at the output's scale and drawn 1:1: a glyph cell is
          ;; SCALE x SCALE device pixels, so text is crisp at scale 2 rather than

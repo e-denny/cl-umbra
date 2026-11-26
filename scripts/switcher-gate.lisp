@@ -121,6 +121,44 @@ window that happens to contain the text colour must not be able to vote."
 (defun overlay-children ()
   (cf.scene:node-children (cf.scene:scene-overlay (cf:compositor-scene *compositor*))))
 
+(defun pictures ()
+  "The overlay's snapshot nodes, in row order: one per row that has a picture."
+  (remove-if-not (lambda (node) (typep node 'cf.scene:snapshot-node))
+                 (overlay-children)))
+
+(defun picture-pixel (octets width x y)
+  "The 0xAARRGGBB pixel at (X, Y) of a premultiplied ARGB8888 picture WIDTH wide."
+  (let ((offset (* 4 (+ x (* width y)))))
+    (logior (aref octets offset)
+            (ash (aref octets (+ offset 1)) 8)
+            (ash (aref octets (+ offset 2)) 16)
+            (ash (aref octets (+ offset 3)) 24))))
+
+(defun an-opaque-pixel (octets width height)
+  "A fully opaque pixel of a picture, as (values X Y ARGB); NIL when there is none.
+
+A thumbnail is composited over the panel, so a translucent pixel's colour on the
+screen is the panel's as well; an opaque one is the picture's alone, and only that
+makes comparing a screen pixel with a picture pixel mean something."
+  (loop for y from 0 below height
+        do (loop for x from 0 below width
+                 do (let ((argb (picture-pixel octets width x y)))
+                      (when (= 255 (ldb (byte 8 24) argb))
+                        (return-from an-opaque-pixel (values x y argb))))))
+  nil)
+
+(defun row-pixel (layout row octets)
+  "A point three pixels inside the panel's right edge and two below ROW's top.
+
+On the selected row that point is the selection bar and on any other it is the
+panel: the bar spans the panel's inner width, so it is the one column where a row's
+state is visible at a fixed place."
+  (let ((x (getf layout :x))
+        (width (getf layout :width)))
+    (pixel-at octets
+              (* *scale* (- (+ x width) 3))
+              (* *scale* (+ (nth row (getf layout :rows)) 2)))))
+
 (defun switcher ()
   (cf:compositor-switcher *compositor*))
 
@@ -224,7 +262,30 @@ window that happens to contain the text colour must not be able to vote."
                (check (= cf.switcher:+switcher-panel-colour+
                          (cf:frame-pixel-device parent (floor x *scale*)
                                                 (floor y *scale*)))
-                      "and the parent's own frame has it at the mapped point"))
+                      "and the parent's own frame has it at the mapped point")
+               ;; A picture as well: the row's snapshot, drawn at the inner device
+               ;; coordinates the layout gives, in the inner frame.  The overlay is
+               ;; the thing a presenter that only understands clients is most likely
+               ;; to drop, and a picture inside it is the newest thing to drop.
+               (let* ((node (find-if (lambda (node)
+                                       (typep node 'cf.scene:snapshot-node))
+                                     (cf.scene:node-children
+                                      (cf.scene:scene-overlay
+                                       (cf:compositor-scene inner)))))
+                      (rect (first (remove nil (getf layout :thumbnails)))))
+                 (check (and node rect) "the nested rows have pictures too")
+                 (when (and node rect)
+                   (multiple-value-bind (pixel-x pixel-y wanted)
+                       (an-opaque-pixel (cf.scene:bitmap-node-octets node)
+                                        (cf.scene:bitmap-node-source-width node)
+                                        (cf.scene:bitmap-node-source-height node))
+                     (check (and wanted
+                                 (= wanted
+                                    (cf:frame-pixel-device
+                                     inner
+                                     (+ (* *scale* (first rect)) pixel-x)
+                                     (+ (* *scale* (second rect)) pixel-y))))
+                            "and the picture is in the inner frame where the layout says")))))
              (cf:inject-key inner "Alt_L" :released)
              (pump-world parent nested 0.5)
              (check (null (cf:compositor-switcher inner))
@@ -292,6 +353,9 @@ window that happens to contain the text colour must not be able to vote."
                     (height (getf layout :height))
                     (padding (getf layout :padding))
                     (rows (getf layout :rows))
+                    (row-heights (getf layout :row-heights))
+                    (text-rows (getf layout :text-rows))
+                    (thumbnails (getf layout :thumbnails))
                     (texts (getf layout :texts))
                     (text-x (getf layout :text-x))
                     (output (frame)))
@@ -310,74 +374,174 @@ window that happens to contain the text colour must not be able to vote."
                ;; The bar spans the panel's inner width on the selected row, so a
                ;; point three pixels inside the right edge is the bar on that row and
                ;; the panel on any other.
-               (flet ((row-pixel (row octets)
-                        (pixel-at octets
-                                  (* *scale* (- (+ x width) 3))
-                                  (* *scale* (+ (nth row rows) 2)))))
-                 (dotimes (row 3)
-                   (check (= (if (zerop row)
-                                 cf.switcher:+switcher-highlight-colour+
-                                 cf.switcher:+switcher-panel-colour+)
-                             (row-pixel row output))
-                          "row ~D is ~:[the panel~;the selection bar~]" row (zerop row)))
-                 ;; 3. Each row's text is that client's title at the output's scale.
-                 ;;    Every title ends in A, whose rightmost column is lit, so the
-                 ;;    right-hand end of the text is a width only the title produces.
-                 (loop for title in texts
-                       for row in rows
+               (dotimes (row 3)
+                 (check (= (if (zerop row)
+                               cf.switcher:+switcher-highlight-colour+
+                               cf.switcher:+switcher-panel-colour+)
+                           (row-pixel layout row output))
+                        "row ~D is ~:[the panel~;the selection bar~]" row (zerop row)))
+
+               ;; 3. Each row's picture is that window's picture, at the size the
+               ;;    layout chose, where the layout put it.  Three ways to get a
+               ;;    thumbnail wrong -- the wrong window, the wrong place, the wrong
+               ;;    size -- and one check for each.
+               (let ((nodes (pictures)))
+                 (check (= 3 (length nodes))
+                        "every row has a picture: ~D snapshot nodes" (length nodes))
+                 (loop for surface in (cf.switcher:switcher-entries (switcher))
+                       for rect in thumbnails
                        for index from 0
-                       do (multiple-value-bind (left right count)
-                              (text-extent output
-                                           (* *scale* (+ x 2)) (* *scale* row)
-                                           (* *scale* (- width 4)) (* *scale* 7))
-                            (let ((start (* *scale* text-x))
-                                  (expected-end (1- (+ (* *scale* text-x)
-                                                       (* *scale* (cf.font:text-width title))))))
-                              (check (and count (= right expected-end))
-                                     "row ~D draws ~S: ~D device pixels wide, ending at ~D"
-                                     index title
-                                     (if count (1+ (- right start)) 0) right)
-                              (check (and left (< (- left start) (* *scale* 5)))
-                                     "row ~D starts at the panel's text column" index))))
+                       do (multiple-value-bind (window-width window-height)
+                              (cf.scene:surface-layout-size surface)
+                            (check (< (abs (- (/ (third rect) (fourth rect))
+                                              (/ window-width window-height)))
+                                      0.02)
+                                   "row ~D's picture keeps its window's shape (~Dx~D of ~Dx~D)"
+                                   index (third rect) (fourth rect)
+                                   window-width window-height)
+                            (check (and (<= (third rect) window-width)
+                                        (<= (fourth rect) window-height))
+                                   "and is no larger than the window")))
+                 ;; Drawn: the frame's pixels inside the picture are the picture's
+                 ;; own, one for one -- which is what taking it at the output's
+                 ;; resolution buys, and what proves the right picture at the right
+                 ;; place.  Translucent pixels are skipped: they are the one case
+                 ;; where the panel underneath is part of the answer.
+                 (loop for node in nodes
+                       for rect in (remove nil thumbnails)
+                       for index from 0
+                       do (let* ((octets (cf.scene:bitmap-node-octets node))
+                                 (source-width (cf.scene:bitmap-node-source-width node))
+                                 (device-x (* *scale* (first rect)))
+                                 (device-y (* *scale* (second rect)))
+                                 (device-width (* *scale* (third rect)))
+                                 (device-height (* *scale* (fourth rect)))
+                                 (samples 0) (matches 0) (colours '()))
+                            (loop for sample-y from 2 below (- device-height 2) by 5
+                                  do (loop for sample-x from 2 below (- device-width 2) by 5
+                                           do (let ((wanted
+                                                     (picture-pixel octets source-width
+                                                                    sample-x sample-y)))
+                                                (push wanted colours)
+                                                (when (= 255 (ldb (byte 8 24) wanted))
+                                                  (incf samples)
+                                                  (when (= wanted
+                                                           (pixel-at output
+                                                                     (+ device-x sample-x)
+                                                                     (+ device-y sample-y)))
+                                                    (incf matches))))))
+                            (check (and (> samples 20) (= samples matches))
+                                   "row ~D's picture is on the screen where the layout says: ~D of ~D opaque pixels"
+                                   index matches samples)
+                            (check (> (length (remove-duplicates colours)) 3)
+                                   "and it is the window's picture, not a flat fill (~D colours)"
+                                   (length (remove-duplicates colours))))))
 
-                 ;; 4. Tab moves the bar, and damages two rows rather than the frame.
-                 (tap "Tab")
-                 (check (= 1 (cf.switcher:switcher-index (switcher)))
-                        "Tab moved the selection to the second row")
+               ;; 4. Each row's text is that client's title at the output's scale,
+               ;;    in the column after the picture.  Every title ends in A, whose
+               ;;    rightmost column is lit, so the right-hand end of the text is a
+               ;;    width only the title produces.
+               (check (= (+ x padding cf.switcher:+switcher-thumbnail-width+
+                            cf.switcher:+switcher-thumbnail-gap+)
+                         text-x)
+                      "the titles start after the picture column")
+               (loop for title in texts
+                     for text-row in text-rows
+                     for index from 0
+                     do (multiple-value-bind (left right count)
+                            (text-extent output
+                                         (* *scale* (1- text-x)) (* *scale* text-row)
+                                         (* *scale* (+ 2 (cf.font:text-width title)))
+                                         (* *scale* (cf.font:text-height)))
+                          (let ((start (* *scale* text-x))
+                                (expected-end (1- (+ (* *scale* text-x)
+                                                     (* *scale* (cf.font:text-width title))))))
+                            (check (and count (= right expected-end))
+                                   "row ~D draws ~S: ~D device pixels wide, ending at ~D"
+                                   index title
+                                   (if count (1+ (- right start)) 0) right)
+                            (check (and left (< (- left start) (* *scale* 5)))
+                                   "row ~D starts at the panel's text column" index))))
+
+               ;; 5. Tab moves the bar, and damages two rows rather than the frame.
+               (tap "Tab")
+               (check (= 1 (cf.switcher:switcher-index (switcher)))
+                      "Tab moved the selection to the second row")
+               (let ((after (frame)))
+                 (check (= cf.switcher:+switcher-panel-colour+
+                           (row-pixel layout 0 after))
+                        "the first row is no longer selected")
+                 (check (= cf.switcher:+switcher-highlight-colour+
+                           (row-pixel layout 1 after))
+                        "the second is")
+                 (let ((bounds (cf:output-damage-bounds *compositor*)))
+                   (check (and (listp bounds) (< (fourth bounds) (* *scale* height)))
+                          "and the frame damaged ~S -- two rows, not the output"
+                          bounds)))
+               (tap "Tab")
+               (check (= 2 (cf.switcher:switcher-index (switcher))) "then the third row")
+               (tap "Tab")
+               (check (zerop (cf.switcher:switcher-index (switcher)))
+                      "and a step past the last row wraps to the first")
+
+               ;; 6. A picture is a snapshot, and a snapshot does not follow its
+               ;;    client.  A key press makes weston-eventdemo redraw -- it shows
+               ;;    the event it last saw -- and the row keeps the picture it took,
+               ;;    which is what keeps a repainting client from repainting the
+               ;;    panel (D52).
+               (let ((before (mapcar #'cf.scene:bitmap-node-octets (pictures))))
+                 ;; A pointer over a window is a client that may redraw at any moment
+                 ;; -- weston-eventdemo draws a figure that follows it -- and motion is
+                 ;; the one pointer event that does not cancel a switcher (a press
+                 ;; does, D51).  So the overlay survives a client doing its work, and
+                 ;; the pictures are still the ones that were taken: the frame's pixels
+                 ;; below prove that what is drawn is those pictures and not the
+                 ;; clients' latest (clause 20's unit half changes a client's pixels
+                 ;; on purpose and checks the same thing without a real client).
+                 (cf:inject-pointer-motion *compositor* 20 20)
+                 (pump 0.8)
+                 (cf:inject-pointer-motion *compositor* 0 0)
+                 (pump 0.2)
+                 (check (and before
+                             (every #'eq before
+                                    (mapcar #'cf.scene:bitmap-node-octets (pictures))))
+                        "the pictures are still the ones that were taken")
                  (let ((after (frame)))
-                   (check (= cf.switcher:+switcher-panel-colour+ (row-pixel 0 after))
-                          "the first row is no longer selected")
-                   (check (= cf.switcher:+switcher-highlight-colour+ (row-pixel 1 after))
-                          "the second is")
-                   (let ((bounds (cf:output-damage-bounds *compositor*)))
-                     (check (and (listp bounds) (< (fourth bounds) (* *scale* height)))
-                            "and the frame damaged ~S -- two rows, not the output"
-                            bounds)))
-                 ;; 5. Two more steps wrap back to the first row.
-                 (tap "Tab")
-                 (check (= 2 (cf.switcher:switcher-index (switcher))) "then the third row")
-                 (tap "Tab")
-                 (check (zerop (cf.switcher:switcher-index (switcher)))
-                        "and a step past the last row wraps to the first"))
+                   (loop for node in (pictures)
+                         for rect in (remove nil thumbnails)
+                         for index from 0
+                         do (let* ((octets (cf.scene:bitmap-node-octets node))
+                                   (wanted (picture-pixel
+                                            octets
+                                            (cf.scene:bitmap-node-source-width node)
+                                            2 2)))
+                              (when (= 255 (ldb (byte 8 24) wanted))
+                                (check (= wanted
+                                          (pixel-at after
+                                                    (+ (* *scale* (first rect)) 2)
+                                                    (+ (* *scale* (second rect)) 2)))
+                                       "row ~D still draws the picture it took, not the client's new pixels"
+                                       index)))))
+                 )
 
-                 ;; 6. Releasing Alt takes the row that was showing.
-                 (release "Alt_L")
-                 (check (null (switcher)) "releasing Alt closed the switcher")
-                 (check (null (overlay-children)) "and took every overlay node with it")
-                 (check (equal "ALPHA" (cf:window-title (focused-surface)))
-                        "the first row -- ALPHA -- has the keyboard")
-                 (check (equal "ALPHA" (cf:window-title (frontmost-window-surface)))
-                        "and was raised: the choice is visible in the scene")
-                 (check (equal '("ALPHA" "GAMMA" "BETA") (stack-titles))
-                        "and the history rotated, exactly as one tap of Tab always did")
-                 (let ((committed (frame)))
-                   (check (eq :full (cf:output-damage-bounds *compositor*))
-                          "the overlay going away is a stacking change, so a full frame")
-                   (cf:invalidate-output *compositor*)
-                   (check (equalp committed (frame))
-                          "and the frame it left is byte-identical to a full repaint")))
+               ;; 7. Releasing Alt takes the row that was showing.
+               (release "Alt_L")
+               (check (null (switcher)) "releasing Alt closed the switcher")
+               (check (null (overlay-children)) "and took every overlay node with it")
+               (check (equal "ALPHA" (cf:window-title (focused-surface)))
+                      "the first row -- ALPHA -- has the keyboard")
+               (check (equal "ALPHA" (cf:window-title (frontmost-window-surface)))
+                      "and was raised: the choice is visible in the scene")
+               (check (equal '("ALPHA" "GAMMA" "BETA") (stack-titles))
+                      "and the history rotated, exactly as one tap of Tab always did")
+               (let ((committed (frame)))
+                 (check (eq :full (cf:output-damage-bounds *compositor*))
+                        "the overlay going away is a stacking change, so a full frame")
+                 (cf:invalidate-output *compositor*)
+                 (check (equalp committed (frame))
+                        "and the frame it left is byte-identical to a full repaint")))
 
-             ;; 7. Escape cancels; the focus does not move.
+            ;; 7. Escape cancels; the focus does not move.
              (let ((before (focused-surface)))
                (open-switcher)
                (check (switcher-open-p) "Alt+Tab opened it again")

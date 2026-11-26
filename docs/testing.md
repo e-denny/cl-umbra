@@ -61,7 +61,7 @@ The scripts go through `wayland.test.runner`, which names the thirteen suites in
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 312 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 318 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -419,13 +419,20 @@ The visible switcher (phase 3i) adds the twentieth:
     holds it repaints the whole output (the draw list's order changed); the panel's colour is
     read three pixels inside its top-left corner and the outline's one pixel outside it, both at
     the coordinates `cf.switcher:switcher-layout` gives; the selection bar is found on row 0 and
-    the panel colour on rows 1 and 2, at a point inside the panel's right edge. Each row's text is
-    measured inside the panel only -- so a window that happens to contain the text colour cannot
-    vote -- and must end on the last device pixel of the last glyph: 58, 46 and 58 device pixels
-    for ALPHA, BETA and GAMMA, ending at 827, 815 and 827. That is a width only that title
-    produces, in the row only the focus stack puts it in, at the scale the output advertised. A
-    Tab then moves the bar and the frame damages `(754 552 90 64)` -- two rows, not the output --
-    and two more steps wrap back to the first row. Releasing Alt closes the overlay, leaves no
+    the panel colour on rows 1 and 2, at a point inside the panel's right edge. Each row also has
+    a *picture* of its window (D52): three snapshot nodes, the window's shape fitted inside the box
+    (60x48 of a 500x400 window), and **148 of 148** sampled opaque pixels of every row equal to the
+    picture's own octets at the coordinates the layout gives -- the right picture, in the right
+    place, at the size it was taken -- with 16, 16 and 17 distinct colours, so they are pictures
+    and not flat fills. Each row's text is measured inside the panel and its own column only -- so
+    a window that happens to contain the text colour cannot vote -- and must end on the last
+    device pixel of the last glyph: 58, 46 and 58 device pixels for ALPHA, BETA and GAMMA, ending
+    at 907, 895 and 907, one picture column further right than before. That is a width only that
+    title produces, in the row only the focus stack puts it in, at the scale the output
+    advertised. A Tab then moves the bar and the frame damages `(674 444 250 208)` -- two rows,
+    not the output -- and two more steps wrap back to the first row; a pointer moving over the
+    clients for 0.8 s leaves the pictures the same vectors and still on the screen, because a
+    picture is a snapshot and not a live view. Releasing Alt closes the overlay, leaves no
     overlay nodes, focuses and raises ALPHA as the frontmost scene child, rotates the history to
     (ALPHA GAMMA BETA) exactly as one tap of the cycle always did, and the frame it leaves is
     **byte-identical to a full repaint** (`cf:frame-octets` on both sides), so nothing stale hid
@@ -437,8 +444,9 @@ The visible switcher (phase 3i) adds the twentieth:
     final section puts the overlay one compositor deeper: a nested tinywl at scale 2 inside a
     scale-1 headless parent, two clients inside it, Alt+Tab injected into the *inner* compositor --
     the panel is in the inner frame and in the parent's own frame at the coordinate the scale
-    mapping implies, and the release closes it inside and leaves no overlay nodes.
-    Thirty unit tests (`tests/unit/switcher.lisp`, suite 13) pin what a gate cannot isolate: the
+    mapping implies, a picture is in the inner frame at its own device coordinate, and the release
+    closes it inside and leaves no overlay nodes. 75 checks.
+    Thirty-six unit tests (`tests/unit/switcher.lisp`, suite 13) pin what a gate cannot isolate: the
     font's 95 glyphs and their shape (a malformed glyph is a load-time error), text width as
     `6n-1`, a raster's premultiplication, its 2x2 blocks at scale 2 and the gap column between
     glyphs, the fallback glyph, `truncate-text`'s ellipsis, a text node's layout size against its
@@ -449,8 +457,14 @@ The visible switcher (phase 3i) adds the twentieth:
     client getting a stand-in row, one window opening nothing, Alt+Tab through the real key path
     (press and release consumed, `consumed-keys` left empty, focus untouched), a modifier press
     that cancels nothing, the release that commits and raises, Escape, a click, idempotent
-    cancel/commit, a window that vanished while the overlay was up, and a compositor with no
-    switcher binding still cycling the stack as D45 says.
+    cancel/commit, a window that vanished while the overlay was up, a compositor with no
+    switcher binding still cycling the stack as D45 says, and -- for the pictures (D52) -- the
+    box fit and its never-upscale rule, a picture row's extra height with the titles still in
+    one column, a 16x8 window's own two flat halves at scale 1 and at scale 2, the title-only
+    layout when nothing has pixels, `set-node-size` resizing a rectangle and refusing a client's
+    buffer, and a test that rewrites a client's pixels after the overlay opens and finds the
+    stored picture and the drawn frame unchanged (the fixture maps a memfd so the test can play
+    the client).
 
 All twenty clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface

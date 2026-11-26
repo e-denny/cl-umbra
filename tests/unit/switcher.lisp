@@ -25,8 +25,7 @@
                     (#:font #:cf.font)
                     (#:headless #:cf.backend.headless)
                     (#:input #:cf.input)
-                    (#:srv #:wayland.server))
-  (:documentation
+                    (#:srv #:wayland.server))  (:documentation
    "Tests for cf.font, the scene's overlay and cf.switcher (D51)."))
 
 (in-package #:wayland.test.switcher)
@@ -88,7 +87,7 @@ and its regions, and the protocol state machine has its own tests."
             (srv:surface-mapped-p surface) t))
     surface))
 
-(defun window (compositor &key title app-id (width 100) (height 80) (x 0) (y 0))
+(defun window (compositor &key title app-id (width 100) (height 80) (x 0) (y 0) buffer)
   "A mapped window surface with a toplevel role and a node at (X, Y).
 
 The role object is real: WINDOW-TITLE reads the client's title from it, and a
@@ -96,7 +95,10 @@ window with no title and no app id is a case the switcher has to survive.  The
 surface is a TEST-SURFACE, whose focus change sends nothing: there is no client on
 the other end of these sockets, and a configure addressed to nobody is not the
 topic here (gate clause 18 checks the activated state with real clients).
-Returns (values surface node)."
+
+BUFFER is the buffer to attach, for a test that needs real pixels (PICTURE-BUFFER);
+the default is a buffer with no pool behind it, which has a size and no picture --
+the case a thumbnail has to survive.  Returns (values surface node)."
   (let* ((surface (make-instance 'test-surface
                                  :client nil :id 9 :interface nil :version 1))
          (shell (make-instance 'srv:xdg-surface
@@ -113,12 +115,83 @@ Returns (values surface node)."
           (srv:xdg-toplevel-app-id toplevel) app-id
           (srv:surface-shell-surface surface) shell
           (srv:surface-current-buffer surface)
-          (make-instance 'srv:shm-buffer :pool nil :offset 0
-                                         :width width :height height
-                                         :stride (* 4 width) :format 0)
+          (or buffer
+              (make-instance 'srv:shm-buffer :pool nil :offset 0
+                                             :width width :height height
+                                             :stride (* 4 width) :format 0))
           (srv:surface-mapped-p surface) t
           (cf:surface-scene-node surface) node)
     (values surface node)))
+
+(defun picture-octets (width height left right)
+  "WIDTH x HEIGHT ARGB8888 where the left half is one colour and the right half another.
+
+Two flat colours rather than a photograph, so a downscale has an answer that can be
+written down: bilinear filtering of a constant region is that constant, whatever the
+ratio, so a thumbnail's left half is LEFT exactly and its right half is RIGHT
+exactly -- which is a claim about scale, orientation and colour at once."
+  (let ((octets (make-array (* 4 width height) :element-type '(unsigned-byte 8)))
+        (half (floor width 2)))
+    (dotimes (y height)
+      (dotimes (x width)
+        (let ((colour (if (< x half) left right))
+              (offset (* 4 (+ x (* width y)))))
+          (setf (aref octets offset) (ldb (byte 8 0) colour)
+                (aref octets (+ offset 1)) (ldb (byte 8 8) colour)
+                (aref octets (+ offset 2)) (ldb (byte 8 16) colour)
+                (aref octets (+ offset 3)) (ldb (byte 8 24) colour)))))
+    octets))
+
+(defun picture-buffer (width height &key (left #xFFFF0000) (right #xFF0000FF))
+  "A shm buffer with real pixels in a real mapping; four values.
+
+(values BUFFER FD MAPPING SIZE).  A memfd, mapped read-only the way a pool maps it:
+no socket, no client, and pixels the test can read back through the renderer.  The
+caller unmaps MAPPING when it is done (nothing else owns it here).
+
+This is what a thumbnail needs and what a fake surface cannot give: SHM-BUFFER-POINTER
+needs a mapped pool, so a snapshot of a fake buffer is correctly *no picture* --
+which is the other half of the same rule."
+  (let* ((stride (* 4 width))
+         (size (* stride height))
+         (fd (wayland.ffi:memfd-create "cl-wayland-switcher-picture"))
+         (octets (picture-octets width height left right)))
+    (wayland.ffi:set-file-size fd size)
+    (let ((mapping (wayland.ffi:map-file fd size
+                                         :protection (logior wayland.ffi:+prot-read+
+                                                             wayland.ffi:+prot-write+))))
+      (unwind-protect
+           (wayland.ffi:write-mapped-octets mapping 0 octets)
+        (wayland.ffi:unmap-file mapping size)))
+    (let* ((pool (make-instance 'srv:shm-pool :client nil :id 20 :interface nil
+                                              :version 1 :fd fd :size size))
+           ;; Mapped read-write, unlike a pool's: the test plays the client, and a
+           ;; client writes its own pixels.  Reading is all the renderer does with it.
+           (mapping (wayland.ffi:map-file fd size
+                                          :protection (logior wayland.ffi:+prot-read+
+                                                              wayland.ffi:+prot-write+)))
+           (buffer (make-instance 'srv:shm-buffer :pool pool :offset 0
+                                                 :width width :height height
+                                                 :stride stride :format 0)))
+      (setf (srv:shm-pool-mapping pool) mapping
+            (srv::shm-pool-mapping-length pool) size)
+      (values buffer fd mapping size))))
+
+(defun fill-picture (mapping width height colour)
+  "Overwrite every pixel in MAPPING with COLOUR, as a client redrawing would."
+  (let ((octets (make-array (* 4 width height) :element-type '(unsigned-byte 8))))
+    (dotimes (index (* width height))
+      (setf (aref octets (* 4 index)) (ldb (byte 8 0) colour)
+            (aref octets (+ (* 4 index) 1)) (ldb (byte 8 8) colour)
+            (aref octets (+ (* 4 index) 2)) (ldb (byte 8 16) colour)
+            (aref octets (+ (* 4 index) 3)) (ldb (byte 8 24) colour)))
+    (wayland.ffi:write-mapped-octets mapping 0 octets)
+    colour))
+
+(defun snapshot-nodes (compositor)
+  "The overlay's pictures, in draw order -- one per row that has one."
+  (remove-if-not (lambda (node) (typep node 'scene:snapshot-node))
+                 (scene-overlay-children compositor)))
 
 (defun raster-pixel (octets width x y)
   "The 0xAARRGGBB pixel at (X, Y) of an ARGB8888 raster WIDTH pixels wide."
@@ -366,12 +439,15 @@ Returns the three surfaces as a list (A B C), in the order they were focused."
            (layout (sw:switcher-layout switcher)))
       (multiple-value-bind (x y) (scene:node-position highlight)
         (ok (= (+ (getf layout :x) 2) x) "the bar starts two pixels inside the panel")
-        (ok (= (+ (getf layout :y) (getf layout :padding)) y) "on the first row"))
+        (ok (= (first (getf layout :rows)) y) "on the first row")
+        (ok (= (first (getf layout :row-heights)) (scene:node-height highlight))
+            "as tall as that row"))
       (sw:advance-switcher compositor 1)
       (multiple-value-bind (x y) (scene:node-position highlight)
         (declare (ignore x))
-        (ok (= (+ (getf layout :y) (getf layout :padding) (getf layout :row-height)) y)
-            "and one row down after a step")))))
+        (ok (= (second (getf layout :rows)) y) "and one row down after a step")
+        (ok (= (second (getf layout :row-heights)) (scene:node-height highlight))
+            "with the second row's height")))))
 
 (deftest a-long-title-is-cut-instead-of-widening-the-panel
   (with-compositor (compositor :width 200 :height 100)
@@ -398,8 +474,178 @@ Returns the three surfaces as a list (A B C), in the order they were focused."
       (ok (every (lambda (title) (plusp (length title))) (sw:switcher-titles switcher))))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Keys: opening, walking, committing, cancelling
+;;; Pictures in the rows (D52)
 ;;; ---------------------------------------------------------------------------
+
+(deftest a-thumbnail-fits-the-box-without-stretching
+  ;; The box is a limit, not a shape: a wide window keeps its shape and a small one
+  ;; is shown at its own size rather than blown up.
+  (multiple-value-bind (width height) (sw:thumbnail-size 742 499)
+    (ok (<= width sw:+switcher-thumbnail-width+) "a wide window fits the box's width")
+    (ok (<= height sw:+switcher-thumbnail-height+) "and its height")
+    (ok (= height sw:+switcher-thumbnail-height+) "filling the height it is limited by")
+    (ok (< (abs (- (/ 742 499) (/ width height))) 0.05)
+        "with the window's aspect ratio, not the box's"))
+  (multiple-value-bind (width height) (sw:thumbnail-size 48 160)
+    (ok (<= width sw:+switcher-thumbnail-width+) "a tall window fits the width")
+    (ok (<= height sw:+switcher-thumbnail-height+) "and the height"))
+  (multiple-value-bind (width height) (sw:thumbnail-size 20 10)
+    (ok (= 20 width) "a small window is not upscaled")
+    (ok (= 10 height) "in either direction")))
+
+(deftest a-row-with-a-picture-is-taller-and-names-itself-after-it
+  (with-compositor (compositor :width 640 :height 480)
+    (multiple-value-bind (picture-buffer fd mapping size)
+        (picture-buffer 100 80 :left #xFFFF0000 :right #xFF0000FF)
+      (declare (ignore size))
+      (unwind-protect
+           (let ((with-picture (window compositor :title "PICTURE" :buffer picture-buffer))
+                 (without (window compositor :title "NOBODY" :width 100 :height 80)))
+             (cf:focus-surface compositor with-picture)
+             (cf:focus-surface compositor without)
+             (let* ((switcher (sw:start-switcher compositor))
+                    (layout (sw:switcher-layout switcher)))
+               (ok (eq with-picture (first (sw:switcher-entries switcher)))
+                   "the picture row is the one whose window has pixels")
+               (ok (= 2 (length (getf layout :thumbnails))))
+               (destructuring-bind (x y width height) (first (getf layout :thumbnails))
+                 (ok (= (+ (getf layout :x) (getf layout :padding)) x)
+                     "the picture starts at the panel's inner edge")
+                 (ok (= 60 width) "a 100x80 window is fitted to 60x48 in the box")
+                 (ok (= 48 height))
+                 (ok (and (<= (first (getf layout :rows)) y)
+                          (<= (+ y height)
+                              (+ (first (getf layout :rows))
+                                 (first (getf layout :row-heights)))))
+                     "and sits inside its own row, not over the next one"))
+               (ok (null (second (getf layout :thumbnails)))
+                   "a window with no pixels gets no picture, not a placeholder")
+               (ok (> (first (getf layout :row-heights)) 16)
+                   "a row with a picture is taller than a title-only row")
+               (ok (= 16 (second (getf layout :row-heights))))
+               (ok (= (+ (getf layout :x) (getf layout :padding)
+                         sw:+switcher-thumbnail-width+ sw:+switcher-thumbnail-gap+)
+                      (getf layout :text-x))
+                   "and every title starts in one column, after the picture's")
+               (ok (= 1 (length (snapshot-nodes compositor)))
+                   "one picture node went into the overlay")))
+        (wayland.ffi:unmap-file mapping (* 100 4 80))
+        (wayland.ffi:close-fd fd)))))
+
+(deftest a-thumbnail-is-the-windows-own-picture-at-the-outputs-scale
+  ;; The picture is taken at the resolution it will be drawn at, so drawing it is a
+  ;; copy: two flat halves stay two flat halves, at either scale, and the boundary
+  ;; stays in the middle -- which is what says the picture is this window, the right
+  ;; way up, at the size the layout chose.
+  (dolist (scale '(1 2))
+    (with-compositor (compositor :width 320 :height 240 :scale scale)
+      (multiple-value-bind (picture-buffer fd mapping size)
+          (picture-buffer 16 8 :left #xFF00FF00 :right #xFFFFFF00)
+        (declare (ignore size))
+        (unwind-protect
+             (let ((picture (window compositor :title "BOTH" :buffer picture-buffer
+                                    :width 16 :height 8)))
+               (cf:focus-surface compositor picture)
+               (cf:focus-surface compositor (window compositor :title "OTHER"))
+               (sw:start-switcher compositor)
+               (let* ((node (first (snapshot-nodes compositor)))
+                      (octets (scene:bitmap-node-octets node))
+                      (width (scene:bitmap-node-source-width node))
+                      (height (scene:bitmap-node-source-height node)))
+                 (ok node "the window with pixels has a picture")
+                 (ok (= (* 16 scale) width) "the picture is as wide as the window, times the scale")
+                 (ok (= (* 8 scale) height) "and as tall")
+                 (ok (= #xFF00FF00 (raster-pixel octets width 1 (floor height 2)))
+                     (format nil "at scale ~D the left half is the window's left half"
+                             scale))
+                 (ok (= #xFFFFFF00 (raster-pixel octets width (- width 2) (floor height 2)))
+                     "and the right half is its right half")
+                 (ok (= (* 16 scale) (scene:draw-item-width
+                                      (find node (scene:scene-draw-list (cf:compositor-scene compositor))
+                                            :key #'scene:draw-item-node)))
+                     "and it is drawn at the box's layout size, times the scale")))
+          (wayland.ffi:unmap-file mapping (* 16 4 8))
+          (wayland.ffi:close-fd fd))))))
+
+(deftest a-thumbnail-is-taken-once-and-not-followed-around
+  ;; A client may repaint whenever it likes.  The picture in the row does not move
+  ;; with it: it is what the window looked like when the switcher opened (D52), so a
+  ;; painting client cannot make the panel repaint, and cannot make the picture
+  ;; sometimes-stale -- it is always the picture that was taken.
+  (with-compositor (compositor :width 320 :height 240)
+    (multiple-value-bind (picture-buffer picture-fd picture-mapping picture-size)
+        (picture-buffer 16 8 :left #xFF00FF00 :right #xFFFFFF00)
+      (declare (ignore picture-size))
+      (unwind-protect
+           (multiple-value-bind (other-buffer other-fd other-mapping other-size)
+               (picture-buffer 16 8 :left #xFFFF00FF :right #xFFFF00FF)
+             (declare (ignore other-size))
+             (unwind-protect
+                  (let ((picture (window compositor :title "BOTH" :buffer picture-buffer
+                                         :width 16 :height 8)))
+                    (cf:focus-surface compositor picture)
+                    (cf:focus-surface compositor
+                                          (window compositor :title "OTHER"
+                                                             :buffer other-buffer
+                                                             :width 16 :height 8))
+                    (let* ((switcher (sw:start-switcher compositor))
+                           (node (first (snapshot-nodes compositor)))
+                           (octets (scene:bitmap-node-octets node)))
+                      ;; The client redraws: every pixel of its buffer becomes red.
+                      (fill-picture picture-mapping 16 8 #xFFFF0000)
+                      (sw:advance-switcher compositor 1)
+                      (ok (eq octets (scene:bitmap-node-octets node))
+                          "walking the list does not re-take the picture")
+                      (ok (= #xFF00FF00 (raster-pixel octets
+                                                      (scene:bitmap-node-source-width node)
+                                                      1 4))
+                          "and it still says what it said when it was taken")
+                      (cf:render-frame compositor)
+                      (let* ((layout (sw:switcher-layout switcher))
+                             (rect (first (getf layout :thumbnails))))
+                        (ok (= #xFF00FF00
+                               (cf:frame-pixel compositor (+ (first rect) 1)
+                                               (+ (second rect) 3)))
+                            "the frame still draws the picture, not the client's new pixels"))))
+               (wayland.ffi:unmap-file other-mapping (* 16 4 8))
+               (wayland.ffi:close-fd other-fd)))
+        (wayland.ffi:unmap-file picture-mapping (* 16 4 8))
+        (wayland.ffi:close-fd picture-fd)))))
+
+(deftest a-window-with-no-pixels-gets-the-title-only-switcher
+  ;; The layout a compositor gets when nothing has a picture is the one it had before
+  ;; pictures existed: no gutter, no taller rows (D51's arithmetic, unchanged).
+  (with-compositor (compositor)
+    (destructuring-bind (a b c) (three-windows compositor)
+      (declare (ignore a b c))
+      (let* ((switcher (sw:start-switcher compositor))
+             (layout (sw:switcher-layout switcher)))
+        (ok (every #'null (sw:switcher-snapshots switcher))
+            "a buffer with no pool behind it is no picture")
+        (ok (every #'null (getf layout :thumbnails)))
+        (ok (= (+ (getf layout :x) (getf layout :padding)) (getf layout :text-x))
+            "so the titles start at the panel's inner edge, as they always did")
+        (ok (equal '(16 16 16) (getf layout :row-heights))
+            "and every row is the title's row")
+        (ok (= (+ (* 3 16) (* 2 (getf layout :padding))) (getf layout :height)))
+        (ok (zerop (length (snapshot-nodes compositor))) "with no picture nodes")))))
+
+(deftest set-node-size-resizes-what-the-compositor-owns
+  (let ((rect (scene:make-rect-node 10 4 #xFF000000)))
+    (scene:set-node-size rect 40 7)
+    (ok (= 40 (scene:node-width rect)) "a rectangle is the compositor's to size")
+    (ok (= 7 (scene:node-height rect)))
+    (let ((buffer-node (scene:make-buffer-node (fake-surface :mapped-p t))))
+      (ok (handler-case (progn (scene:set-node-size buffer-node 10 10) nil)
+              (error () t))
+          "a client's buffer is not: its size is the client's answer")))
+  (let ((picture (scene:make-image-node (make-array 4 :element-type '(unsigned-byte 8)) 1 1)))
+    (scene:set-node-size picture 32 32)
+    (ok (= 32 (scene:node-width picture))
+        "a bitmap's drawn size is ours")
+    (ok (= 1 (scene:bitmap-node-source-width picture))
+        "and its pixel size is the picture's")))
+
 
 (deftest one-window-is-not-a-choice
   (with-compositor (compositor)

@@ -398,6 +398,13 @@ The renderer and the input path are the two places where a GC pause is visible. 
   for them (D51). Rasterising is at the *output's* scale, one font cell per scale-by-scale block,
   so the picture is never resampled either — the difference between 10x14 device pixels per glyph
   and a 5x7 glyph stretched.
+- **A row's picture is a snapshot, and the snapshot is the cheap option.** A live thumbnail would
+  mean resampling a client's buffer into a small rectangle every frame it draws, plus a draw item
+  whose signature changes whenever the client does — the panel repainting with the window. A
+  snapshot (`scene:snapshot-surface`, D52) allocates one small pixman target *per window per
+  opening*, downsamples with bilinear, copies the result out into an octet vector, and frees the
+  target; drawing it afterwards is a 1:1 copy at the device size it was taken at, so a frame with
+  an overlay open allocates nothing at all. The vectors belong to the switcher and die with it.
 - Hot-path functions are compiled with `(optimize (speed 3) (safety 1))` and are periodically
   checked for new consing with `sb-ext:get-bytes-consed` around a scripted interaction.
 - Benchmarks in `tests/perf/` assert: bytes consed per frame, per pointer motion, and per

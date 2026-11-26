@@ -2287,3 +2287,82 @@ still `focus-stack-cycle`: an overlay is a compositor's statement about its own 
 framework default that paints one would be policy (cl-tinywl binds `start-switcher`, and the
 gate drives that). The lesson: **a modal key is not a binding -- it is a state machine with a
 beginning and an end, and the end is where the decision belongs.**
+
+## D52 — A row's picture is a snapshot, taken once
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** thumbnails in the switcher's rows
+
+D51 ended with a list of what the switcher deliberately did not do, and the first item was
+"thumbnails (a window's picture is not drawn; a row is a title)". A title is enough to choose the
+window you remember by name and not enough to choose the one you remember by what is on it,
+which is most windows most of the time. This slice puts a picture in every row. The interesting
+part is not the scaling; it is *when* the picture is taken, because that decides what the damage
+arithmetic has to believe.
+
+**Decision.**
+
+1. **A picture is a copy, not a live view.** `scene` grows `snapshot-node`, a `bitmap-node`
+   (pixels we own) whose size and lifetime are the compositor's. `scene:snapshot-surface` reads a
+   surface's current buffer once and returns premultiplied ARGB8888 octets. The alternative --
+   drawing the client's buffer shrunk into the row -- is the obvious design and is wrong three
+   ways: the buffer changes whenever the client draws, so the draw item's signature changes and
+   the panel repaints on every client frame; a client may destroy that buffer while the overlay
+   is up; and the picture's freshness would depend on what else happened to be damaged that
+   frame. With a copy, the item is a constant, and the one honest answer to "is the thumbnail
+   current?" is "no: it is what the window looked like when you opened this".
+2. **Taken at the resolution it will be drawn at.** A 72x48 layout box on a scale-2 output
+   becomes a 144x96 picture: exactly the device pixels the row will show. Drawing it is then a
+   1:1 copy with no filter and no per-frame resample, which is both the cheapest and the only
+   variant a pixel check can prove (`frame pixel = picture pixel`, one for one). The single
+   resample happens at open, with **bilinear**, because a picture is not a glyph grid: the font's
+   nearest-neighbour rule (D51) is right for text and turns a downscaled title bar into dropped
+   columns.
+3. **The box is a limit, not a shape.** A window is fitted inside 72x48 preserving its aspect
+   ratio, and never enlarged: a 500x400 window becomes 60x48 of the 72x48 box, a 16x8 window
+   stays 16x8. A stretched thumbnail is a thumbnail of a window nobody has, and an upscaled small
+   one is a blur of a window that was already small enough to read.
+4. **A row is as tall as its content, and the bar is the row.** Rows with a picture are
+   `picture height + 4`, rows without are the 16-pixel title row, and the title is centred
+   against whichever it is. The selection bar therefore has to be *resized* as well as moved, so
+   `scene:set-node-size` arrives -- and it is deliberately narrow: a rectangle's size and a
+   bitmap's drawn size are the compositor's; a buffer node's is the client's answer and a
+   snapshot's is the box it was taken for (D10's rule, unchanged).
+5. **No pictures, no gutter.** The picture column exists only when at least one row has one. A
+   switcher over windows with no pixels -- a compositor before its clients map, a test fixture
+   with hand-made surfaces -- is exactly the title-only switcher D51 delivered, arithmetic
+   included, so the fallback is not a second layout to keep in sync.
+
+**Evidence.** Gate clause 20 (`scripts/switcher-gate.sh`) now reads the pictures back on an
+800x600 output at scale 2 with three real `weston-eventdemo` clients: three snapshot nodes, one
+per row; each row's picture `60x48 of 500x400`, which is the window's shape and inside the box;
+**148 of 148** sampled opaque pixels of each row equal the picture's own octets at the coordinates
+the layout gives (the right picture at the right place at the size it was taken); 16, 16 and 17
+distinct colours per picture, so they are pictures and not flat fills; the titles now start one
+column further right, after the picture column, and still end on the last device pixel of the last
+glyph -- 58, 46 and 58 device pixels for ALPHA, BETA and GAMMA, ending at 907, 895 and 907 -- while
+a Tab damages `(674 444 250 208)`, two rows rather than the output; a pointer moving over the
+clients for 0.8 s leaves the pictures the same vectors and still on the screen; the nested
+section finds a picture in the inner frame and matches an opaque pixel of it at the inner device
+coordinate the layout gives. 75 checks, and the whole gate 20/20. Six new unit tests (suite 13,
+`tests/unit/switcher.lisp`, 36 tests; the suite went from 312 to 318): the box fit and its
+never-upscale rule; a picture row being taller with titles in one column after the picture; a
+16x8 window's picture being the window's own two flat halves at scale 1 *and* at scale 2 (a
+bilinear of a constant is that constant, whatever the ratio, which is what makes the assertion
+about orientation and colour at once); a window with no pixels falling back to the title-only
+layout; `set-node-size` resizing a rectangle and refusing a client's buffer; and -- the one that
+is the decision -- a test that *rewrites the client's pixels* after the overlay opens and finds
+the stored picture and the drawn frame unchanged. That last one needs real pixels without a
+socket, so the fixture maps a memfd read-write and hands the compositor a `shm-pool` over it: the
+test plays the client, which is the only way to prove a snapshot is a snapshot.
+
+**Consequences.** Every row now says what it is offering, the switcher still touches nothing
+while it is open, and the cost is one small pixman target per window per opening (allocated,
+downscaled, copied out, freed -- not per frame). A window that maps while the overlay is up is
+not shown, and a window that changes while it is up keeps its old picture: both are the same
+decision, and both are what the person chose when they held the key. What this does not do:
+live previews, thumbnails anywhere but the switcher, a picture cache that survives closing,
+animations, or a picture of a window that has no buffer (it gets its title, in its column). The
+lesson: **a thumbnail is a decision about freshness, and the only freshness a damage diff can
+believe is "taken once, at a known moment" -- so take it where the person opened the thing.**

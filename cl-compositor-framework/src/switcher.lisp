@@ -1,7 +1,7 @@
 ;;;; SPDX-FileCopyrightText: 2026 Edgar Denny
 ;;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;;;
-;;;; cf.switcher v0: the visible Alt+Tab switcher (docs/framework.md §5, D51).
+;;;; cf.switcher v0: the visible Alt+Tab switcher (docs/framework.md §5, D51, D52).
 ;;;;
 ;;;; D45 gave the compositor a focus stack and a cycle -- the tail of the stack,
 ;;;; rotated to the front -- and said what it could not do: "a real hold-Tab-release
@@ -26,11 +26,18 @@
 ;;;;      one tap lands, row 1 where two taps land, and so on.  Holding Tab walks
 ;;;;      down the overlay; letting go takes the row the highlight is on.
 ;;;;
-;;;; What it is not: a thumbnailer, an animation, a search box, or a window list.
-;;;; It shows titles, one of which is highlighted, and it is driven by keys.  A
-;;;; compositor that wants something else calls ADVANCE-SWITCHER from its own
-;;;; policy -- the state machine does not care who moves the selection, and the
+;;;; What it is not: an animation, a search box, or a window list.  Each row is a
+;;;; picture of the window and its title, one row is highlighted, and it is driven by
+;;;; keys.  A compositor that wants something else calls ADVANCE-SWITCHER from its
+;;;; own policy -- the state machine does not care who moves the selection, and the
 ;;;; overlay is drawn from the state, not from the keys.
+;;;;
+;;;; The picture in a row is a *snapshot* (D52): the window's buffer, downscaled
+;;;; once when the overlay opens, at the resolution it will be drawn at.  A live
+;;;; thumbnail is the obvious alternative and the wrong one -- a client repaints when
+;;;; it likes, so a live picture is either a panel that repaints with it or a picture
+;;;; whose freshness depends on what else was damaged -- and a snapshot is also the
+;;;; only version that survives the client going away mid-choice.
 
 (in-package #:cf.switcher)
 
@@ -63,7 +70,22 @@ sets neither -- most example clients -- would be the one row that is unreadable.
 (defparameter +switcher-padding+ 10
   "Layout pixels between the panel's edge and its content.")
 (defparameter +switcher-row-height+ 16
-  "Layout pixels per row: the 7-pixel font and room to breathe around it.")
+  "Layout pixels of a title-only row: the 7-pixel font and room to breathe around it.")
+
+(defparameter +switcher-thumbnail-width+ 72
+  "The box a row's picture is fitted inside, in layout pixels.")
+(defparameter +switcher-thumbnail-height+ 48
+  "The other side of that box.
+
+A window is fitted *inside* the box rather than stretched to it (THUMBNAIL-SIZE),
+so the picture keeps the window's aspect ratio and the box is a limit, not a shape.")
+(defparameter +switcher-thumbnail-gap+ 8
+  "Layout pixels between a picture and the title beside it.")
+(defparameter +switcher-thumbnail-padding+ 2
+  "Layout pixels above and below a picture inside its row.
+
+A row is as tall as the tallest thing in it (LAYOUT), and a picture touching the
+highlight bar's edge reads as cropped rather than as placed.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; The state
@@ -76,6 +98,12 @@ sets neither -- most example clients -- would be the one row that is unreadable.
    (entries :initarg :entries :initform '() :accessor switcher-entries)
    ;; Titles, in the same order, as they will be drawn (cut to fit).
    (titles :initform '() :accessor switcher-titles)
+   ;; One picture per entry, in the same order: a plist of :OCTETS (premultiplied
+   ;; ARGB8888, already at the output's resolution), :PIXEL-WIDTH, :PIXEL-HEIGHT (the
+   ;; picture's own size) and :WIDTH, :HEIGHT (the layout box it is drawn into), or
+   ;; NIL for a window that had no pixels to take.  Taken once, when the overlay opens
+   ;; (D52): what is on offer does not change while a person is choosing between it.
+   (snapshots :initform '() :accessor switcher-snapshots)
    (index :initform 0 :accessor switcher-index)
    ;; The modifier that opened it, and whose release commits.  Alt by default -- a
    ;; switcher is opened by holding a modifier and tapping Tab -- but it is a
@@ -110,16 +138,58 @@ a row the person can see is a row that exists."
   (and switcher (nth (switcher-index switcher) (switcher-entries switcher))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Pictures
+;;; ---------------------------------------------------------------------------
+
+(defun thumbnail-size (width height)
+  "The largest box inside +SWITCHER-THUMBNAIL-WIDTH+ x +HEIGHT+ with WIDTH:HEIGHT's
+shape, never larger than the window itself; two values, layout pixels.
+
+Fit, not fill: a 16:10 window keeps its 16:10 shape in a row of 4:3 ones, so a person
+recognises the window rather than the rectangle.  Never larger than the window, so a
+small window is shown at its own size instead of blown up into a blur."
+  (let ((fit (min 1.0
+                  (/ +switcher-thumbnail-width+ (max 1 width))
+                  (/ +switcher-thumbnail-height+ (max 1 height)))))
+    (values (max 1 (round (* width fit)))
+            (max 1 (round (* height fit))))))
+
+(defun snapshot-window (compositor surface)
+  "A snapshot of SURFACE for COMPOSITOR's switcher, or NIL when it has no pixels.
+
+A plist shaped as SWITCHER-SNAPSHOTS documents.  The layout size comes from the
+surface (its buffer scale and transform already divided out, D49), the pixel size
+from the output's scale, and the downscale happens here -- once, at open."
+  (multiple-value-bind (window-width window-height)
+      (scene:surface-layout-size surface)
+    (when (and (plusp window-width) (plusp window-height))
+      (multiple-value-bind (width height) (thumbnail-size window-width window-height)
+        (multiple-value-bind (octets pixel-width pixel-height)
+            (scene:snapshot-surface
+             surface width height
+             :scale (scene:scene-scale (headless:compositor-scene compositor)))
+          (when octets
+            (list :octets octets :pixel-width pixel-width :pixel-height pixel-height
+                  :width width :height height)))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Layout
 ;;; ---------------------------------------------------------------------------
 
 (defun switcher-layout (switcher)
-  "Where SWITCHER's panel and its rows go, in layout pixels, as a plist.
+  "Where SWITCHER's panel, rows, pictures and titles go, in layout pixels.
 
-:x :y :width :height are the panel; :rows is one y per entry (the top of the text);
-:text-x is where every title starts; :texts are the titles as they will be drawn.
-All layout coordinates -- the scene scales them once, on the way to pixels (D49),
-so this arithmetic is the same at scale 1 and scale 2.
+:x :y :width :height are the panel; :rows is one y per entry (the top of the row);
+:row-heights is how tall each row is; :text-rows is the top of each title inside its
+row; :text-x is where every title starts; :texts are the titles as they will be
+drawn; :thumbnails is one (X Y WIDTH HEIGHT) per entry, or NIL for a row with no
+picture.  All layout coordinates -- the scene scales them once, on the way to pixels
+(D49), so this arithmetic is the same at scale 1 and scale 2.
+
+A row is as tall as the tallest thing in it, and the title is centred against the
+picture rather than pinned to its top: rows with pictures and rows without have
+different heights, and a bar that always covered a constant height would be a bar
+that is sometimes taller than its row (D52).
 
 A title is cut to what the output can show rather than allowed to widen the panel
 past the screen: a 300-character title is a title nobody can read anyway, and a
@@ -127,32 +197,61 @@ panel that hangs off the edge is a bug."
   (let* ((compositor (switcher-compositor switcher))
          (output-width (headless:compositor-width compositor))
          (output-height (headless:compositor-height compositor))
-         (count (length (switcher-entries switcher)))
+         (snapshots (switcher-snapshots switcher))
+         ;; The picture column exists only if some row has a picture: a switcher over
+         ;; windows with no buffers is the title-only switcher it was before, gutter
+         ;; and all (D51's layout, unchanged).
+         (column (if (some #'identity snapshots) +switcher-thumbnail-width+ 0))
+         (gap (if (plusp column) +switcher-thumbnail-gap+ 0))
          (available (max 1 (- output-width (* 2 (+ +switcher-padding+ 1)))))
-         (texts (mapcar (lambda (title) (font:truncate-text title available))
+         (text-available (max 1 (- available column gap)))
+         (texts (mapcar (lambda (title) (font:truncate-text title text-available))
                         (switcher-titles switcher)))
          ;; The row is as wide as the widest thing drawn in it: a highlight wider
          ;; than every title would look like a mistake.
-         (content (max 1 (min available
-                              (reduce #'max texts :key #'font:text-width
-                                                :initial-value 0))))
+         (text-width (reduce #'max texts :key #'font:text-width :initial-value 0))
+         (content (max 1 (min available (+ column gap text-width))))
          (width (+ content (* 2 +switcher-padding+)))
-         (height (+ (* count +switcher-row-height+) (* 2 +switcher-padding+)))
+         (row-heights (mapcar (lambda (snapshot)
+                                (max +switcher-row-height+
+                                     (if snapshot
+                                         (+ (getf snapshot :height)
+                                            (* 2 +switcher-thumbnail-padding+))
+                                         +switcher-row-height+)))
+                              snapshots))
+         (height (+ (reduce #'+ row-heights :initial-value 0)
+                    (* 2 +switcher-padding+)))
          (x (max 0 (floor (- output-width width) 2)))
          (y (max 0 (floor (- output-height height) 2)))
-         (text-offset (floor (- +switcher-row-height+ (font:text-height)) 2)))
+         (thumbnail-x (+ x +switcher-padding+))
+         (text-x (+ thumbnail-x column gap))
+         (rows '())
+         (text-rows '())
+         (thumbnails '()))
+    (loop with row-y = (+ y +switcher-padding+)
+          for row-height in row-heights
+          for snapshot in snapshots
+          do (push row-y rows)
+             (push (+ row-y (floor (- row-height (font:text-height)) 2)) text-rows)
+             (push (when snapshot
+                     (let* ((thumbnail-height (getf snapshot :height))
+                            (thumbnail-width (getf snapshot :width)))
+                       (list thumbnail-x
+                             (+ row-y (floor (- row-height thumbnail-height) 2))
+                             thumbnail-width thumbnail-height)))
+                   thumbnails)
+             (incf row-y row-height))
     (list :x x :y y :width width :height height
           :padding +switcher-padding+
-          :row-height +switcher-row-height+
-          :text-x (+ x +switcher-padding+)
+          :text-x text-x
           :texts texts
-          :rows (loop for row from 0 below count
-                      collect (+ y +switcher-padding+
-                                 (* row +switcher-row-height+)
-                                 text-offset)))))
+          :rows (nreverse rows)
+          :row-heights row-heights
+          :text-rows (nreverse text-rows)
+          :thumbnails (nreverse thumbnails))))
 
 (defun build-switcher-overlay (switcher)
-  "Create SWITCHER's overlay nodes: a border, a panel, a highlight and the titles.
+  "Create SWITCHER's overlay nodes: a border, a panel, a highlight, pictures, titles.
 
 Built once per opening and then only *moved*: the highlight is the one node that
 follows the selection.  Rebuilding the list on every Tab would change the draw
@@ -166,7 +265,6 @@ cannot tell a reordered scene from a different one, and it is right not to (D48)
          (width (getf layout :width))
          (height (getf layout :height))
          (padding (getf layout :padding))
-         (row-height (getf layout :row-height))
          ;; The outline sits one pixel outside the panel, and stops at the output's
          ;; edge rather than drawing a negative coordinate (a clipped rectangle is
          ;; drawn as much as fits, so the edge case is a missing line, not a fault).
@@ -181,14 +279,27 @@ cannot tell a reordered scene from a different one, and it is right not to (D48)
     (scene:scene-add-overlay-node
      scene (scene:make-rect-node width height +switcher-panel-colour+) :x x :y y)
     ;; The bar is inset by two pixels, so the border is visible all the way round
-    ;; even when the bar is on the first or the last row.
+    ;; even when the bar is on the first or the last row.  Its height is the first
+    ;; row's until the selection moves (MOVE-HIGHLIGHT sets both).
     (setf (switcher-highlight switcher)
           (scene:scene-add-overlay-node
-           scene (scene:make-rect-node (- width 4) row-height
+           scene (scene:make-rect-node (- width 4) (or (first (getf layout :row-heights)) 0)
                                        +switcher-highlight-colour+)
-           :x (+ x 2) :y (+ y padding)))
+           :x (+ x 2) :y (or (first (getf layout :rows)) (+ y padding))))
+    ;; Pictures before titles, both after the bar: a row's content is drawn over its
+    ;; own background, and the two never overlap each other.
+    (loop for snapshot in (switcher-snapshots switcher)
+          for rect in (getf layout :thumbnails)
+          when (and snapshot rect)
+            do (scene:scene-add-overlay-node
+                scene (scene:make-snapshot-node (getf snapshot :octets)
+                                                (getf snapshot :pixel-width)
+                                                (getf snapshot :pixel-height)
+                                                (getf snapshot :width)
+                                                (getf snapshot :height))
+                :x (first rect) :y (second rect)))
     (loop for title in (getf layout :texts)
-          for row in (getf layout :rows)
+          for row in (getf layout :text-rows)
           do (scene:scene-add-overlay-node
               scene (scene:make-text-node title :colour +switcher-text-colour+)
               :x (getf layout :text-x) :y row))
@@ -196,16 +307,18 @@ cannot tell a reordered scene from a different one, and it is right not to (D48)
     switcher))
 
 (defun move-highlight (switcher)
-  "Put SWITCHER's highlight on its selected row; two geometry changes, no rebuild."
-  (let ((layout (switcher-layout switcher))
-        (highlight (switcher-highlight switcher)))
+  "Put SWITCHER's highlight on its selected row: two geometry changes, no rebuild."
+  (let* ((layout (switcher-layout switcher))
+         (highlight (switcher-highlight switcher))
+         (index (switcher-index switcher)))
     (when highlight
-      (scene:set-node-position
-       highlight
-       (+ (getf layout :x) 2)
-       (+ (getf layout :y) (getf layout :padding)
-          (* (switcher-index switcher) (getf layout :row-height))))))
-  switcher)
+      (scene:set-node-position highlight
+                               (+ (getf layout :x) 2)
+                               (or (nth index (getf layout :rows)) (getf layout :y)))
+      (scene:set-node-size highlight
+                           (- (getf layout :width) 4)
+                           (or (nth index (getf layout :row-heights)) 0)))
+    switcher))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Opening, walking, committing
@@ -235,6 +348,11 @@ choice, so nothing opens -- and the key is still consumed, because it did its jo
                     (mapcar (lambda (surface)
                               (or (headless:window-title surface)
                                   +switcher-fallback-title+))
+                            entries))
+              ;; Pictures before the overlay exists: the layout needs to know how tall
+              ;; a row is before it can place anything (D52).
+              (setf (switcher-snapshots switcher)
+                    (mapcar (lambda (surface) (snapshot-window compositor surface))
                             entries))
               (setf (headless:compositor-switcher compositor) switcher)
               (build-switcher-overlay switcher)
