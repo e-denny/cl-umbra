@@ -127,27 +127,41 @@ or `(wayland.server:make-demo-display)` from the REPL plus
 
 ## Phase 2 — Core globals, shm, headless, pixman (6-8 weeks)
 
+**Status: phase 2a landed.** `wl_shm`, the `wl_compositor`/`wl_surface` core state machine, the
+headless compositor, the pixman renderer and readback are in; regions, transforms, buffer
+scale, pool resize, damage tracking and the scene graph are the 2b slice, and the ticks below
+say which is which. Gate clause 10: a libwayland shm client draws through our compositor and
+the captured frame matches, pixel for pixel.
+
 `cf.types.compositor`
-- [ ] `wl_compositor.create_surface/create_region`; `wl_region` ops
-- [ ] surface pending/current state: attach, damage, opaque, input, transform, scale,
-      buffer scale, frame callbacks
-- [ ] `commit`: apply, validate, release old buffer, queue frame if needed
-- [ ] `wl_surface.frame` → `done` on presentation
-- [ ] error cases: no role, invalid scale, invalid transform, bad size
+- [x] `wl_compositor.create_surface`; the surface state machine's core
+- [ ] `create_region` and `wl_region` ops (2b: input and opaque optimisation need them)
+- [x] surface pending/current state: attach, damage, commit, frame callbacks
+- [ ] opaque and input regions *acted on* (stored and ignored in 2a, which is correct while
+      there is no input and the target is opaque by construction)
+- [ ] transform, scale, buffer scale (2b)
+- [x] `commit`: apply, release the replaced buffer, hand damage to the compositor
+- [x] `wl_surface.frame` → `done` after presentation, never at commit
+- [ ] error cases: no role, invalid scale, invalid transform, bad size (2b)
 
 `cf.types.shm`
-- [ ] pool fd → dup → `mmap` (`PROT_READ`), `resize`, refcount
-- [ ] `create_buffer` with §3 validation (64-bit arithmetic)
-- [ ] format table + `wl_shm.format` ordering
-- [ ] `wl_buffer.destroy` / `release` exactly-once
-- [ ] truncation/SIGBUS study + `F_SEAL_SHRINK` opportunistic sealing
+- [x] pool fd → `mmap` (`PROT_READ`), descriptor closed with the pool object; buffers keep the
+      mapping alive, the last buffer unmaps it
+- [ ] `wl_shm_pool.resize` (needs `mremap` and the in-flight-buffer rule; 2b)
+- [x] `create_buffer` with the §3 validation (stride, offset, 64-bit bounds, dimensions)
+- [x] format table + `wl_shm.format` ordering (`argb8888`, `xrgb8888`)
+- [x] `wl_buffer.destroy` / `release` exactly-once
+- [ ] truncation/SIGBUS study + opportunistic `F_SEAL_SHRINK` (phase 6)
+- [x] the first real client found two of our bugs here: the fd wire format (zero octets, not
+      four) and the pool/buffer lifetime rule
 
 `cf.backend.headless`, `cf.render.pixman`, `cf.render.damage`, `cf.scene` v0
-- [ ] headless output at configured size/scale/transform; timer-driven frames
-- [ ] pixman target, clip regions, `OVER`/`SRC`, scaling, transforms
-- [ ] damage region per output, buffer age, partial repaint
-- [ ] scene: `buffer` and `rect` nodes, per-output root, stacking order, hit test v0
-- [ ] `read-pixels` → PNG writer (for tests and screenshots)
+- [x] headless output at configured size; frames driven by commit (an idle per reactor cycle)
+- [x] pixman target, `OVER`/`SRC` chosen by format, premultiplied ARGB, buffers read in place
+- [ ] clip regions, scaling, transforms (2b)
+- [ ] damage region per output, buffer age, partial repaint (2b)
+- [ ] scene: `buffer` and `rect` nodes, per-output root, stacking order, hit test v0 (2b)
+- [x] `read-pixels` (`frame-pixel`, the target's octets) → PNG writer
 
 `cl-wayland-client` (complete)
 - [ ] all argument types incl. fd receive; event dispatch; hooks

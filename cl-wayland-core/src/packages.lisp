@@ -116,6 +116,15 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:fd-cloexec-p
    #:set-fd-nonblocking
    #:memfd-create
+   #:dup-fd
+   #:map-file
+   #:unmap-file
+   #:mapped-octets
+   #:set-file-size
+   #:write-mapped-octets
+   #:pointer+
+   #:+prot-read+
+   #:+prot-write+
    ;; i/o
    #:send-with-ancillary
    #:receive-with-ancillary

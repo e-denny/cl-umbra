@@ -233,6 +233,19 @@ backpressure is enforced by a watermark instead.
 **Demo:** a client's pixels in a PNG, produced by our compositor, with no C library
 speaking Wayland.
 
+**Status (phase 2a):** `wl_shm` (pools, buffers, two formats, validation, lifetime), the core
+`wl_compositor`/`wl_surface` state machine (attach, damage, frame, commit, destroy; regions
+stored and ignored; no transforms or buffer scale yet), `cf.backend.headless`,
+`cf.render.pixman` and `read-pixels`→PNG are implemented. Gate clause 10: a libwayland shm
+client draws a known pattern through our compositor and the captured frame matches pixel for
+pixel (`scripts/headless-frame.sh`). The gate's original client, `weston-simple-shm`, needs
+`xdg-shell` and is deferred to the shell state machines; a purpose-built libwayland client
+stands in, and that substitution is recorded in `docs/testing.md`. Two bugs in our own code
+were found by that first real peer: the fd wire format (a descriptor occupies *zero* octets,
+not four) and pool/buffer lifetime (`wl_shm_pool.destroy` may precede the buffer's use; the
+buffer keeps the mapping). Damage tracking, regions, transforms, pool resize and the scene
+graph are the 2b slice.
+
 ### Phase 3 — `cl-tinywl`, nested (3-4 weeks)
 
 **Build**

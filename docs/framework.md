@@ -68,6 +68,12 @@ Events are generic functions on the compositor object:
 (defgeneric on-session-switch (compositor backend active-p))
 ```
 
+Phase 2a implements the headless case as one object rather than a backend/compositor pair:
+`cf:make-headless-compositor` creates a display with `wl_compositor`, `wl_shm` and `wl_output`
+globals, a pixman target, and a surface list in commit order. The split becomes real when
+there is a second backend to abstract (nested, phase 3; DRM, phase 4) — a `backend` class with
+one implementation is the speculative abstraction the roadmap forbids.
+
 Contracts:
 
 - A backend only ever *reports*; it never calls into the scene, seat or shell. A compositor
@@ -101,7 +107,8 @@ better than magic, so the default is a flag, and autocreate is a convenience wra
   validates, applies, and on failure leaves the previous configuration intact. Clients see
   one `wl_output` update sequence, never a half-applied state.
 - **`on-frame` is driven by the display.** DRM: page-flip completion (`read()` on the DRM
-  fd). Headless: timer. Nested: parent's `wl_surface.frame` callback. A compositor must not
+  fd). Headless: timer, or — phase 2a — an idle that runs once per reactor cycle when a
+  surface committed, which is the zero-latency degenerate case of the same rule. A compositor must not
   render "as fast as possible": the output's clock is the only producer of frames.
 - **Frame callbacks** for a surface are sent after the frame containing it is presented, with
   the presentation timestamp. Never at commit time, never for surfaces that were not

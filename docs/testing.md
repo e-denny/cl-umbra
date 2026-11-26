@@ -58,7 +58,7 @@ The scripts go through `wayland.test.runner`, which names the eight suites inste
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 147 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 155 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -129,7 +129,20 @@ the last two added once there was something to attack:
 Purity runs last, after both phases' clauses, because it is a standing constraint rather than
 a phase deliverable.
 
-All nine clauses pass. Two details worth knowing: the protocol clause
+Phase 2a (shared memory and the first pixels) adds one clause:
+
+10. **The headless frame** (`scripts/headless-frame.sh`, `tests/c-client/wayland-shm-client.c`,
+    `scripts/headless-gate.lisp`). A libwayland client binds `wl_compositor` and `wl_shm`,
+    writes a known 64x32 pattern into a memfd (left half opaque red, right half opaque blue),
+    creates a pool and a buffer from it, attaches the buffer at (10,20), damages it, asks for a
+    frame callback and commits. The driver runs the compositor's reactor until the client
+    exits — which it only does when the callback arrives, i.e. after the frame is presented —
+    then checks nine pixels: the pattern, its four edges and the background. It also writes a
+    PNG and validates its chunks and CRCs. `weston-simple-shm` is not the client here: it
+    needs `xdg-shell`, which arrives with the shell state machines, and a gate is not the
+    place to pretend otherwise.
+
+All ten clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs
@@ -209,9 +222,14 @@ The invariants are the interesting part, and they are asserted rather than inspe
 10⁶ connections take about 42 s here, so the gate runs the full million. The hang detector is
 the same `sb-ext:with-timeout` watchdog as the decoder fuzzer.
 
-Not yet covered by either: descriptors arriving on a request that declares none (surplus-fd
-detection, still a phase-0 leftover), and the protocol content phase 2 adds (pools, strides,
-formats). The peer fuzzer grows those cases when the globals exist.
+Descriptors: the fuzzer's "plausible" case picks real requests, and since phase 2a
+`wl_shm.create_pool` is one of them, so a real descriptor rides along with a random message
+(its other arguments are nonsense, which is the point). What is still not covered is a
+descriptor arriving on a request that declares none — surplus-fd detection, a phase-0
+leftover that now has a place to be tested.
+
+Not yet covered: the protocol content of phases 2b and later (regions, transforms, buffer
+scale, pool resize), and anything that needs `xdg-shell`.
 
 ## 5. Interop matrix
 

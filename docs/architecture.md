@@ -32,8 +32,8 @@ cl-wayland-project/
 │   └── demo/ server-demo.lisp
 ├── cl-compositor-framework/
 │   ├── cl-compositor-framework.asd
-│   └── src/
-│       ├── backend/   protocol.lisp headless.lisp nested.lisp drm.lisp
+│   └── src/  package.lisp  render-pixman.lisp  png.lisp  headless.lisp
+│       ├── backend/   (phase 3+) protocol.lisp headless.lisp nested.lisp drm.lisp
 │       │              libinput.lisp multi.lisp session.lisp
 │       ├── render/    protocol.lisp pixman.lisp gles2.lisp target.lisp
 │       │              damage.lisp swapchain.lisp allocator.lisp dmabuf.lisp
@@ -61,6 +61,10 @@ cl-wayland-project/
 One ASDF system per directory; each system declares the protocols it needs, so a build
 does not compile the world.
 
+The framework's phase-2a files are flat (`render-pixman.lisp`, `png.lisp`, `headless.lisp`)
+and will move into `render/` and `backend/` when there is more than one of each; the module
+tree drawn below the core is the plan for phases 2b-5.
+
 What is built, so a reader can tell the shape from the plan: the core (`wayland.wire`,
 `wayland.ffi`, `wayland.object`, `wayland.io`, `wayland.reactor`, `wayland.protocol`,
 `wayland.codegen`), the ASDF component, `wayland.client` — connect, proxies and ids,
@@ -68,7 +72,12 @@ What is built, so a reader can tell the shape from the plan: the core (`wayland.
 `demo-globals` — and `wayland.server` in its phase-1 form: socket and lock, accept with
 `SO_PEERCRED`, object tables and both id ranges, globals and `bind`, `sync` and callbacks,
 the error policy, flush batching with backpressure, and teardown, plus a demo server that
-`wayland-info` can talk to. The framework and compositor directories are still their plan.
+`wayland-info` can talk to. In phase 2a the server gained `wl_shm` (pools, buffers, formats,
+validation, the pool/buffer lifetime rule) and the `wl_compositor`/`wl_surface` state machine
+(attach, damage, frame, commit, destroy, regions stored and ignored), and the framework gained
+its first code: a pixman renderer, a headless compositor that draws committed surfaces into an
+in-memory target, `read-pixels`/`frame-pixel`, and a PNG writer. `cl-tinywl` and `cl-umbra`
+are still their plan.
 
 ## 2. Packages
 

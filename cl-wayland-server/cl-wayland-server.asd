@@ -20,6 +20,8 @@ Not a libwayland-server binding: the wire format and the object model are ours."
                (:file "src/client")
                (:file "src/display")
                (:file "src/global")
+               (:file "src/shm")
+               (:file "src/surface")
                (:file "src/events")
                (:file "src/registry")
                (:file "src/dispatch")

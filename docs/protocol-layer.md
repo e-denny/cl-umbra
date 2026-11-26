@@ -40,7 +40,7 @@ A connection is a Unix stream socket carrying a sequence of messages:
 | `object` | protocol object or `nil` | u32 id, 0 = null | 4 |
 | `new_id` | protocol object | u32 id | 4 |
 | `array` | `(simple-array (unsigned-byte 8))` | u32 byte length, bytes, pad to 4 | 4 + pad4(len) |
-| `fd` | fd (fixnum) or `nil` | u32 placeholder (0), fd in `SCM_RIGHTS` ancillary data | 4 |
+| `fd` | fd (fixnum) | **no octets at all**; the descriptor is `SCM_RIGHTS` ancillary data only | 0 |
 
 Signatures (`"o?n"`, `"2a"`) are generated and kept, but only for debug dumps and for
 validating our own tables against `wayland-scanner` output. The runtime uses typed slots and
@@ -48,9 +48,28 @@ generated readers, never signature-string parsing.
 
 ### File descriptors
 
-fds do not live in the byte stream. Each `fd` argument occupies a 4-byte slot in the message
-body (for alignment and size accounting) and is delivered as one `int` of `SCM_RIGHTS`
-ancillary data, in argument order across all messages in the same `sendmsg`.
+fds do not live in the byte stream, and — this is the part that is easy to get wrong — an
+`fd` argument occupies **no octets at all**, not a placeholder: the message's size and layout
+are exactly as if the argument were not there, and the descriptor travels as one `int` of
+`SCM_RIGHTS` ancillary data, assigned by the receiver to `fd` arguments in argument order
+across all messages in the same `sendmsg`.
+
+Phase 0 got this wrong (a 4-octet placeholder) and nothing noticed, because no protocol we
+implemented carried a descriptor: the byte-exact tests agreed with the encoder, which agreed
+with itself. Phase 2a's first real peer found it in one run. Two independent measurements:
+
+- `strace` on libwayland-client sending `wl_shm.create_pool(new_id, fd, size)`: the message is
+  **16** octets (header, new id, size) with the descriptor in `cmsg_data`, not 20.
+- wayflan's encoder sizes `:fd` as `0` (`%wl-primitive-size` in `wire.lisp`), the same rule.
+
+The consequence for batching: a message's size never changes when it carries a descriptor, so
+`put-fd` writes nothing and only appends to the out buffer's descriptor queue; `read-fd`
+consumes no octets and only advances through the received queue. A `fd` argument with an empty
+queue is `missing-fd`, which is a protocol error and a disconnect.
+
+The lesson, recorded because it cost an afternoon: a self-consistent codec and a test suite
+that only checks the codec against itself prove nothing about the format. The oracle that
+catches this class of bug is a real peer, which is what phase 2a's gate client is.
 
 Constraints that shape the implementation:
 
@@ -77,6 +96,12 @@ octets and `wayland.ffi` making the syscalls):
   compositor from queueing new non-critical events to it, and (b) if it is still full after
   draining, disable its `EPOLLIN` interest until flush succeeds. libwayland behaves
   similarly; clients that never read must not be able to make us grow memory.
+
+Flush after render: a compositor generates events *after* the client's readable callback has
+finished (`wl_callback.done` from a frame, `wl_buffer.release`), so per-client flushing inside
+the read loop is not enough. Whoever presents a frame flushes the connections it produced
+events for, in the same cycle; `cf.backend.headless` calls `flush-all` right after
+`render-frame`, and phase-1's request-driven events keep the per-client flush they had.
 
 Implementation status (phase 1, `cl-wayland-server`): the out buffer is batched and
 watermarked — once it passes `+output-high-water-mark+` (64 KiB) the client's epoll interest

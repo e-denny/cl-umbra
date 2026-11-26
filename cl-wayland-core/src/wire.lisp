@@ -365,13 +365,20 @@ as length 0; the format cannot distinguish them."
   buffer)
 
 (defun put-fd (buffer fd)
-  "fd: a 4-octet placeholder in the stream; the descriptor travels in SCM_RIGHTS.
+  "fd: no octets at all; the descriptor itself travels in SCM_RIGHTS.
 
-The wire format cannot express a null descriptor -- neither does the protocol
-XML, which has no nullable fd argument -- so FD must be a real one.  Queueing more than
-+MAX-FDS-PER-FLUSH+ descriptors in one buffer is an error: the I/O layer must
-flush at the ceiling, as libwayland does, so our batching matches everyone
-else's."
+A file descriptor occupies **zero** octets of a message.  It is appended to the
+ancillary data of the write, and the receiver assigns descriptors to `fd`
+arguments in argument order, as libwayland does -- measured against
+libwayland-client, whose wl_shm.create_pool(new_id, fd, size) is a 16-octet
+message, and against wayflan, whose encoder sizes `:fd` as zero.
+
+So a message's size does not change when it carries a descriptor; only the write
+does.  The wire format cannot express a null descriptor -- neither does the
+protocol XML, which has no nullable fd argument -- so FD must be a real one.
+Queueing more than +MAX-FDS-PER-FLUSH+ descriptors in one buffer is an error: the
+I/O layer must flush at the ceiling, as libwayland does, so our batching matches
+everyone else's."
   (unless (typep fd '(integer 0 #.most-positive-fixnum))
     (error 'value-out-of-range
            :format-control "fd must be a non-negative fixnum, got ~S"
@@ -382,7 +389,6 @@ else's."
            "~D descriptors already queued; flush before queueing more"
            :format-arguments (list +max-fds-per-flush+)))
   (push fd (message-buffer-fds buffer))
-  (store-u32 buffer 0)
   buffer)
 
 ;;; ---------------------------------------------------------------------------
@@ -608,8 +614,10 @@ authoritative."
         (incf (reader-position reader) (pad4 length))))))
 
 (defun read-fd (reader)
-  "fd: the next descriptor that arrived with this batch, or NIL for a null fd."
-  (read-uint reader)                     ; the 4-octet placeholder
+  "fd: the next descriptor that arrived with this batch.
+
+No octets are consumed: the descriptor queue is the whole representation, in
+argument order across the batch (PUT-FD's docstring has the measurements)."
   (let* ((fds (reader-fds reader))
          (index (reader-fd-index reader)))
     (cond

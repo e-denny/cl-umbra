@@ -20,7 +20,8 @@
 ;;; Creating
 ;;; ---------------------------------------------------------------------------
 
-(defun make-resource (client id interface &key (version 1) (class 'resource))
+(defun make-resource (client id interface &key (version 1) (class 'resource)
+                                             destroy-function)
   "Create the resource for ID and install it in CLIENT's table.
 
 INTERFACE is a WL-INTERFACE (the schema), not a string, so that a resource can
@@ -33,14 +34,16 @@ never exist whose opcodes are unknown."
                                  :client client
                                  :id id
                                  :interface interface
-                                 :version version)))
+                                 :version version
+                                 :destroy-function destroy-function)))
     (object-table-set (client-objects client) id resource)
     ;; Newest first; TEARDOWN-CLIENT walks this list in order, which is
     ;; therefore reverse creation order (docs/architecture.md §7).
     (push resource (client-resources client))
     resource))
 
-(defun allocate-resource (client interface &key (version 1) (class 'resource))
+(defun allocate-resource (client interface &key (version 1) (class 'resource)
+                                               destroy-function)
   "Create the resource for the new_id the request being dispatched named.
 
 This is how a compositor's request method gets the object the wire asked for
@@ -51,7 +54,8 @@ handler claims it here."
       (error 'internal-error
              :client client
              :detail "a request with no new_id tried to allocate a resource"))
-    (make-resource client id interface :version version :class class)))
+    (make-resource client id interface :version version :class class
+                   :destroy-function destroy-function)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The id the current request carries
@@ -85,7 +89,12 @@ handler claims it here."
             (when (and display (not (resource-destroyed-p display)))
               ;; delete_id after the destructor has been fully processed, and
               ;; before any event that could reuse the id (docs/protocol-layer.md §8).
-              (wl-display.delete-id display id)))))))
+              (wl-display.delete-id display id)))))
+      ;; Foreign memory or descriptors attached to the resource go last, after
+      ;; the id is unusable: nothing may reach the object again.
+      (let ((destroy (resource-destroy-function resource)))
+        (when destroy
+          (funcall destroy resource)))))
   t)
 
 ;;; ---------------------------------------------------------------------------

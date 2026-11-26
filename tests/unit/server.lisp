@@ -150,7 +150,7 @@ would drown a test run, and the assertions are the evidence."
 (defun error-reply (events)
   "The one wl_display.error in EVENTS as (object-id code message), after asserting
 that there is exactly one message and that it is an error."
-  (ok (= 1 (length events)) "exactly one reply expected")
+  (ok (= 1 (length events)) (format nil "exactly one reply expected, got ~D" (length events)))
   (destructuring-bind (id opcode reader) (first events)
     (ok (= 1 id) "wl_display.error arrives on object 1")
     (ok (= 0 opcode) "wl_display.error is opcode 0")
@@ -522,8 +522,9 @@ that there is exactly one message and that it is an error."
              (send-message fd 1 1 (lambda (buffer) (wire:put-new-id buffer 2)))
              (run-server display)
              (read-events fd)
-             ;; Bind wl_compositor (global 1) as id 3, then call create_surface
-             ;; (opcode 0, one new_id): phase 1 has no surfaces.
+             ;; Bind wl_compositor (global 1) as id 3, then call create_region
+             ;; (opcode 1, one new_id): regions arrive with input and opaque
+             ;; optimisation, and until then the honest answer is an error.
              (send-message fd 2 0
                            (lambda (buffer)
                              (wire:put-uint buffer 1)
@@ -531,7 +532,7 @@ that there is exactly one message and that it is an error."
                              (wire:put-uint buffer 1)
                              (wire:put-new-id buffer 3)))
              (run-server display)
-             (send-message fd 3 0 (lambda (buffer) (wire:put-new-id buffer 4)))
+             (send-message fd 3 1 (lambda (buffer) (wire:put-new-id buffer 4)))
              (run-server display)
              (destructuring-bind (object-id code message) (error-reply (read-events fd))
                (ok (= 3 object-id))
@@ -650,3 +651,283 @@ that there is exactly one message and that it is an error."
              (ok (not (srv:client-congested-p client)))
              (ok (eq :read (reactor:source-interest (srv::client-source client)))))
         (ffi:close-fd fd)))))
+
+;;; ---------------------------------------------------------------------------
+;;; wl_shm: pools, buffers, and the numbers a client could otherwise abuse
+;;; ---------------------------------------------------------------------------
+
+(defmacro with-shm-display ((display) &body body)
+  "A display offering wl_shm as well as the socket, for the pixel tests."
+  `(with-display (,display)
+     (srv:add-global ,display
+                     :interface "wl_shm"
+                     :version 1
+                     :resource-class 'srv:shm
+                     :bind #'srv:send-shm-formats)
+     (locally ,@body)))
+
+(defun send-bind (socket registry-id name interface version new-id)
+  (send-message socket registry-id 0
+                (lambda (buffer)
+                  (wire:put-uint buffer name)
+                  (wire:put-string buffer interface)
+                  (wire:put-uint buffer version)
+                  (wire:put-new-id buffer new-id))))
+
+(defun send-get-registry (socket registry-id)
+  (send-message socket 1 1 (lambda (buffer) (wire:put-new-id buffer registry-id))))
+
+(defun bind-shm (display socket)
+  "get_registry then bind the wl_shm global as object 3; returns the socket."
+  (send-get-registry socket 2)
+  (run-server display)
+  (read-events socket)                          ; the global announcement
+  (send-bind socket 2 1 "wl_shm" 1 3)
+  (run-server display)
+  (read-events socket)                          ; the two format events
+  socket)
+
+(defun send-create-pool (socket pool-id fd size &key (shm-id 3))
+  (let ((buffer (wire:make-message-buffer)))
+    (let ((start (wire:begin-message buffer shm-id 0)))
+      (wire:put-new-id buffer pool-id)
+      (wire:put-fd buffer fd)
+      (wire:put-int buffer size)
+      (wire:end-message buffer start))
+    (io:flush-buffer socket buffer)))
+
+(defun send-create-buffer (socket pool-id buffer-id offset width height stride format)
+  (send-message socket pool-id 0
+                (lambda (buffer)
+                  (wire:put-new-id buffer buffer-id)
+                  (wire:put-int buffer offset)
+                  (wire:put-int buffer width)
+                  (wire:put-int buffer height)
+                  (wire:put-int buffer stride)
+                  (wire:put-uint buffer format))))
+
+(defun make-pixels (width height colour)
+  "An image of solid COLOUR, as the client would have written it: ARGB8888."
+  (let* ((stride (* width 4))
+         (octets (make-array (* stride height) :element-type '(unsigned-byte 8))))
+    (dotimes (row height octets)
+      (dotimes (column width)
+        (let ((offset (+ (* row stride) (* column 4))))
+          (setf (aref octets offset) (ldb (byte 8 0) colour)
+                (aref octets (+ offset 1)) (ldb (byte 8 8) colour)
+                (aref octets (+ offset 2)) (ldb (byte 8 16) colour)
+                (aref octets (+ offset 3)) (ldb (byte 8 24) colour)))))))
+
+(defun make-client-pool (width height colour)
+  "A memfd holding a solid image; returns (values fd size)."
+  (let* ((stride (* width 4))
+         (size (* stride height))
+         (fd (ffi:memfd-create "cl-wayland-shm-test")))
+    (ffi:set-file-size fd size)
+    (let ((mapping (ffi:map-file fd size
+                                 :protection (logior ffi:+prot-read+ ffi:+prot-write+))))
+      (unwind-protect
+           (ffi:write-mapped-octets mapping 0 (make-pixels width height colour))
+        (ffi:unmap-file mapping size)))
+    (values fd size)))
+
+(deftest bind-shm-advertises-argb-and-xrgb
+  (with-shm-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (send-get-registry socket 2)
+             (run-server display)
+             (read-events socket)
+             (send-bind socket 2 1 "wl_shm" 1 3)
+             (run-server display)
+             (let ((events (read-events socket)))
+               (ok (= 2 (length events)))
+               (destructuring-bind ((id1 op1 reader1) (id2 op2 reader2)) events
+                 (ok (= 3 id1))
+                 (ok (= 0 op1) "wl_shm.format is opcode 0")
+                 (ok (= srv:+wl-shm-format-argb8888+ (wire:read-uint reader1)))
+                 (ok (= 3 id2))
+                 (ok (= srv:+wl-shm-format-xrgb8888+ (wire:read-uint reader2))))))
+        (ffi:close-fd socket)))))
+
+(deftest a-pool-is-mapped-and-a-buffer-points-into-it
+  (with-shm-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-shm display socket)
+             (multiple-value-bind (fd size) (make-client-pool 8 4 #xFFFF0000)
+               (send-create-pool socket 4 fd size)
+               (run-server display)
+               (ok (null (read-events socket)) "creating a pool answers nothing")
+               (send-create-buffer socket 4 5 0 8 4 32 srv:+wl-shm-format-argb8888+)
+               (run-server display)
+               (ok (null (read-events socket)) "creating a buffer answers nothing")
+               (let* ((client (only-client display))
+                      (pool (wayland.object:object-table-ref (srv:client-objects client) 4))
+                      (buffer (wayland.object:object-table-ref (srv:client-objects client) 5)))
+                 (ok (= 5 (wayland.object:object-table-count (srv:client-objects client)))
+                     "display, registry, shm, pool and buffer")
+                 (ok (typep pool 'srv:shm-pool))
+                 (ok (= size (srv:shm-pool-size pool)))
+                 (ok (not (cffi:null-pointer-p (srv:shm-pool-mapping pool))))
+                 (ok (typep buffer 'srv:shm-buffer))
+                 (ok (eq pool (srv:shm-buffer-pool buffer)))
+                 (ok (= 8 (srv:shm-buffer-width buffer)))
+                 (ok (= 4 (srv:shm-buffer-height buffer)))
+                 (ok (= 32 (srv:shm-buffer-stride buffer)))
+                 (ok (= 128 (srv:shm-buffer-byte-length buffer)))
+                 (let ((pixels (ffi:mapped-octets (srv:shm-buffer-pointer buffer) 0 4)))
+                   (ok (equalp #(0 0 255 255) pixels)
+                       "ARGB8888 little-endian: B, G, R, A"))))
+        (ffi:close-fd socket))))))
+
+(defun shm-attempt (display width height stride offset format &key (pool-size 128))
+  "Create a pool and an (often invalid) buffer; return the error code, or NIL.
+
+A top-level helper rather than a local one: the assertions read better without a
+nested flet, and the unwind-protect is easier to get right in one place."
+  (let ((socket (raw-connect display)))
+    (unwind-protect
+         (progn
+           (bind-shm display socket)
+           (multiple-value-bind (fd size) (make-client-pool 8 4 #xFF00FF00)
+             (declare (ignore size))
+             (send-create-pool socket 4 fd pool-size)
+             (run-server display)
+             (send-create-buffer socket 4 5 offset width height stride format)
+             (run-server display)
+             (let ((reply (read-events socket)))
+               (unless reply
+                 (error "no reply for width ~D height ~D stride ~D offset ~D format ~D pool ~D"
+                        width height stride offset format pool-size))
+               (destructuring-bind (object-id code message) (error-reply reply)
+                 (declare (ignore object-id message))
+                 code))))
+      (ffi:close-fd socket))))
+
+(deftest buffer-validation-rejects-what-could-read-our-memory
+  (with-shm-display (display)
+    (flet ((rejected (code what)
+             (ok (eql code srv:+wl-shm-pool-error-invalid-stride+) what)))
+      (rejected (shm-attempt display 8 4 16 0 srv:+wl-shm-format-argb8888+)
+                "stride below width * 4")
+      (rejected (shm-attempt display 8 4 34 0 srv:+wl-shm-format-argb8888+)
+                "stride not a multiple of 4")
+      (rejected (shm-attempt display 8 4 32 2 srv:+wl-shm-format-argb8888+)
+                "offset not a multiple of 4")
+      (rejected (shm-attempt display 8 4 32 0 srv:+wl-shm-format-argb8888+ :pool-size 100)
+                "buffer reaches past the end of the pool")
+      (rejected (shm-attempt display 8 4 32 0 srv:+wl-shm-format-argb8888+ :pool-size 127)
+                "off by one at the end of the pool")
+      (rejected (shm-attempt display 0 4 32 0 srv:+wl-shm-format-argb8888+)
+                "zero width"))
+    (ok (eql (shm-attempt display 8 4 32 0 99)
+             srv:+wl-shm-pool-error-invalid-format+)
+        "an unadvertised format")))
+
+(deftest an-oversized-pool-is-refused-and-its-descriptor-closed
+  (with-shm-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-shm display socket)
+             ;; Measured before the test's own memfd exists, and with the server
+             ;; having accepted the client: after the refusal the accepted
+             ;; descriptor is gone and the memfd remains, so an equal count means
+             ;; the *received* copy was closed too.
+             (let ((before (fd-count)))
+               (multiple-value-bind (fd size) (make-client-pool 8 4 #xFF0000FF)
+                 (declare (ignore size))
+                 (unwind-protect
+                      (progn
+                        (send-create-pool socket 4 fd 0)        ; size 0: refused
+                        (run-server display)
+                        (destructuring-bind (object-id code message)
+                            (error-reply (read-events socket))
+                          (ok (= 3 object-id) "the error names the wl_shm object")
+                          (ok (eql code srv:+wl-shm-error-invalid-fd+))
+                          (ok (search "pool size" message)))
+                        (ok (null (srv:display-clients display))
+                            "the client is disconnected")
+                        (ok (= before (fd-count))
+                            (format nil
+                                    "the received descriptor was closed, not leaked (~D -> ~D)"
+                                    before (fd-count))))
+                   (ffi:close-fd fd)))))
+        (ffi:close-fd socket)))))
+
+(deftest a-pool-outlives-its-object-while-a-buffer-uses-it
+  ;; wl_shm's own words: "a buffer will keep a reference to the pool it was
+  ;; created from so it is valid to destroy the pool immediately after creating a
+  ;; buffer from it".  So the mapping belongs to the buffer, and the pool's
+  ;; descriptor is closed as soon as the pool object is gone.
+  (with-shm-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-shm display socket)
+             (multiple-value-bind (fd size) (make-client-pool 8 4 #xFF00FF00)
+               (send-create-pool socket 4 fd size)
+               (run-server display)
+               (send-create-buffer socket 4 5 0 8 4 32 srv:+wl-shm-format-argb8888+)
+               (run-server display)
+               (let* ((client (only-client display))
+                      (pool (wayland.object:object-table-ref (srv:client-objects client) 4))
+                      (buffer (wayland.object:object-table-ref (srv:client-objects client) 5)))
+                 (send-message socket 4 1 nil)        ; wl_shm_pool.destroy
+                 (run-server display)
+                 (ok (srv:resource-destroyed-p pool) "the pool object is gone")
+                 (ok (= -1 (srv:shm-pool-fd pool)) "its descriptor is closed")
+                 (ok (not (cffi:null-pointer-p (srv:shm-pool-mapping pool)))
+                     "the pixels stay mapped while a buffer uses them")
+                 (ok (not (srv:resource-destroyed-p buffer))
+                     "the buffer is alive")
+                 (let ((events (read-events socket)))
+                   (ok (= 1 (length events)) "one delete_id, for the pool")
+                   (ok (= 4 (wire:read-uint (third (first events))))))
+                 ;; Now the buffer goes: the last reference, so the mapping does.
+                 (send-message socket 5 0 nil)        ; wl_buffer.destroy
+                 (run-server display)
+                 (ok (null (srv:shm-pool-mapping pool)) "the mapping is gone")
+                 (ok (srv:resource-destroyed-p buffer))
+                 (let ((events (read-events socket)))
+                   (ok (= 1 (length events)) "and one more delete_id, for the buffer"))))
+        (ffi:close-fd socket)))))
+
+(deftest destroying-a-pool-with-no-buffers-unmaps-at-once
+  (with-shm-display (display)
+    (let ((socket (raw-connect display)))
+      (unwind-protect
+           (progn
+             (bind-shm display socket)
+             (multiple-value-bind (fd size) (make-client-pool 8 4 #xFF00FF00)
+               (send-create-pool socket 4 fd size)
+               (run-server display)
+               (let* ((client (only-client display))
+                      (pool (wayland.object:object-table-ref (srv:client-objects client) 4)))
+                 (send-message socket 4 1 nil)
+                 (run-server display)
+                 (ok (null (srv:shm-pool-mapping pool)))
+                 (ok (= -1 (srv:shm-pool-fd pool))))))
+        (ffi:close-fd socket)))))
+
+(deftest a-client-that-disappears-leaves-no-mapping-or-descriptor
+  (with-shm-display (display)
+    (let ((before (fd-count)))
+      (let ((socket (raw-connect display)))
+        (bind-shm display socket)
+        (multiple-value-bind (fd size) (make-client-pool 8 4 #xFF0000FF)
+          (send-create-pool socket 4 fd size)
+          (run-server display))
+        (let* ((client (only-client display))
+               (pool (wayland.object:object-table-ref (srv:client-objects client) 4)))
+          (ffi:close-fd socket)
+          (run-server display)
+          (ok (null (srv:display-clients display)))
+          (ok (null (srv:shm-pool-mapping pool)))
+          (ok (= -1 (srv:shm-pool-fd pool)))))
+      (ok (= before (fd-count))
+          (format nil "descriptors before ~D, after ~D" before (fd-count))))))
+)

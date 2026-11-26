@@ -82,6 +82,29 @@ that catch *our* bugs: a wrong type is an error in this image, not in the wire."
   (send-event callback +wl-callback-done+ callback-data))
 
 ;;; ---------------------------------------------------------------------------
+;;; wl_shm, wl_shm_pool, wl_buffer
+;;; ---------------------------------------------------------------------------
+
+(defmethod wl-shm.format ((shm shm) format)
+  (send-event shm +wl-shm-format+ format))
+
+;; wl_shm and wl_shm_pool have error *enums*, not events: their failures travel in
+;; wl_display.error, with the interface's own code (see SHM.LISP's rejections).
+
+(defmethod wl-buffer.release ((buffer shm-buffer))
+  (send-event buffer +wl-buffer-release+))
+
+;;; ---------------------------------------------------------------------------
+;;; wl_surface
+;;; ---------------------------------------------------------------------------
+
+(defmethod wl-surface.enter ((surface surface) output)
+  (send-event surface +wl-surface-enter+ output))
+
+(defmethod wl-surface.leave ((surface surface) output)
+  (send-event surface +wl-surface-leave+ output))
+
+;;; ---------------------------------------------------------------------------
 ;;; wl_output
 ;;;;
 ;;;; Order is libwayland's and clients rely on it (docs/protocol-layer.md §8):

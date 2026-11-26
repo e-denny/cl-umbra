@@ -32,7 +32,12 @@
    ;; Destroyed resources stay allocated until the next GC: the id is gone from
    ;; the client's table immediately, but a handler still running may hold this
    ;; object, and checking the flag beats dereferencing a tombstone.
-   (destroyed-p :initform nil :accessor resource-destroyed-p))
+   (destroyed-p :initform nil :accessor resource-destroyed-p)
+   ;; Called by DESTROY-RESOURCE after the id is gone: a pool unmaps and closes,
+   ;; a buffer drops its reference.  Protocol state that owns foreign memory has
+   ;; to be released at a defined moment, and resource destruction is that moment.
+   (destroy-function :initarg :destroy-function :initform nil
+                     :accessor resource-destroy-function))
   (:documentation
    "A protocol object, identified by (client, id).
 
@@ -150,10 +155,85 @@ geometry, wl_seat's capabilities)."))
   (:documentation "wl_callback: created by wl_display.sync, fires once, then dies."))
 
 (defclass compositor (resource)
-  ()
-  (:documentation "wl_compositor: bind, release, and (phase 2) create_surface."))
+  ((surface-class :initarg :surface-class :initform 'surface
+                  :accessor compositor-surface-class))
+  (:documentation "wl_compositor: bind, create_surface, and the surface class to
+instantiate.
+
+The surface class is a slot, not a constant: a framework subclasses SURFACE and
+configures the global with it (D7 -- configured resource classes, no vtables)."))
 
 (defclass output (resource)
   ()
   (:documentation "wl_output: an events-only global; the demo sends geometry and
 mode on bind so that wayland-info has something true to print."))
+
+;;; ---------------------------------------------------------------------------
+;;; Surfaces
+;;; ---------------------------------------------------------------------------
+
+(defclass surface (resource)
+  ((pending-attach-p :initform nil :accessor surface-pending-attach-p)
+   (pending-buffer :initform nil :accessor surface-pending-buffer)
+   (pending-x :initform 0 :accessor surface-pending-x)
+   (pending-y :initform 0 :accessor surface-pending-y)
+   (pending-damage :initform nil :accessor surface-pending-damage)
+   (pending-frame-callbacks :initform nil :accessor surface-pending-frame-callbacks)
+   (current-buffer :initform nil :accessor surface-current-buffer)
+   (current-x :initform 0 :accessor surface-current-x)
+   (current-y :initform 0 :accessor surface-current-y)
+   ;; Callbacks requested by commits that have not been presented yet.
+   (committed-callbacks :initform nil :accessor surface-committed-callbacks)
+   (opaque-region :initform nil :accessor surface-opaque-region)
+   (input-region :initform nil :accessor surface-input-region)
+   (mapped-p :initform nil :accessor surface-mapped-p)
+   (committed-p :initform nil :accessor surface-committed-p)
+   ;; The wl_compositor resource that created this surface.  A framework
+   ;; subclasses the compositor and puts its own state behind this.
+   (owner :initform nil :accessor surface-owner))
+  (:documentation
+   "wl_surface: the pending/current double buffer of everything a client draws.
+
+Phase 2a implements the part a shm client needs -- attach, damage, frame, commit,
+destroy -- and stores the opaque/input regions without acting on them: with no
+input and an opaque-by-construction target, ignoring them is correct, not lazy.
+Scale, transform and buffer-scale are later slices, and a version-1 binding means
+a client never sends them."))
+
+;;; ---------------------------------------------------------------------------
+;;; Shared memory
+;;; ---------------------------------------------------------------------------
+
+(defclass shm (resource)
+  ()
+  (:documentation "wl_shm: the global.  Its only state is the format list, which
+is a constant; every buffer lives in a wl_shm_pool."))
+
+(defclass shm-pool (resource)
+  ((fd :initarg :fd :initform -1 :accessor shm-pool-fd)
+   (size :initarg :size :initform 0 :type integer :accessor shm-pool-size)
+   (mapping :initform nil :accessor shm-pool-mapping)
+   (mapping-length :initform 0 :type integer :accessor shm-pool-mapping-length)
+   ;; Live buffers, so that destroying the pool can finish them first.
+   (buffers :initform nil :accessor shm-pool-buffers))
+  (:documentation "wl_shm_pool: one client file, mapped read-only.
+
+The client keeps writing into the mapping; we only read it at render time.  The
+fd is kept for the pool's lifetime (a future resize needs it) and closed when the
+pool dies, which is the one place that ownership ends."))
+
+(defclass shm-buffer (resource)
+  ((pool :initarg :pool :accessor shm-buffer-pool)
+   (offset :initarg :offset :accessor shm-buffer-offset)
+   (width :initarg :width :accessor shm-buffer-width)
+   (height :initarg :height :accessor shm-buffer-height)
+   (stride :initarg :stride :accessor shm-buffer-stride)
+   (format :initarg :format :accessor shm-buffer-format)
+   ;; A buffer the compositor is drawing from must not be released twice, and a
+   ;; buffer still attached to a surface must not be destroyed behind our back.
+   (in-use-p :initform nil :accessor shm-buffer-in-use-p)
+   (released-p :initform t :accessor shm-buffer-released-p))
+  (:documentation "wl_buffer backed by a subrange of a pool.
+
+The pool keeps the buffer alive: destroying the pool destroys its buffers, so a
+renderer can never be handed a pointer into an unmapped file."))

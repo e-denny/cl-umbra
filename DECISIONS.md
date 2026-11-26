@@ -604,3 +604,65 @@ own server's mistakes.
 - Neither covers protocol content that does not exist yet: pools, strides, formats, seats.
   They grow with phase 2's globals, and the peer fuzzer gains its "descriptor on a request
   that declares none" case when there is a request that declares one.
+
+---
+
+## D23 — A file descriptor occupies zero octets on the wire
+
+**Status:** accepted (corrects a phase-0 mistake)
+
+**Context.** Phase 0 implemented `fd` arguments as a 4-octet placeholder in the message body,
+with the descriptor in `SCM_RIGHTS`. The byte-exact unit tests, the encoder and the decoder all
+agreed with that, so the suite was green for two phases. Phase 2a's first real peer — a
+libwayland client calling `wl_shm.create_pool(new_id, fd, size)` — announced the mistake as a
+protocol error on our side within one run.
+
+**Decision.** An `fd` argument occupies **no octets**: `put-fd` writes nothing and only
+appends to the out buffer's descriptor queue; `read-fd` consumes nothing and only advances
+through the received queue. The message's size and layout are exactly as if the argument were
+not there; descriptors are assigned to `fd` arguments in argument order across the batch.
+
+**Evidence.** Two independent measurements, both recorded in `docs/protocol-layer.md` §1:
+`strace` on libwayland-client shows `create_pool` as a 16-octet message (header, new id, size)
+with the descriptor in `cmsg_data`; wayflan's encoder sizes `:fd` as `0`.
+
+**Consequences.**
+
+- The wire tests were wrong in a way that only a foreign peer could expose: the oracle
+  (`wayland-scanner`) compares signatures, not sizes, so a self-consistent codec passed. The
+  test now asserts that an fd adds no octets and does not move the reader, and the peer
+  fuzzer's "plausible" case picks real requests — including fd-carrying ones — so this stays
+  covered.
+- `wl_shm.create_pool` and every future fd-bearing request decode correctly; a `fd` argument
+  with an empty descriptor queue remains `missing-fd`, which is a protocol error.
+- The general lesson, worth repeating when the next "obviously right" codec invariant appears:
+  a stub peer that is really a peer is worth more than any amount of self-consistency.
+
+---
+
+## D24 — A frame is rendered once per cycle, and the render flushes
+
+**Status:** accepted
+
+**Context.** Phase 2a has to answer three questions that the protocol deliberately leaves
+open: when a commit becomes pixels, when a frame callback fires, and who writes the events the
+renderer produces.
+
+**Decision.** A commit marks the output dirty and registers one reactor *idle*; the idle
+renders if dirty and then flushes every client. Frame callbacks fire at the end of that render,
+with a millisecond timestamp, never at commit time. The target is cleared and every mapped
+surface is drawn back to front; damage is accepted and ignored until 2b, and the whole target
+is repainted.
+
+**Consequences.**
+
+- One render per cycle however many commits arrive, so a client that bursts commits costs one
+  frame — the same coalescing a real output's clock gives, without a clock.
+- The flush is load-bearing: the read loop flushes before the idle runs, so a `done` queued by
+  the render would otherwise sit in the buffer while the client waited forever. Found by the
+  gate client hanging; fixed by flushing after presenting.
+- Releasing a replaced buffer at the next commit is safe *because* rendering happens before the
+  next cycle's commits; a buffer is never released while a frame that used it is still queued.
+- A real output clock (timer for headless, page flip for DRM) replaces the idle without
+  touching the renderer or the surface objects, which is why the renderer never learned about
+  time.

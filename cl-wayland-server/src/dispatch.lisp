@@ -39,7 +39,16 @@
                         (message-name request)
                         (message-since request)
                         (resource-version resource)))
-      (call-request client resource request reader))))
+      ;; A decode failure is the *request's* fault, and saying which request is the
+      ;; difference between a usable trace and a puzzle.
+      (handler-case
+          (call-request client resource request reader)
+        (wayland.wire:wire-error (condition)
+          (protocol-error client (resource-id resource) +error-invalid-method+
+                          "malformed ~A.~A: ~A"
+                          (interface-name interface)
+                          (message-name request)
+                          condition))))))
 
 (defun call-request (client resource request reader)
   "Decode REQUEST's arguments and call the handler specialised on RESOURCE."

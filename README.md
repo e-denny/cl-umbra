@@ -6,14 +6,16 @@ The repository is named for where the stack is going: `cl-umbra`, a daily-driver
 Everything that makes it possible is here too — the protocol implementation, the server, the
 compositor framework, and a tinywl port — as the six systems below.
 
-**Status: phase 0 and phase 1 gates passing.** `./scripts/gate.sh` checks nine clauses.
-Phase 0: the unit suite, every vendored protocol compiling, `demo-globals` against a live
-compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` — the system's own libwayland
-client — exits 0 against *our* server; 10k connect/disconnect cycles leave the descriptor
-count and resident set flat; 10⁶ adversarial client connections neither crash, wedge, leak
-nor get a malformed reply; and an independent libwayland C client binds, destroys and
-re-binds across versions. Purity (no libwayland, no wlroots) runs over all of it. The gate
-exits 0.
+**Status: phase 0, phase 1 and phase 2a gates passing.** `./scripts/gate.sh` checks ten
+clauses. Phase 0: the unit suite, every vendored protocol compiling, `demo-globals` against a
+live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` — the system's own
+libwayland client — exits 0 against *our* server; 10k connect/disconnect cycles leave the
+descriptor count and resident set flat; 10⁶ adversarial client connections neither crash,
+wedge, leak nor get a malformed reply; and an independent libwayland C client binds, destroys
+and re-binds across versions. Phase 2a: a libwayland shared-memory client draws a known
+pattern through our headless compositor, gets its frame callback, and the captured frame
+matches pixel for pixel (with a PNG screenshot to prove it). Purity (no libwayland, no
+wlroots) runs over all of it. The gate exits 0.
 
 Three roadmap quality items are still open and are not gate clauses: fixed-size in/out
 rings, `WAYLAND_DEBUG`-compatible tracing, and surplus-descriptor detection (which needs a
@@ -33,8 +35,14 @@ What exists:
 - `cl-wayland-server` — the socket with its lock file and permissions, accept with peer
   credentials, `wl_display` and both id ranges, globals and version-negotiated `bind`,
   `wl_display.sync`, the error policy, flush batching with backpressure, and idempotent
-  teardown. The demo server offers two dummy globals so `wayland-info` has something true to
-  print; phase 2 adds the actual protocol content.
+  teardown. Phase 2a added `wl_shm` (pools, buffers, two formats, the validation a malicious
+  client would otherwise turn into a read of our memory) and the `wl_compositor`/`wl_surface`
+  state machine (attach, damage, frame, commit, destroy). The demo server offers two dummy
+  globals so `wayland-info` has something true to print; the rest of the protocol content
+  follows.
+- `cl-compositor-framework` — its first code: a pixman renderer (the reference), a headless
+  compositor that draws committed surfaces into an in-memory target, `read-pixels`, and a PNG
+  writer. Backends, scene graph and seats are phases 2b-5.
 
 ## What this is
 
@@ -175,6 +183,25 @@ sbcl --eval '(require :asdf)' \
 
 # in another, with the same two variables
 wayland-info
+```
+
+## Hello, pixels
+
+The phase-2a gate, in one command: a libwayland shared-memory client draws a known pattern
+through our headless compositor, and the frame is checked pixel by pixel and written out as a
+PNG.
+
+```
+./scripts/headless-frame.sh
+```
+
+From the REPL, the same compositor is a few lines:
+
+```lisp
+(defvar *c* (cf:make-headless-compositor :width 512 :height 512))
+(wayland.server:run (cf:compositor-display *c*))     ; serve clients
+(cf:frame-pixel *c* 10 20)                           ; one pixel, 0xAARRGGBB
+(cf:write-frame-png *c* "/tmp/frame.png")
 ```
 
 It offers two dummy globals — `wl_compositor` and `wl_output` — and nothing else yet: phase 2

@@ -76,6 +76,12 @@
 ;; getsockopt(SO_PEERCRED): who owns the other end of the connection.
 (defconstant +so-peercred+ 17)
 
+;; mmap(2).  A wl_shm pool is read-only shared memory: the client writes, we read.
+(defconstant +prot-read+ 1)
+(defconstant +prot-write+ 2)
+(defconstant +map-shared+ 1)
+(defconstant +map-private+ 2)
+
 ;;; ---------------------------------------------------------------------------
 ;;; C structures
 ;;; ---------------------------------------------------------------------------
@@ -212,6 +218,16 @@ which is the proof we want; other implementations simply run the check."
 
 (cffi:defcfun ("lseek" %lseek) :long
   (fd :int) (offset :long) (whence :int))
+
+(cffi:defcfun ("mmap" %mmap) :pointer
+  (address :pointer) (length :size) (protection :int) (flags :int)
+  (fd :int) (offset :long))
+
+(cffi:defcfun ("munmap" %munmap) :int
+  (address :pointer) (length :size))
+
+(cffi:defcfun ("dup" %dup) :int
+  (fd :int))
 
 (cffi:defcfun ("getpid" %getpid) :int)
 
@@ -439,6 +455,62 @@ for them."
 (defun effective-uid ()
   "The real uid of this process, for the SO_PEERCRED policy check."
   (%geteuid))
+
+(defun dup-fd (fd)
+  "A duplicate of FD, close-on-exec.  Pools duplicate the descriptor the client
+sent so that closing the received one cannot pull the mapping out from under them."
+  (let ((copy (%retry-on-eintr (lambda () (%dup fd)))))
+    (when (minusp copy)
+      (syscall-failed 'dup (errno)))
+    ;; F_DUPFD_CLOEXEC would set it atomically; F_SETFD is the portable pair and
+    ;; this is not a hot path.
+    (when (minusp (%fcntl copy +f-setfd+ +fd-cloexec+))
+      (let ((error-number (errno)))
+        (close-fd copy)
+        (syscall-failed 'fcntl error-number)))
+    copy))
+
+(defun map-file (fd length &key (offset 0) (protection +prot-read+) (private nil))
+  "mmap LENGTH octets of FD; return a SAP.  Signals IO-ERROR on failure.
+
+PRIVATE selects MAP_PRIVATE (a copy), otherwise MAP_SHARED: a wl_shm pool must be
+shared, because the client keeps writing into it."
+  (let ((pointer (%mmap (cffi:null-pointer) length protection
+                        (if private +map-private+ +map-shared+)
+                        fd offset)))
+    (when (= #xFFFFFFFFFFFFFFFF (cffi:pointer-address pointer))
+      (syscall-failed 'mmap (errno)))
+    pointer))
+
+(defun unmap-file (pointer length)
+  (when (and pointer (plusp length))
+    (when (minusp (%munmap pointer length))
+      (syscall-failed 'munmap (errno))))
+  nil)
+
+(defun pointer+ (pointer offset)
+  "POINTER advanced by OFFSET octets.  A subrange of a pool is one of these."
+  (cffi:inc-pointer pointer offset))
+
+(defun set-file-size (fd size)
+  "ftruncate(2): give a memfd a size before it is mapped."
+  (when (minusp (%ftruncate fd size))
+    (syscall-failed 'ftruncate (errno)))
+  fd)
+
+(defun write-mapped-octets (pointer offset octets)
+  "Copy OCTETS into a mapping at OFFSET.  For tests and for filling our own
+shm targets, never for the render path."
+  (dotimes (index (length octets) octets)
+    (setf (cffi:mem-aref pointer :unsigned-char (+ offset index))
+          (aref octets index))))
+
+(defun mapped-octets (pointer offset count)
+  "A fresh vector holding COUNT octets from a mapping.  For tests and readback,
+not for the render path, which hands pixman the pointer."
+  (let ((octets (make-array count :element-type '(unsigned-byte 8))))
+    (dotimes (index count octets)
+      (setf (aref octets index) (cffi:mem-aref pointer :unsigned-char (+ offset index))))))
 
 (defun process-id ()
   "This process's pid.  Servers write it into the socket lock file."

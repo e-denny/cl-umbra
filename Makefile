@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe
+check: test fuzz fuzz-client loads purity server c-probe frame
 
 test:
 	./scripts/run-tests.sh
@@ -28,6 +28,10 @@ server:
 # An independent libwayland client: bind, destroy, re-bind across versions.
 c-probe:
 	./scripts/c-probe.sh
+
+# A libwayland shm client draws through the headless compositor; pixels checked.
+frame:
+	./scripts/headless-frame.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:

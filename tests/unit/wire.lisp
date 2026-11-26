@@ -100,12 +100,11 @@
     (ok (eql 32 (wire:buffer-size buffer)))))
 
 (deftest trim-buffer-shifts-the-tail-and-can-drop-fds
-  (let ((buffer (encode 1 0 (lambda (b) (wire:put-fd b 9)))))
-    (ok (eql 12 (wire:buffer-size buffer)))
+  (let ((buffer (encode 1 0 (lambda (b) (wire:put-fd b 9) (wire:put-int b 5)))))
+    (ok (eql 12 (wire:buffer-size buffer))
+        "8 header + 4 for the int: an fd adds no octets")
     (wire:trim-buffer buffer 4)
     (ok (eql 8 (wire:buffer-size buffer)))
-    (ok (equalp (bytes 0 0 12 0 0 0 0 0) (wire:buffer-contents buffer))
-        "trimming keeps the tail, in place")
     (ok (eql 1 (wire:buffer-fd-count buffer)) "descriptors survive a plain trim")
     (wire:trim-buffer buffer 8 :drop-fds t)
     (ok (zerop (wire:buffer-size buffer)))
@@ -298,10 +297,11 @@
 
 (deftest fd-travels-beside-the-stream
   (let ((buffer (encode 1 0 (lambda (b) (wire:put-fd b 42)))))
-    ;; Four octets of placeholder in the stream...
-    (ok (equalp (bytes 0 0 0 0)
-              (subseq (wire:buffer-contents buffer) 8)))
-    ;; ...and the descriptor in the buffer's queue.
+    ;; An fd occupies no octets at all: the message is its header...
+    (ok (eql 8 (wire:buffer-size buffer))
+        "libwayland's wl_shm.create_pool(new_id, fd, size) is 16 octets, not 20")
+    (ok (equalp (bytes 1 0 0 0 0 0 8 0) (wire:buffer-contents buffer)))
+    ;; ...and the descriptor lives only in the buffer's queue.
     (ok (equal '(42) (wire:buffer-fds buffer)))
     (let ((reader (read-back buffer :fds #(42))))
       (ok (eql 42 (wire:read-fd reader)))
@@ -325,7 +325,17 @@
   (ok (signals (wire:put-fd (wire:make-message-buffer) -1) 'wire:value-out-of-range)))
 
 (deftest fd-that-never-arrived
-  (ok (signals (wire:read-fd (wire:make-reader (bytes 0 0 0 0))) 'wire:missing-fd)))
+  (ok (signals (wire:read-fd (wire:make-reader (bytes 0 0 0 0))) 'wire:missing-fd)
+      "reading an fd consumes no octets, so an empty queue is the only signal"))
+
+(deftest fd-does-not-move-the-reader
+  (let* ((buffer (encode 1 0 (lambda (b) (wire:put-fd b 3) (wire:put-uint b 7))))
+         (reader (read-back buffer :fds #(3))))
+    (let ((before (wire:reader-position reader)))
+      (ok (eql 3 (wire:read-fd reader)))
+      (ok (= before (wire:reader-position reader)) "an fd is not in the stream"))
+    (ok (eql 7 (wire:read-uint reader)))
+    (ok (wire:reader-done-p reader))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Length limits and reader bounds

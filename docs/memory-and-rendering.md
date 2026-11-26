@@ -75,9 +75,19 @@ offset % 4 == 0
   Anything else is `wl_shm.error(invalid-stride | invalid-fd | invalid-format)`, and the
   client is disconnected. This is the boundary where a malicious client would otherwise
   read our memory or crash us.
+- **Pool and buffer lifetime** (phase 2a, implemented): `wl_shm_pool.destroy` may happen
+  immediately after `create_buffer` — the protocol says a buffer keeps its pool alive — so the
+  *buffers* own the mapping in practice. Destroying the pool closes its descriptor at once and
+  leaves the mapping to the last buffer; destroying the last buffer unmaps it. Destroying a
+  surface releases its buffer, so a client that never destroys a buffer explicitly still gets
+  its release when the surface goes. The earlier idea of destroying a pool's buffers with the
+  pool was wrong and was caught by the first real client: it destroyed the pool after creating
+  its buffer and then attached a buffer we had already destroyed.
 - `wl_buffer.release` is sent when the compositor is finished with the buffer for a frame.
   Release must never happen for a buffer that is still referenced by a queued frame, and must
-  happen promptly or clients stall.
+  happen promptly or clients stall. Phase 2a releases the *previous* buffer when a commit
+  replaces it, which is safe because a frame is rendered once per cycle, before the next
+  cycle's commits.
 - Buffer reuse without release is the single most common client-vs-compositor bug; the test
   suite has explicit cases (`attach` while still in use, `attach` then immediate `destroy`,
   commit with no buffer, damage-only commit).
@@ -111,6 +121,12 @@ Advertised (`wl_shm.format`), in this order (mimicking libwayland's ordering):
 | `xbgr8888` | `PIXMAN_x8b8g8r8` | phase 5 |
 | `rgb565` | `PIXMAN_r5g6b5` | phase 5, low-bandwidth clients |
 | `bgr888`, `rgb888` | `PIXMAN_b8g8r8`, `PIXMAN_r8g8b8` | phase 5 |
+
+Phase 2a advertises exactly the first two, in this order: the renderer implements those two,
+and advertising formats a compositor cannot draw would be a lie a client cannot see. The
+pixman codes are pixman's `PIXMAN_FORMAT(bpp, type, a, r, g, b)` macro spelled out
+(`0x20028888` for a8r8g8b8), with the arithmetic in the source so it can be checked against
+the header.
 
 Wayland buffer alpha is **premultiplied**; do not un-premultiply anywhere on the hot path.
 Colour space is sRGB assumed by default, with `wp-color-management` (phase 7) able to say
@@ -164,6 +180,12 @@ Semantics:
                                0 0  0 0  x y  width height)))
 ```
 
+Phase 2a implements the target, `composite-buffer` and `render-surface` from that sketch:
+`PIXMAN_OP_SRC` for `xrgb8888` into a cleared target and `PIXMAN_OP_OVER` for `argb8888`, the
+conversion `0xAARRGGBB` ↔ `PIXMAN_a8r8g8b8`, and readback through the target's octet vector.
+Not yet: clip regions, scaling, transforms, buffer age and damage scissoring — the notes below
+are the plan for them, and the full-target repaint is honest until they exist.
+
 Notes that matter for correctness and speed:
 
 - `PIXMAN_OP_SRC` for the first opaque surface into a cleared target, `PIXMAN_OP_OVER`
@@ -202,6 +224,15 @@ viable. That is exactly why the next section is ordered DRM-dumb-first and GL-se
 
 Render into a memfd-backed shm target, then either measure time and drop it, or write a PNG
 on demand. This is the CI workhorse: no display, no privileges, deterministic pixels.
+
+Phase 2a implements it, with one simplification: the target is a Lisp octet vector rather
+than a memfd (pixman draws into it in place either way, and a vector is easier to read back
+and to pin), and the frame clock is a reactor *idle* — a commit marks the compositor dirty
+and one render happens at the end of that cycle. A commit-driven idle is the right shape for a
+headless output with no vblank; the timer/vblank clock replaces it without touching the
+renderer or the surface objects. Rendering flushes the connections it produced events for:
+frame callbacks are queued by the render, after the read loop already flushed, and an event
+nobody writes is an event the client waits for forever.
 
 ### 8.2 Nested (compositor inside a compositor)
 
@@ -247,6 +278,9 @@ creation or import fails.
 Screenshots, `wlr-screencopy`, and the test harness all use `read-pixels`:
 
 - Pixman renderer: composite the requested region into a staging shm buffer and copy out.
+  Phase 2a's smaller version: the target *is* the buffer, `frame-pixel` reads one pixel for
+  assertions, and `write-png` writes the whole thing (stored deflate blocks, RGBA8, real
+  CRC-32 and Adler-32 — no compression library, because a screenshot is evidence).
 - GL renderer: `glReadPixels` (slow, acceptable for a screenshot) or a blit + shm download.
 - DRM: read from the scanout buffer mapping directly if it is still the displayed one;
   otherwise render a fresh frame into a staging buffer.

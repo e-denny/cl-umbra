@@ -6,6 +6,12 @@
 scene graph, seat and focus policy, and the shell protocol state machines."
   :license "GPL-3.0-or-later"
   :version "0.0.1"
-  :depends-on ("cl-wayland-core" "cl-wayland-server")
+  ;; CFFI is for libpixman, the reference renderer (D3); the protocol system for
+  ;; the generated interface metadata the surface and shm code uses; nothing here
+  ;; touches libwayland, libwlroots, EGL or DRM.
+  :depends-on ("cffi" "cl-wayland-core" "cl-wayland-protocols" "cl-wayland-server")
   :serial t
-  :components ((:file "src/package")))
+  :components ((:file "src/package")
+               (:file "src/render-pixman")
+               (:file "src/png")
+               (:file "src/headless")))

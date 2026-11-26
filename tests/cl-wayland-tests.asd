@@ -17,7 +17,24 @@
 ;;;; its SBCL backend; a stale unlock of SB-DI is harmless but pointless.
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  #+sbcl (sb-ext:unlock-package "SB-DI"))
+  #+sbcl (sb-ext:unlock-package "SB-DI")
+  ;; dissect 20231021 renders a failing test's locals with SB-DI::DEBUG-VAR-INFO,
+  ;; which SBCL 2.6 no longer has: any failure then crashes the reporter, hiding
+  ;; the failure itself.  The stand-in returns NIL, so reports lose only the
+  ;; :more-context filtering.  Same workaround as the unlock above; delete both
+  ;; when dissect catches up with SBCL.
+  #+sbcl
+  ;; The symbol is interned by this form's own evaluation, not by the reader: the
+  ;; .asd is read while SB-DI is still locked, so it must not appear as a symbol
+  ;; in the source.
+  (let ((package (find-package "SB-DI")))
+    (when package
+      (multiple-value-bind (symbol status) (find-symbol "DEBUG-VAR-INFO" package)
+        (declare (ignore status))
+        (let ((symbol (or symbol (intern "DEBUG-VAR-INFO" package))))
+          (unless (fboundp symbol)
+            (setf (fdefinition symbol)
+                  (lambda (variable) (declare (ignore variable)) nil))))))))
 
 (defsystem "cl-wayland-tests"
   :description "Test suite for the cl-wayland-project systems (Rove)."

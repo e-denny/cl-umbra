@@ -33,6 +33,12 @@
 #   9. an independent C client binds, destroys and re-binds across versions, and
 #      gets the released id back
 #
+# Phase 2a (shm and the first pixels):
+#
+#  10. a libwayland shm client draws a known pattern through the headless
+#      compositor, gets its frame callback, and the captured frame matches pixel
+#      for pixel -- plus a valid PNG screenshot
+#
 # Logs land in a temporary directory that is printed when something fails.
 
 set -uo pipefail
@@ -148,6 +154,15 @@ else
   fail 'C client' 'the libwayland client probe failed' "$log_dir/c-probe.log"
 fi
 
+# 10. The headless frame -----------------------------------------------------
+printf '\nphase 2a gate: shared memory and the first pixels\n\n'
+
+if gb "$log_dir/headless-frame.log" "$repo_root/scripts/headless-frame.sh"; then
+  pass 'headless frame' "$(grep -a 'pixel checks passed' "$log_dir/headless-frame.log" | sed 's/^headless-frame: //' | cut -c1-40)"
+else
+  fail 'headless frame' 'the shm client did not draw what it asked for' "$log_dir/headless-frame.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -167,7 +182,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0 and phase 1 clauses)\n\n'
+  printf '  gate: PASSED (phase 0, phase 1 and phase 2a clauses)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

@@ -144,6 +144,9 @@ only -- we stop listening to a client that is not listening to us."
 Returns true when the buffer is empty, NIL when the socket said EAGAIN and the
 reactor now owns the rest."
   (unless (client-closed-p client)
+    (when (plusp (buffer-size (client-output client)))
+      (log-message :debug "client ~D: flushing ~D octets"
+                   (client-id client) (buffer-size (client-output client))))
     (loop while (plusp (buffer-size (client-output client)))
           do (let ((written (flush-buffer (client-fd client)
                                           (client-output client))))
@@ -155,6 +158,7 @@ reactor now owns the rest."
 
 (defun flush-all (display)
   "Flush every client; used at the end of a cycle and by the demo's loop."
+  (log-message :debug "flush-all: ~D client~:P" (length (display-clients display)))
   (dolist (client (copy-list (display-clients display)))
     (unless (client-closed-p client)
       (flush-client client)))

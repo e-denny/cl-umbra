@@ -133,6 +133,24 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:wl-output.name
                 #:wl-output.description
                 #:wl-output.release
+                #:wl-shm.format
+                #:wl-shm.create-pool
+                #:wl-shm-pool.create-buffer
+                #:wl-shm-pool.destroy
+                #:wl-shm-pool.resize
+                #:wl-buffer.destroy
+                #:wl-buffer.release
+                #:wl-compositor.create-surface
+                #:wl-compositor.create-region
+                #:wl-surface.attach
+                #:wl-surface.damage
+                #:wl-surface.frame
+                #:wl-surface.set-opaque-region
+                #:wl-surface.set-input-region
+                #:wl-surface.commit
+                #:wl-surface.destroy
+                #:wl-surface.enter
+                #:wl-surface.leave
                 ;; opcodes of the events the server sends in phase 1
                 #:+wl-display-error+
                 #:+wl-display-delete-id+
@@ -144,7 +162,17 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:+wl-output-done+
                 #:+wl-output-scale+
                 #:+wl-output-name+
-                #:+wl-output-description+)
+                #:+wl-output-description+
+                #:+wl-shm-format+
+                #:+wl-buffer-release+
+                #:+wl-surface-enter+
+                #:+wl-surface-leave+
+                ;; wl_shm / wl_shm_pool error codes
+                #:+wl-shm-error-invalid-format+
+                #:+wl-shm-error-invalid-stride+
+                #:+wl-shm-error-invalid-fd+
+                #:+wl-shm-pool-error-invalid-format+
+                #:+wl-shm-pool-error-invalid-stride+)
   (:export
    ;; conditions
    #:server-error
@@ -219,7 +247,51 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:registry
    #:callback
    #:compositor
+   #:compositor-surface-class
    #:output
+   #:surface
+   #:surface-pending-buffer
+   #:surface-current-buffer
+   #:surface-mapped-p
+   #:surface-committed-p
+   #:surface-committed-callbacks
+   #:surface-pending-damage
+   #:surface-owner
+   #:surface-current-x
+   #:surface-current-y
+   #:surface-frame-callbacks
+   #:surface-committed
+   #:surface-presented
+   #:fire-frame-callbacks
+   #:release-surface-buffer
+   #:shm
+   #:shm-pool
+   #:shm-buffer
+   #:shm-buffer-pool
+   #:shm-buffer-offset
+   #:shm-buffer-width
+   #:shm-buffer-height
+   #:shm-buffer-stride
+   #:shm-buffer-format
+   #:shm-buffer-pointer
+   #:shm-buffer-byte-length
+   #:shm-buffer-in-use-p
+   #:shm-buffer-released-p
+   #:shm-pool-fd
+   #:shm-pool-size
+   #:shm-pool-mapping
+   #:shm-pool-buffers
+   #:release-shm-pool-mapping
+   #:send-shm-formats
+   #:shm-format-supported-p
+   #:+wl-shm-format-argb8888+
+   #:+wl-shm-format-xrgb8888+
+   #:+wl-shm-error-invalid-format+
+   #:+wl-shm-error-invalid-stride+
+   #:+wl-shm-error-invalid-fd+
+   #:+wl-shm-pool-error-invalid-format+
+   #:+wl-shm-pool-error-invalid-stride+
+   #:resource-destroy-function
    ;; globals
    #:global
    #:global-name

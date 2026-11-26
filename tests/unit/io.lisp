@@ -217,7 +217,8 @@
                (let ((start (wire:begin-message buffer 1 0)))
                  (dolist (fd originals) (wire:put-fd buffer fd))
                  (wire:end-message buffer start))
-               (ok (eql 120 (wire:buffer-size buffer)) "8 + 28 * 4 octets")
+               (ok (eql 8 (wire:buffer-size buffer))
+                   "descriptors do not appear in the stream at all")
                (ok (eql 28 (wire:buffer-fd-count buffer)))
                (io:flush-buffer writer buffer))
              (ok (eql 1 (io:pump reader input
