@@ -61,7 +61,7 @@ The scripts go through `wayland.test.runner`, which names the eighteen suites in
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 440 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 442 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -624,7 +624,13 @@ Phase 4's fifth slice is the VT, and it adds the twenty-fifth:
     `scripts/drm-tinywl-gate.lisp`). The join 4d-3 makes: `libseat` opens the card,
     `cf.backend.vt` adopts the descriptor *without* opening the node, a scene with the
     cursor in it is rendered into the scanout buffer and flipped, the kernel retires
-    the flip, and a disable restores the CRTC and hands the descriptor back. Two
+    the flip, and a disable restores the CRTC and hands the descriptor back.
+    **Measured on real hardware on 2026-11-27**: 13 checks on the base run, **19** with
+    `CL_DRM_SWITCH_VT=1` -- `3840x2160` on `HDMI-A-1`, `SET MASTER` refused with
+    `EACCES` (and the mode programmed, flipped and restored anyway: D60), `flip
+    sequence 702`, pitch `15360`, descriptors `14 -> 14` and `15 -> 15`, and the switch
+    disabling the seat, giving the screen back, then enabling it again with the output
+    taking the screen by itself. Two
     things make it safe on a working machine, and both are skips rather than
     failures: which card it may take is clause 22's two-setting decision (a virtual
     driver, or `CL_DRM_MODESET_CARD` **and** `CL_DRM_MODESET_ALLOW=1`), and a seat
@@ -873,14 +879,20 @@ Preconditions the automated clauses cannot arrange for themselves:
 - [ ] a free VT with a getty, for anything that owns the screen (4b's page flips take master;
       4c's seat reports `EBUSY` while a compositor holds the session)
 
-- [ ] TTY start, clean exit, no leaked fds (`ls /proc/<pid>/fd | wc -l`):
+- [x] TTY start, clean exit, no leaked fds (`ls /proc/<pid>/fd | wc -l`):
       `./scripts/tinywl.sh --drm` from the console, `Alt+Esc` to leave, then check that the
       console text came back (clause 25 is the automated half of this, and it is the half that
-      can skip)
+      can skip). **Walked 2026-11-27**: a real desktop on `HDMI-A-1` at 3840x2160 with real
+      libinput, `Alt+Esc` back to the console, no descriptor left behind
 - [ ] the same, killed with `SIGTERM` (`kill <pid>`): the screen is restored by the signal path,
       which is D59 §7's other exit
-- [ ] `CL_DRM_SWITCH_VT=2 ./scripts/drm-tinywl-gate.sh` from the console: the probe switches
-      away, sees the seat disabled, switches back and sees the output enabled again
+- [x] `CL_DRM_SWITCH_VT=1 ./scripts/drm-tinywl-gate.sh` from the console: the probe switches
+      away, sees the seat disabled, switches back and sees the output enabled again.
+      **Walked 2026-11-27**, 19 checks, 0 failed
+- [x] the VT keys with a compositor holding the keyboard: `Ctrl+Alt+F1` away from
+      `cl-tinywl`, `Ctrl+Alt+F2` back to it, window still open. **Walked 2026-11-27** (it
+      did not work at first -- libinput grabs the keyboard, so the compositor has to bind
+      the sequence: D60)
 - [ ] VT switch away and back ×20
 - [ ] unplug/replug output ×10, with windows on it
 - [ ] suspend/resume ×5

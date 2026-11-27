@@ -134,11 +134,16 @@ handed this device instead of opening its own."
         (ignore-errors (cf.session:close-session-device session id))
         (error condition)))))
 
-(defun master-refusal (condition)
-  "The errno when CONDITION is a refused TAKE-MASTER, else NIL."
-  (when (and (typep condition 'cf.backend.drm:drm-error)
-             (eq :take-master (cf.backend.drm:drm-error-operation condition)))
-    (cf.backend.drm:drm-error-errno condition)))
+(defun refusal-errno (condition)
+  "The errno when CONDITION is a kernel refusal that means `this card is not ours'.
+
+Master is best effort at open (D59), so the refusal that stops a VT compositor is the
+CRTC programming, not SET MASTER; both are named here because a future kernel or
+backend may report either."
+  (when (typep condition 'cf.backend.drm:drm-error)
+    (let ((operation (cf.backend.drm:drm-error-operation condition)))
+      (when (member operation '(:program-crtc :take-master))
+        (cf.backend.drm:drm-error-errno condition)))))
 
 (defun open-seat ()
   (handler-case
@@ -184,20 +189,19 @@ another compositor's"
            (handler-case
                (progn
                  (multiple-value-bind (device device-id) (seat-device session path)
-                   (note "the seat's descriptor is master at open: ~:[no~;yes~]; it is the only descriptor this clause opens"
-                         (cf.backend.drm:drm-device-master-p device))
+                   (note "the seat's descriptor was opened once, through logind; master is best effort from here (D59)")
                    (setf output
                          (handler-case
                              (cf.backend.vt:open-vt-output session :path path
                                                            :device device
                                                            :device-id device-id)
                            (cf.backend.drm:drm-error (condition)
-                             (let ((errno (master-refusal condition)))
+                             (let ((errno (refusal-errno condition)))
                                (if (member errno (list wayland.ffi:+eacces+
                                                        wayland.ffi:+ebusy+))
-                                   (skip "SET MASTER on ~A was refused (~A).  The seat's descriptor was ~:[not master~;master~] at open, so either another client holds master of the card or the console still owns it.  Nothing was taken; quit the compositor that owns the card (log out of its session, not just its window) and run this clause again" card
+                                   (skip "programming the screen on ~A was refused (~A) by ~A; nothing is taken.  The card is somebody's -- another compositor or the console -- so free it and run this clause again" card
                                          (wayland.ffi:strerror errno)
-                                         (cf.backend.drm:drm-device-master-p device))
+                                         (cf.backend.drm:drm-error-operation condition))
                                    (error condition)))))))
                  (check (cf.backend.vt:vt-output-enabled-p output)
                         "the seat opened ~A and the output came up with it" card)
@@ -214,8 +218,14 @@ another compositor's"
                         (crtc-id (cf.backend.drm:drm-scanout-crtc-id scanout))
                         (width (cf.backend.vt:vt-output-width output))
                         (height (cf.backend.vt:vt-output-height output)))
-                   (check (cf.backend.drm:drm-device-master-p device)
-                          "the descriptor the seat handed over is master -- SET MASTER is per-fd, not privileged")
+                   ;; Master is reported, not asserted: the kernel may grant it to the
+                   ;; descriptor (logind's doing) or refuse it (this machine refuses an
+                   ;; unprivileged SET MASTER even on a free card), and the CRTC
+                   ;; programming above has already proved that refusal is not fatal
+                   ;; (D59).  What would be a failure is an untruthful record, and the
+                   ;; restore at the end is checked against the state read before.
+                   (note "master: ~:[refused by the kernel -- the mode was programmed and the flip retired anyway (D59)~;granted on the seat's descriptor~]"
+                         (cf.backend.drm:drm-scanout-master-p scanout))
                    (check (= 2 (cf.backend.drm:drm-scanout-buffer-count scanout))
                           "two buffers, so the frame being scanned out is never redrawn")
 
@@ -223,9 +233,13 @@ another compositor's"
                    ;; answers a target over the scanout buffer, the scene draws -- cursor
                    ;; included, because there is no cursor plane (D58) -- and the
                    ;; presenter flips and waits for the kernel's completion.
+                   ;; A socket name of its own per run: a fixed one can collide with
+                   ;; the previous run's lock, and this clause must not fail for that.
                    (setf compositor (cf:make-headless-compositor
                                      :width width :height height
-                                     :display-name "tinywl-vt-gate"
+                                     :display-name (format nil "tinywl-vt-gate-~D-~D"
+                                                           (get-universal-time)
+                                                           (random 1000000))
                                      :runtime-dir (or (uiop:getenv "XDG_RUNTIME_DIR") "/tmp")))
                    (multiple-value-bind (preparer presenter)
                        (cf.backend.vt:make-vt-frame-hooks output)
@@ -339,4 +353,9 @@ waits up to a minute for the seat to come back" here here)
         ;; Whatever happened, the screen goes back: a gate that leaves a card taken
         ;; is worse than a gate that fails.
         (when output (ignore-errors (cf.backend.vt:close-vt-output output)))
-        (ignore-errors (cf.session:close-session session))))))
+        (ignore-errors (cf.session:close-session session))
+        ;; And its own socket, so the next run does not find this one's lock.
+        (when compositor
+          (ignore-errors
+            (wayland.server:close-display
+             (cf:compositor-display compositor))))))))

@@ -44,7 +44,7 @@
 ;;; ---------------------------------------------------------------------------
 
 (defclass tinywl-compositor (cf:headless-compositor)
-  ()
+  ((vt-seat :initform nil :accessor tinywl-vt-seat))
   (:documentation
    "A headless compositor with tinywl's policy on it.
 
@@ -75,6 +75,39 @@ name."
                                              :compositor-class 'tinywl-compositor)))
     (install-keybindings tinywl)
     tinywl))
+
+;;; ---------------------------------------------------------------------------
+;;; The keys the kernel cannot see
+;;; ---------------------------------------------------------------------------
+;;
+;; libinput grabs the keyboard (EVIOCGRAB), so `Ctrl+Alt+F1' never reaches the
+;; kernel's console handler while a compositor of ours holds the devices -- and the
+;; kernel, seeing nothing, does not switch.  That is the same job X and sway do
+;; themselves: a compositor that takes the keyboard has to give the console back with
+;; a key of its own.  Measured on this machine (D59): the gate's programmatic
+;; switch worked, while Ctrl+Alt+F1 did nothing until tinywl exited.
+
+(defun install-vt-bindings (tinywl seat)
+  "Bind Ctrl+Alt+F1..F12 to the seat's VT switch, for a session that owns a VT.
+
+The switch is a request, not a promise: logind decides, and if it refuses the screen
+simply stays here (a refusal is a note, not an error -- a compositor that crashed on
+an unanswerable switch request would lose the screen for good)."
+  ;; LET around each iteration: LOOP's FOR makes one binding, so twelve closures over
+  ;; it would all ask for the last VT (the classic capture bug, and one that would look
+  ;; like `Ctrl+Alt+F1 switches to VT 12').
+  (loop for vt from 1 to 12
+        do (let ((vt vt))
+             (cf:add-keybinding
+              tinywl (format nil "F~D" vt)
+              (lambda ()
+                (handler-case (seat:switch-session-to seat vt)
+                  (error (condition)
+                    (srv:log-message :warn "tinywl: VT ~D was not granted: ~A"
+                                     vt condition))))
+              :modifiers (logior input:+modifier-control+ input:+modifier-mod1+)
+              :description (format nil "switch to VT ~D" vt))))
+  tinywl)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Placement
@@ -538,7 +571,13 @@ needs a seat that is usable now, which is what dispatch inside OPEN-SESSION is f
             (setf tinywl
                   (make-tinywl :width layout-width :height layout-height
                                :scale scale :background background
-                               :display-name (or display-name "wayland-0")
+                               ;; "tinywl-1" and not "wayland-0": on a VT the session's
+                               ;; own compositor is very likely to still be alive on
+                               ;; wayland-0 (Umbriel is, on this machine), and its lock
+                               ;; is live.  A compositor that cannot start because
+                               ;; somebody else's socket is in the way is a bad first
+                               ;; impression; --display still names any socket wanted.
+                               :display-name (or display-name "tinywl-1")
                                :runtime-dir (or runtime-dir
                                                 (uiop:getenv "XDG_RUNTIME_DIR"))))
             (multiple-value-bind (preparer presenter) (vt:make-vt-frame-hooks output)
@@ -564,6 +603,8 @@ needs a seat that is usable now, which is what dispatch inside OPEN-SESSION is f
                seat (lambda (session)
                       (declare (ignore session))
                       (cf:resume-input driver))))
+            (setf (tinywl-vt-seat tinywl) seat)
+            (install-vt-bindings tinywl seat)
             (install-stop-signals tinywl)
             (cf:request-frame tinywl))
           (when launch (launch tinywl :command launch))

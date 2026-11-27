@@ -12,8 +12,9 @@ the first three slices of phase 4 (the DRM card, its connectors and a dumb buffe
 screen: master, a mode, page flips and the restore, D55; and the seat plus libinput's devices
 and decode path, D56), the keymap of the fourth (libxkbcommon, D57), its frame: the scene --
 cursor included -- rendered into the scanout at the driver's pitch (D58), and the VT: the card
-opened through a seat and given back on a switch (4d-3).**
-`./scripts/gate.sh` checks twenty-five clauses. Phase 0: the unit suite (440 tests, eighteen suites), every vendored protocol compiling,
+opened through a seat, a frame flipped on it, and the screen given back and retaken across a VT
+switch (4d-3, walked on the hardware on 2026-11-27: D60).**
+`./scripts/gate.sh` checks twenty-five clauses. Phase 0: the unit suite (442 tests, eighteen suites), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections

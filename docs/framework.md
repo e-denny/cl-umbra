@@ -244,6 +244,15 @@ Four things are worth knowing about it.
 * **The frame hooks are the compositor seam.** The preparer answers a target over the buffer the
   next flip will show, at the driver's pitch (D58); the presenter flips and waits for the
   kernel's completion. Drawing and presenting stay separate, and one frame is one vblank.
+* **Master is best effort, and the CRTC is the judge.** A descriptor from logind does not
+  arrive with the right to be master: on this machine `SET MASTER` answers `EACCES` while
+  `SETCRTC`, `PAGE_FLIP` and a restore all succeed, so a refusal is recorded and the
+  modeset decides (D60). Nothing asks the card whether it is master -- libdrm's
+  `drmIsMaster` is a `SET MASTER` in disguise, so a "probe" takes what it measures.
+* **The VT keys belong to the compositor.** libinput grabs the keyboard, so the kernel
+  never sees `Ctrl+Alt+F1`; `cl-tinywl --drm` binds `Ctrl+Alt+F1..F12` to
+  `switch-session-to`, and a session's socket is `tinywl-1` rather than the `wayland-0`
+  the session's own compositor holds.
 * **The screen goes back on the way out.** `Alt+Esc` stops the reactor; `SIGINT`, `SIGTERM` and
   `SIGHUP` are posted into a reactor cycle and do the same. A `SIGKILL` cannot restore anything.
 

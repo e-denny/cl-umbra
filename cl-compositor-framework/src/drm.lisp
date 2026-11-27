@@ -608,7 +608,13 @@ that supplied ATTRIBUTES itself has already said what the descriptor is."
                :version-major (cffi:foreign-slot-value version '(:struct drm-version) 'major)
                :version-minor (cffi:foreign-slot-value version '(:struct drm-version) 'minor)
                :version-patchlevel (cffi:foreign-slot-value version '(:struct drm-version) 'patchlevel)
-               :master-p (not (zerop (%drm-is-master fd)))
+               ;; Not asked here, deliberately: libdrm's drmIsMaster is not a query.
+               ;; It calls DRM_IOCTL_SET_MASTER and answers `not EACCES', so asking it
+               ;; *tries to take master* and cannot tell `I am master' from `the card
+               ;; is busy' (verified by disassembling libdrm's drmIsMaster: one
+               ;; SET_MASTER, then a compare against -EACCES).  A descriptor is master
+               ;; when DRM-TAKE-MASTER was told so by the kernel, and not before.
+               :master-p nil
                :capabilities (list :dumb-buffer (plusp (capability fd +cap-dumb-buffer+))
                                    :prime (plusp (capability fd +cap-prime+))))
       (%drm-free-version version))))
@@ -1110,30 +1116,37 @@ SIGBUS waiting for the next render."
 ;; a screen showing freed memory.
 
 (defun drm-refresh-master (device)
-  "Ask the kernel whether DEVICE is master now, and record the answer.
+  "What was recorded about DEVICE's master state; the kernel is not asked.
 
-This is the live query; DRM-DEVICE-MASTER-P is the slot it fills.  A closed device
-is not master, which is not an error: closing the descriptor drops master anyway."
-  (setf (drm-device-master-p device) (drm-query-master device)))
-
-(defun drm-take-master (device)
-  "Become the master of DEVICE, and record that we are.
-
-Signals DRM-ERROR with errno EBUSY when the card has a master already -- a session
-presenting on it, which is the answer this project wants rather than works around:
-EBUSY is the difference between `you may own this screen' and `somebody is
-using it' (D55)."
-  (drm-request-master device)
-  (drm-refresh-master device)
-  (unless (drm-device-master-p device)
-    (drm-failed :take-master :errno nil :path (drm-device-path device)))
+There is no side-effect-free way to ask: the kernel has no `am I master' ioctl, and
+libdrm's drmIsMaster tries to take master.  So the state is what DRM-TAKE-MASTER and
+DRM-DROP-MASTER recorded -- which is also the only thing closing a scanout needs to
+know, and the reason a refused SET MASTER is not an error this function can hide."
   (drm-device-master-p device))
 
+(defun drm-take-master (device)
+  "Ask the kernel to make DEVICE's descriptor master, and record its answer.
+
+Signals DRM-ERROR with the ioctl's own errno when it refuses: EBUSY when another
+client holds the card, EACCES when this descriptor was never granted the right -- a
+seat hands out a descriptor, not the right, and logind is the one that grants it (or
+does not).  T means the kernel agreed.
+
+The record is the kernel's answer and nothing else, which is why DRM-REFRESH-MASTER
+is not called here: it used to ask libdrm's drmIsMaster, and that is a SET MASTER call
+in disguise, so the `answer' could be yes for a card that had just refused us."
+  (drm-request-master device)
+  (setf (drm-device-master-p device) t)
+  t)
+
 (defun drm-drop-master (device)
-  "Give DEVICE back, and record that we did.  Idempotent."
+  "Give DEVICE back, and record that we did.  Idempotent.
+
+The record is cleared only after the kernel accepted the drop, so a drop that failed
+leaves the device marked master -- which is the truth."
   (when (drm-device-master-p device)
-    (drm-release-master device))
-  (drm-refresh-master device)
+    (drm-release-master device)
+    (setf (drm-device-master-p device) nil))
   (values))
 
 (defun drm-crtc-connectors (inventory crtc-id)
@@ -1380,8 +1393,18 @@ connector is used when it is NIL.  MODE defaults to the connector's choice."
          (opened nil))
     (unwind-protect
          (progn
-           (drm-take-master device)
-           (setf took-master t
+           ;; Master is best effort here, and the reason is measured (D59): a VT
+           ;; seat hands over a descriptor and logind may not have granted the right,
+           ;; so SET MASTER answers EACCES on a card nobody else is using; wlroots
+           ;; carries on and lets the modeset decide, and so does this.  EBUSY (another
+           ;; client owns the card) is tolerated the same way: the CRTC programming is
+           ;; where the kernel says no, and that error is the honest one.
+           (handler-case (drm-take-master device)
+             (drm-error (condition)
+               (unless (member (drm-error-errno condition)
+                               (list ffi:+eacces+ ffi:+ebusy+))
+                 (error condition))))
+           (setf took-master (drm-device-master-p device)
                  saved-state (drm-crtc-state device crtc-id)
                  ;; What the CRTC was feeding, so a later restore can name it.
                  saved-connectors (drm-crtc-connectors
@@ -1408,10 +1431,11 @@ connector is used when it is NIL.  MODE defaults to the connector's choice."
       (unless opened
         (dolist (buffer buffers)
           (ignore-errors (drm-destroy-dumb device buffer)))
-        (when (and took-master saved-state)
+        (when saved-state
           (ignore-errors (drm-restore-crtc device saved-state
                                            :connector-ids saved-connectors)))
-        (when (and took-master (drm-device-open-p device) (drm-device-master-p device))
+        (when (and took-master (drm-device-open-p device)
+                   (drm-device-master-p device))
           (ignore-errors (drm-drop-master device)))))))
 
 (defun drm-scanout-present (scanout buffer &key (timeout-ms 1000))
@@ -1454,7 +1478,10 @@ Idempotent: a second call does nothing."
       (flet ((attempt (thunk)
                (handler-case (funcall thunk)
                  (error (condition) (push condition failures)))))
-        (when (drm-scanout-master-p scanout)
+        ;; Attempted even when the scanout is not master: if the CRTC was
+        ;; programmed, the state has to go back, and a refusal is reported rather
+        ;; than skipped.  Master itself is dropped only when it was taken.
+        (when (drm-scanout-saved-state scanout)
           (attempt (lambda ()
                      (drm-restore-crtc device (drm-scanout-saved-state scanout)
                                        :connector-ids
@@ -1594,8 +1621,12 @@ back from the mapping before they ever reach a display."
 ;;; The four calls that change the screen, and the one that waits for them.
 
 (defmethod drm-query-master ((device drm-device))
+  "What was recorded, for a device that is still open -- see DRM-REFRESH-MASTER.
+
+The kernel is not asked: libdrm's drmIsMaster would try to take master as its way of
+answering, and this project does not take a screen to ask a question about one."
   (and (drm-device-open-p device)
-       (not (zerop (%drm-is-master (drm-device-fd device))))))
+       (drm-device-master-p device)))
 
 (defmethod drm-request-master ((device drm-device))
   (let ((result (%drm-set-master (device-fd device))))

@@ -26,7 +26,8 @@
   --launch CMD          start CMD (default weston-terminal) as a client of ours:
                         immediately, and again on Alt+Shift+Return
   --display NAME        the name of our own socket (default wayland-0 headless,
-                        tinywl-1 nested)
+                        tinywl-1 nested and on a VT, where the session compositor
+                        very likely owns wayland-0)
   --runtime-dir DIR     where the socket goes (default XDG_RUNTIME_DIR)
   --help                this text
 
@@ -136,5 +137,12 @@ compositor's control surface (D14)."
                (finish-output))))))
     (error (condition)
       (format *error-output* "tinywl: ~A~%" condition)
+      ;; The first thing a person hits on a VT: the session's compositor owns
+      ;; wayland-0, and its lock is live.
+      (when (typep condition 'srv:socket-in-use)
+        (format *error-output*
+                "tinywl: that socket name belongs to another compositor; name ours ~
+with --display, for example --display tinywl-1, and point clients at it with ~
+WAYLAND_DISPLAY=tinywl-1~%"))
       (write-string +usage+ *error-output*)
       2)))

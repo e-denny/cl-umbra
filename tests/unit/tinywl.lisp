@@ -411,3 +411,43 @@ connection would make this a gate rather than a test."
     (ok (null (getf options :connector)) "and the connector to the card's first connected one"))
   (ok (signals (tinywl::parse-arguments '("--drm" "--card")) 'error)
       "a card option with no value is an error a person can read"))
+
+;;; ---------------------------------------------------------------------------
+;;; The keys the kernel cannot see (a VT session)
+;;; ---------------------------------------------------------------------------
+
+(defclass recording-seat (cf.session:session)
+  ((switches :initform '() :accessor seat-switches))
+  (:documentation "A session whose provider records the VT it was asked for."))
+
+(defmethod cf.session:%switch-session ((seat recording-seat) vt)
+  (push vt (seat-switches seat))
+  t)
+
+(deftest a-vt-session-binds-ctrl-alt-f1-to-a-switch
+  ;; libinput grabs the keyboard, so the kernel's console handler never sees
+  ;; Ctrl+Alt+F1 and, seeing nothing, never switches: the compositor has to ask.  One
+  ;; binding per VT, and each one asks for *its own* VT -- twelve closures over one
+  ;; LOOP variable would all ask for the last.
+  (with-tinywl (tinywl)
+    (let ((recording (make-instance 'recording-seat :id 1 :name "seat0")))
+      (tinywl:install-vt-bindings tinywl recording)
+      (loop for vt from 1 to 12
+            for binding = (kb:binding-for (cf:compositor-keybindings tinywl)
+                                          (format nil "F~D" vt)
+                                          (logior input:+modifier-control+
+                                                  input:+modifier-mod1+))
+            do (ok (not (null binding))
+                   (format nil "Ctrl+Alt+F~D is bound: the switch is asked for, not promised" vt)))
+      (labels ((fire (vt)
+                 (let ((binding (kb:binding-for (cf:compositor-keybindings tinywl)
+                                                (format nil "F~D" vt)
+                                                (logior input:+modifier-control+
+                                                        input:+modifier-mod1+))))
+                   (funcall (kb:keybinding-function binding)))))
+        ;; A seat that records instead of switching: libseat's own switch_session
+        ;; asserts on a seat that was never opened, and an assertion in C takes the
+        ;; image with it (which is why SWITCH-SESSION-TO now refuses first).
+        (ok (equal '(12 1)
+                   (progn (fire 1) (fire 12) (seat-switches recording)))
+            "each binding asks for its own VT, not the last one the loop saw")))))

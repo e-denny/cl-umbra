@@ -497,8 +497,12 @@ the connector and mode it remembered, and offers the two frame hooks a composito
 through. `cl-tinywl` gained `--drm`, `--card` and `--connector`, a seat dispatch in its cycle,
 SIGINT/SIGTERM/SIGHUP restore, and clause 25 checks the whole join on a card it may take (7 new
 unit tests against a recording seat and card; the clause skips on a machine whose session belongs
-to another compositor). What remains of phase 4 is the exit gate itself: five items that need a
-person at a text console, listed above.
+to another compositor). It has since **run on real hardware** (D60): clause 25 at 13 checks, and
+19 with the VT switch, `3840x2160` on `HDMI-A-1`, master refused and the mode set anyway, a flip
+the kernel retired, the CRTC restored, descriptors flat; and `cl-tinywl --drm` ran a desktop on
+the console with real input, `Alt+Esc`, and `Ctrl+Alt+F1`/`F2` out to the session compositor and
+back. That is exit-gate items 1 and 2. What remains of phase 4: hotplug (no code yet),
+suspend/resume (no hooks yet), and the 8-hour soak.
 
 ### Phase 5 — GPU acceleration, only where it earns its place (5-8 weeks)
 

@@ -167,13 +167,12 @@ that will draw frames."
                             (cf.backend.drm:drm-mode-name (cf.backend.drm:drm-crtc-mode saved))))
 
                  ;; --- take master -------------------------------------------------
-                 ;; Not an assertion that we are not master already: the kernel makes
-                 ;; the first opener of a free primary node master, which is what a
-                 ;; virtual card with nobody on it looks like (measured on vkms).
-                 ;; SET MASTER is a real transition only when something else holds
-                 ;; the card, and then it answers EBUSY.
-                 (note "master at open: ~:[no~;yes (the kernel makes the first opener of a free card master)~]"
-                       (cf.backend.drm:drm-device-master-p device))
+                 ;; Nothing asks about master before this: libdrm's drmIsMaster takes
+                 ;; master as its way of answering, so a `probe' here would be a SET
+                 ;; MASTER with a shrug (D59).  This clause runs as root or on a card
+                 ;; named for it, so the call is expected to succeed, and its answer
+                 ;; is what DRM-TAKE-MASTER records.
+                 (note "SET MASTER is asked once; the kernel has no query to ask instead")
                  (let ((condition
                          (handler-case (progn (cf.backend.drm:drm-take-master device) nil)
                            (cf.backend.drm:drm-error (condition) condition))))

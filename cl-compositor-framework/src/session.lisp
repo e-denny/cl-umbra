@@ -511,8 +511,17 @@ that arrives twice is a caller being tidy rather than a caller being wrong."
     result))
 
 (defmethod %switch-session ((session session) vt)
-  (when (minusp (%switch-session-raw (session-seat-pointer session) vt))
-    (error 'session-error :operation "switch-session" :errno (ffi:errno)))
+  ;; The pointer is checked because libseat does not: libseat_switch_session asserts
+  ;; `seat && seat->impl' and an assertion failure in C aborts the whole image, which
+  ;; a compositor asking for a VT too early must not be able to do (found by a test
+  ;; that fired a binding before any seat existed).
+  (let ((seat (session-seat-pointer session)))
+    (when (or (null seat) (cffi:null-pointer-p seat))
+      (error 'session-error :operation "switch-session" :errno nil
+                            :path (format nil "VT ~D" vt)))
+    (when (minusp (%switch-session-raw seat vt))
+      (error 'session-error :operation "switch-session" :errno (ffi:errno)
+                            :path (format nil "VT ~D" vt))))
   t)
 
 (defmethod %seat-fd ((session session))

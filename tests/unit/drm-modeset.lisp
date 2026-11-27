@@ -95,6 +95,7 @@ lighting it."
    (events :initarg :events :initform '() :accessor recording-events)
    (flip-error :initarg :flip-error :initform nil :accessor recording-flip-error)
    (fail-add-on :initarg :fail-add-on :initform nil :accessor recording-fail-add-on)
+   (program-error :initarg :program-error :initform nil :accessor recording-program-error)
    (add-count :initform 0 :accessor recording-add-count)
    (framebuffer :initform 0 :accessor recording-framebuffer)
    (handle :initform 0 :accessor recording-handle))
@@ -145,6 +146,9 @@ the recorded ones."
               (copy-list connector-ids)
               (and mode (drm:drm-mode-name mode)))
         (recording-calls device))
+  (when (recording-program-error device)
+    (error 'drm:drm-error :operation :program-crtc :errno ffi:+eacces+
+                          :path (drm:drm-device-path device)))
   (values))
 
 (defmethod drm:drm-queue-page-flip ((device recording-screen-device)
@@ -611,16 +615,41 @@ header, which is how an unknown event looks."
       (ok (= count (length (recorded device))))
       (ok (not (drm:drm-scanout-open-p scanout))))))
 
-(deftest a-card-somebody-is-presenting-on-refuses-to-be-taken
-  ;; EBUSY is the kernel's answer when another master owns the card; the scanout
-  ;; must not have created, mapped or framed a single buffer when it happens.
+(deftest a-card-whose-master-cannot-be-taken-is-programmed-anyway
+  ;; Measured on a VT (D59): logind hands over a descriptor but not the right, so SET
+  ;; MASTER answers EACCES even on a card nobody is using, and wlroots carries on.
+  ;; So does this: the CRTC programming is where the kernel says no, and the scanout
+  ;; records that it does not hold master, which is what closing it needs to know.
   (let ((device (new-screen-device :master-error t)))
+    (let ((scanout (drm:drm-open-scanout device)))
+      (unwind-protect
+           (let ((kinds (call-kinds device)))
+             (ok (eq :take-master (first kinds)) "SET MASTER was asked, and refused")
+             (ok (member :set-crtc kinds) "and the CRTC was programmed anyway")
+             (ok (not (drm:drm-scanout-master-p scanout))
+                 "the scanout does not claim a master it does not hold")
+             (ok (not (drm:drm-device-master-p device))))
+        (drm:drm-close-scanout scanout))
+      (let ((kinds (call-kinds device)))
+        (ok (not (member :drop-master kinds))
+            "nothing is dropped that was never taken")
+        (ok (= 2 (count :set-crtc kinds))
+            "and the CRTC's saved state is still put back")))))
+
+(deftest a-crtc-that-cannot-be-programmed-leaves-nothing-taken
+  ;; With master best effort, the refusal that matters is the CRTC's: everything
+  ;; the open built has to go away, and no master may be dropped that was not held.
+  (let ((device (new-screen-device :program-error t)))
     (let ((condition (handler-case (drm:drm-open-scanout device)
                        (drm:drm-error (condition) condition))))
       (ok (typep condition 'drm:drm-error))
-      (ok (eq :take-master (drm:drm-error-operation condition)))
-      (ok (= ffi:+ebusy+ (drm:drm-error-errno condition)))
-      (ok (equal '(:take-master) (call-kinds device)))
+      (ok (eq :program-crtc (drm:drm-error-operation condition)))
+      (ok (= ffi:+eacces+ (drm:drm-error-errno condition)))
+      (let ((kinds (call-kinds device)))
+        (ok (= 2 (count :destroy-dumb kinds)) "both buffers were destroyed")
+        (ok (member :set-crtc kinds) "the CRTC's saved state was put back")
+        (ok (eq :drop-master (car (last kinds)))
+            "and master, which this card did grant, is dropped last"))
       (ok (not (drm:drm-device-master-p device))))))
 
 (deftest a-scanout-that-fails-half-built-undoes-what-it-did
@@ -727,7 +756,7 @@ are real files, so closing them is observable."))
     (values (make-instance 'recording-screen-device
                            :path path :fd fd :driver-name "vkms"
                            :inventory (make-inventory)
-                           :master-error (fake-card-error session))
+                           :program-error (fake-card-error session))
             id)))
 
 (deftest a-seat-enabled-output-opens-its-card-through-the-seat
@@ -796,11 +825,13 @@ are real files, so closing them is observable."))
       (ok (string= (seventh before) (seventh after))
           "and the same mode, not whatever the card prefers now"))))
 
-(deftest an-enable-that-cannot-take-the-card-gives-the-descriptor-back
+(deftest an-enable-that-cannot-program-the-screen-gives-the-descriptor-back
+  ;; Master is best effort now (D59), so the failure that still has to be tidy is the
+  ;; CRTC's: the seat's descriptor goes back and no hook is left behind.
   (let ((session (make-seat)))
     (setf (fake-card-error session) t)
     (ok (signals (vt:open-vt-output session :path "/dev/dri/card0") 'drm:drm-error)
-        "EBUSY is signalled, not swallowed into a half-taken screen")
+        "a CRTC that cannot be programmed is signalled, not swallowed")
     (ok (zerop (session:session-open-device-count session))
         "the seat has no device open")
     (ok (null (session:session-on-enabled session))

@@ -306,7 +306,8 @@ explicitly authorized step (it maps a window on the user's desktop).
       enable/disable state machine; seatd and logind both compiled in (D56)
 - [x] switch callbacks: a card opened through the seat, given back on disable and taken again
       on enable with the screen it remembered (D59)
-- [ ] switch callbacks exercised live: VT away/back from a compositor that owns one (exit gate)
+- [x] switch callbacks exercised live: VT away/back from a compositor that owns one --
+      live on 2026-11-27 with `Ctrl+Alt+F1`/`F2` and in clause 25's round trip (D60)
 - [ ] fallback direct VT path (`VT_GETSTATE`/`VT_ACTIVATE`, `KDGKBMODE`)
 - [x] resources/connectors/encoders/CRTCs; preferred mode; each CRTC's current scanout (D54)
 - [x] `SETCRTC`, `SET MASTER`, and the saved state put back on close (D55)
@@ -317,7 +318,8 @@ explicitly authorized step (it maps a window on the user's desktop).
       timestamps checked (D55)
 - [ ] frame callbacks with the kernel's real timestamps
 - [x] VT teardown and restore on every way out (`Alt+Esc`, SIGINT/SIGTERM/SIGHUP) (D59)
-- [ ] VT switch away/back observed live (exit gate)
+- [x] VT switch away/back observed live: 19 checks with `CL_DRM_SWITCH_VT=1`, then by hand
+      with the compositor's own keys (D60)
 - [ ] hotplug add/remove; output re-layout (4d; the libinput udev context is implemented)
 - [ ] suspend/resume hooks
 

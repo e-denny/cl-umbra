@@ -2971,3 +2971,74 @@ the live run on a VT -- has **not been performed**, because it needs a text cons
 card that this session cannot arrange without taking the screen from the person using it. The
 lesson: **a descriptor is the only thing that survives a VT switch, so the module that owns one
 must also own the close -- everything else about a session is a callback.**
+
+---
+
+## D60 — Master is best effort, and the keyboard is the compositor's
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** 4d-3 on real hardware (phase 4's first console run)
+
+D59 shipped a VT compositor that had never run on a VT. The console run found three
+things the unit tests and the virtual card could not: SET MASTER is refused on a
+descriptor logind hands over, libinput takes the keyboard away from the kernel, and a
+VT session cannot use `wayland-0` while the session's compositor is alive. This entry
+amends D55 (master or nothing) and D59 (the VT path) with what was measured.
+
+**Decision.**
+
+1. **A refused SET MASTER is not a failure; the CRTC programming is the judge.**
+   Measured on this machine: the descriptor opened through libseat on VT 2, SET MASTER
+   answered `EACCES`, and then `SETCRTC` at `3840x2160` **succeeded**, the frame was
+   flipped, the kernel retired it (`flip sequence 464`), and the CRTC was restored from
+   the state saved at open. So D55's `EBUSY`-or-nothing rule was wrong for a VT: master
+   is best effort, as it is in wlroots, and the honest error is the one the modeset
+   gives. `drm-open-scanout` tolerates `EACCES`/`EBUSY`, records that it does not hold
+   master, and carries on.
+2. **Nothing asks the card whether we are master.** libdrm's `drmIsMaster` is not a
+   query: disassembling `/usr/lib/libdrm.so.2` shows one `DRM_IOCTL_SET_MASTER` call and
+   a compare against `-EACCES` -- so asking *tries to take master*, and answers "yes"
+   for any errno that is not `EACCES` (including `EBUSY`). A gate that probed with it
+   consumed the single master grant its marker was meant to observe, which is how this
+   was found. The record is now exactly what `DRM-TAKE-MASTER` and `DRM-DROP-MASTER`
+   were told by the kernel; `DRM-DESCRIBE-FD` records nothing.
+3. **Closing restores whatever was saved, and drops only what was taken.** A scanout
+   that programmed the CRTC owes it a restore even without master (the attempt is made
+   and a refusal reported); master is dropped only when this process took it.
+4. **The keyboard belongs to the compositor, so the VT keys must too.** libinput grabs
+   the evdev devices, so `Ctrl+Alt+F1` never reaches the kernel's console handler and
+   the kernel never switches -- this is why X and sway bind the sequence themselves. A
+   VT session now binds `Ctrl+Alt+F1..F12` to `switch-session-to`; the switch is a
+   request, a refusal is logged and swallowed (a compositor must not die of it), and a
+   switch asked for before the seat is open is a Lisp `session-error` -- libseat's
+   `libseat_switch_session` asserts in C, and an assertion failure takes the image.
+5. **A VT session's socket is `tinywl-1`, not `wayland-0`.** The session's compositor
+   is usually still alive on `wayland-0` and its lock is live (measured: "another server
+   holds the lock"), so the VT default moved to the name the nested backend already uses,
+   `--display` still overrides it, and a `socket-in-use` failure now says so.
+6. **The gate's own socket is per run and closed at the end.** One fixed name left a
+   live lock behind after a killed probe, which would make the next run fail for a
+   reason that has nothing to do with the card.
+
+**Evidence.** Real hardware, this machine, 2026-11-27: `scripts/drm-tinywl-gate.sh`
+**13 checks, 0 failed** (seat enabled, one device open, `3840x2160` on `HDMI-A-1`,
+master refused and noted, two buffers, a frame drawn and flipped, the kernel's own
+`flip-complete` for that CRTC, pitch `15360` for 3840 pixels, the CRTC's framebuffer and
+mode restored, descriptors `14 -> 14`), and with `CL_DRM_SWITCH_VT=1` **19 checks, 0
+failed** (`flip sequence 702`, the switch disabled the seat, the output gave the screen
+back, the return switch was granted, the seat enabled again, the output took the screen
+by itself, descriptors `15 -> 15`). `cl-tinywl --drm` then ran a real desktop on the
+console with real libinput: pointer, typing, `Alt+Shift+Return`, `Alt+Esc` back to the
+console, and (after decision 4) `Ctrl+Alt+F1` to Umbriel and `Ctrl+Alt+F2` back to a
+screen that re-took itself with the window still open. Suite: **442 tests in eighteen
+suites** (`PASSED`), `./scripts/gate.sh` **23 passed, 0 failed, 2 skipped** (clause 22
+still has no virtual card here; clause 25 skips inside a session that is not the
+console's). The hardware half of D58 ran for the first time in the same run: the scene
+with its cursor drawn into a 3840x2160 scanout at the driver's pitch and flipped.
+What this does not do: no output hotplug (nothing listens for it yet), no
+suspend/resume hooks, no per-buffer damage history (a switch and every frame repaint
+fully), no triple buffering, no hardware cursor, and the 8-hour soak has not been run.
+The lesson: **a VT is the only place where the difference between "the kernel said yes"
+and "the library said maybe" costs a console run to find -- so measure the ioctl, not
+the helper that wraps it.**

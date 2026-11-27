@@ -129,9 +129,12 @@ buffer at the driver's pitch, because this design has no cursor plane. **4d-3** 
 (D59): `cf.backend.vt` takes the card the way a VT requires -- `libseat` opens it, the compositor
 adopts the descriptor without opening the path, and every disable gives the screen and the
 descriptor back while every enable reprograms the screen it remembered -- and `cl-tinywl --drm`
-is a compositor on a VT with that output behind its frame hooks. What is left in phase 4 is the
-exit gate itself: the five items that need a person at a text console (TTY session, VT round
-trip, hotplug, soak, suspend). `cl-umbra` and a nested window on a foreign compositor are still
+is a compositor on a VT with that output behind its frame hooks. The console run then happened
+(D60): the card came through logind, `SET MASTER` was refused and the mode was set anyway, a frame
+was retired by the kernel, the CRTC was restored, and the compositor took the screen back after a
+VT switch -- so master is best effort and the CRTC is the judge, and the VT keys are the
+compositor's because libinput holds the keyboard. Of phase 4's exit gate, items 1 (TTY session) and
+2 (VT round trip) are walked; hotplug, suspend/resume and the 8-hour soak remain. `cl-umbra` and a nested window on a foreign compositor are still
 their plan.
 
 ## 2. Packages

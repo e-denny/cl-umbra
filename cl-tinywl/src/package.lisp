@@ -33,6 +33,8 @@ compositor, and how a session starts and stops.")
    #:edges-at
    #:pointer-reach
    #:install-keybindings
+   #:install-vt-bindings
+   #:tinywl-vt-seat
    #:close-toplevels
    #:parent-socket-path
    #:launch
