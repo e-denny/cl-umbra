@@ -46,6 +46,7 @@ compositor, and how a session starts and stops.")
    #:session-nested
    #:session-vt-output
    #:session-seat
+   #:session-input
    #:start
    #:advance
    #:run

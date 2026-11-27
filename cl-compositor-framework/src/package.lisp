@@ -686,6 +686,8 @@ tests drive; the context and the event pointers are the C half.")
    #:stop-input
    #:suspend-input
    #:resume-input
+   #:suspend-input
+   #:resume-input
    #:poll-input
    #:add-input-device
    #:input-fd
@@ -1035,7 +1037,9 @@ that, so a compositor chooses it by binding START-SWITCHER.")
                 #:switcher-selected)
   (:import-from #:cf.backend.libinput
                 #:start-input
-                #:stop-input)
+                #:stop-input
+                #:suspend-input
+                #:resume-input)
   (:import-from #:cf.backend.vt
                 #:vt-output
                 #:open-vt-output
@@ -1117,6 +1121,8 @@ docs/framework.md §1 follow.")
    #:inject-pointer-axis
    #:start-input
    #:stop-input
+   #:suspend-input
+   #:resume-input
    #:compositor-frame-count
    #:write-png
    #:write-frame-png

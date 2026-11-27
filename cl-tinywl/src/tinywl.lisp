@@ -416,7 +416,8 @@ make the parity script meaningless."
    ;; card the seat hands out.  A compositor that keeps these alive is a compositor
    ;; that gives the screen back on the way out, which is the whole of 4d-3.
    (vt-output :initarg :vt-output :initform nil :reader session-vt-output)
-   (seat :initarg :seat :initform nil :reader session-seat))
+   (seat :initarg :seat :initform nil :reader session-seat)
+   (input :initarg :input :initform nil :reader session-input))
   (:documentation
    "A running tinywl: its compositor, and the backend behind it -- nested, or a VT."))
 
@@ -518,6 +519,7 @@ one was refused (~A): run tinywl --drm from a text console, not from inside a
 compositor that already owns the screen"
                           condition))))
          (output nil)
+         (input nil)
          (tinywl nil))
     (handler-case
         (progn
@@ -548,11 +550,25 @@ needs a seat that is usable now, which is what dispatch inside OPEN-SESSION is f
              seat (lambda (session)
                     (declare (ignore session))
                     (cf:request-frame tinywl)))
+            ;; Real devices, which is the difference between a screen with a
+            ;; picture on it and a compositor: libinput opens them through the same
+            ;; seat its context was given (D56), and a VT switch suspends and
+            ;; resumes it around the seat's own disable and enable.
+            (let ((driver (cf:start-input tinywl :session seat)))
+              (setf input driver)
+              (seat:add-session-disable-hook
+               seat (lambda (session)
+                      (declare (ignore session))
+                      (cf:suspend-input driver)))
+              (seat:add-session-enable-hook
+               seat (lambda (session)
+                      (declare (ignore session))
+                      (cf:resume-input driver))))
             (install-stop-signals tinywl)
             (cf:request-frame tinywl))
           (when launch (launch tinywl :command launch))
           (make-instance 'session :mode :drm :compositor tinywl
-                                  :vt-output output :seat seat))
+                                  :vt-output output :seat seat :input input))
       (error (condition)
         ;; A half-started VT session holds the screen: give it back before the error
         ;; reaches the person who typed the command.
@@ -619,10 +635,13 @@ both a signal handler and the caller's UNWIND-PROTECT can reach this."
   (let ((nested (session-nested session))
         (compositor (session-compositor session))
         (vt-output (session-vt-output session))
-        (seat (session-seat session)))
+        (seat (session-seat session))
+        (input (session-input session)))
     ;; The screen goes back first, while the descriptor, the buffers and the
     ;; CRTC's saved state are all still here.  Closing the display first would only
     ;; work because nothing else fails; this order is the one that is true.
+    (when input
+      (ignore-errors (cf:stop-input input)))
     (when vt-output
       (ignore-errors (vt:close-vt-output vt-output)))
     (when seat

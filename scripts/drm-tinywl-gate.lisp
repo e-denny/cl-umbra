@@ -58,6 +58,22 @@
 (defun fd-count ()
   (length (uiop:directory-files #p"/proc/self/fd/")))
 
+(defun current-vt ()
+  "The VT this process is on: XDG_VTNR from the login, else what the kernel says.
+
+Switching *back* needs this and not a constant: on a machine whose first VT runs a
+compositor, a probe on VT 2 that switched back to VT 1 would hand the screen to
+that compositor in the middle of the test -- a wrong answer, and a different one
+each run."
+  (or (ignore-errors (parse-integer (uiop:getenv "XDG_VTNR")))
+      (let ((path #p"/sys/class/tty/tty0/active"))
+        (when (probe-file path)
+          (with-open-file (stream path)
+            (let ((line (read-line stream nil nil)))
+              (when (and line (> (length line) 3) (string= "tty" line :end2 3))
+                (ignore-errors (parse-integer line :start 3)))))))))
+
+
 (defun card-of (path)
   (string-right-trim "/" (file-namestring path)))
 
@@ -208,30 +224,53 @@ another compositor's"
                        ((null vt)
                         (note "no VT switch performed: set CL_DRM_SWITCH_VT=N to switch there and back (that is a manual round trip, docs/testing.md §11)"))
                        (t
-                        (note "switching to VT ~D" vt)
-                        (cf.session:switch-session-to session vt)
-                        (let ((waited 0))
-                          (loop while (and (< waited 200)
-                                           (cf.session:session-enabled-p session))
-                                do (cf.session:dispatch-session session :timeout 10)
-                                   (incf waited))
-                          (check (not (cf.session:session-enabled-p session))
-                                 "the switch disabled the seat: the seat is a subscription")
-                          (check (not (cf.backend.vt:vt-output-enabled-p output))
-                                 "and the output gave the screen back")
-                          (note "switching back to the VT this gate is running on")
-                          (cf.session:switch-session-to session 1)
-                          (let ((waited 0))
-                            (loop until (or (>= waited 200)
-                                            (cf.session:session-enabled-p session))
-                                  do (cf.session:dispatch-session session :timeout 10)
-                                     (incf waited))
-                            (check (cf.session:session-enabled-p session)
-                                   "coming back enabled the seat again")
-                            (check (cf.backend.vt:vt-output-enabled-p output)
-                                   "and the output took the screen again, by itself")
-                            (check (>= (cf.backend.vt:vt-output-enable-count output) 2)
-                                   "with the enable counted"))))))
+                        (let ((here (current-vt)))
+                          (cond
+                            ((null here)
+                             (note "this process does not say which VT it is on
+(XDG_VTNR unset, /sys/class/tty/tty0/active unreadable), so the round trip is not
+attempted: switching back to a guess is how a probe steals a compositor's VT"))
+                            ((= here vt)
+                             (note "CL_DRM_SWITCH_VT names the VT this gate is already on (~D): nothing to switch to" vt))
+                            (t
+                             (check (plusp here)
+                                    "this gate knows which VT it is on (~D), so it can come back" here)
+                             (note "switching to VT ~D" vt)
+                             (handler-case (cf.session:switch-session-to session vt)
+                               (error (condition)
+                                 (note "the switch request failed: ~A" condition)))
+                             (let ((waited 0))
+                               (loop while (and (< waited 200)
+                                                (cf.session:session-enabled-p session))
+                                     do (cf.session:dispatch-session session :timeout 10)
+                                        (incf waited))
+                               (check (not (cf.session:session-enabled-p session))
+                                      "the switch disabled the seat: the seat is a subscription")
+                               (check (not (cf.backend.vt:vt-output-enabled-p output))
+                                      "and the output gave the screen back"))
+                             ;; The way back is the person's: polkit lets the
+                             ;; *active* session activate a VT, and after the switch
+                             ;; this one is not active.  So the gate asks, and if the
+                             ;; ask is refused it says which keys to press and keeps
+                             ;; dispatching -- the enable it is waiting for arrives
+                             ;; from the kernel through logind either way.
+                             (note "switching back to VT ~D, this gate's own; if that
+is refused (an inactive session may not activate a VT), press Ctrl+Alt+F~D and this
+waits up to a minute for the seat to come back" here here)
+                             (handler-case (cf.session:switch-session-to session here)
+                               (error (condition)
+                                 (note "the return switch was refused: ~A" condition)))
+                             (let ((waited 0))
+                               (loop until (or (>= waited 600)
+                                               (cf.session:session-enabled-p session))
+                                     do (cf.session:dispatch-session session :timeout 100)
+                                        (incf waited))
+                               (check (cf.session:session-enabled-p session)
+                                      "coming back enabled the seat again")
+                               (check (cf.backend.vt:vt-output-enabled-p output)
+                                      "and the output took the screen again, by itself")
+                               (check (>= (cf.backend.vt:vt-output-enable-count output) 2)
+                                      "with the enable counted"))))))))
 
                    ;; Giving it all back, which is what a compositor that exits does.
                    (let ((descriptors-before (fd-count)))
