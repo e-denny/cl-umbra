@@ -506,7 +506,10 @@ buffer keeps its own damage history, so a frame repaints what changed since *tha
 shown, and a frame with nothing to show does not flip at all (D61). The compositor now reports the
 frame's change separately from a buffer's own minimum damage, which is the distinction the whole
 thing turns on -- recording the merged damage would make every frame full after each buffer's
-first paint, and a scanout alternates its buffers by construction. What remains of phase 4:
+first paint, and a scanout alternates its buffers by construction. **Measured on `card1`**
+(2026-11-27) with `scripts/damage-probe.sh`: 30 checks, 0 failed, a steady-state frame repainting
+896 of 8,294,400 pixels, and an idle frame repainting exactly the change it owed and not more.
+What remains of phase 4:
 hotplug (no code yet), suspend/resume (no hooks yet), and the 8-hour soak.
 
 ### Phase 5 — GPU acceleration, only where it earns its place (5-8 weeks)

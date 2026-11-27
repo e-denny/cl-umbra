@@ -675,6 +675,18 @@ Phase 4's fifth slice is the VT, and it adds the twenty-fifth:
     with nothing to show does not flip but still takes a frame number, and a VT switch
     forgets every buffer.
 
+    A clause cannot answer D61 itself: it renders one frame, and one frame is always full,
+    so the per-buffer history looks exactly like a full repaint from inside this clause.
+    `scripts/damage-probe.sh` (`scripts/damage-probe.lisp`) is the measurement instead --
+    the same seat-taken card, eight frames with a moving pointer, and a sentinel read back
+    out of the buffer the frame did not damage. It lives on §11's checklist rather than in
+    the gate because it wants a console and a card it may take. **Walked 2026-11-27** on
+    `card1` at `3840x2160`: 30 checks, 0 failed; two full frames, then a steady frame that
+    repainted **896 of 8,294,400 pixels**, an idle frame that repainted exactly the change
+    it owed (36x16, inside the 56x16 box it had been shown), an idle frame that did not
+    flip but took a frame number, a sentinel that survived at (10,2150), and the CRTC's
+    framebuffer, mode and descriptor count (`14 -> 14`) put back.
+
 All twenty-five clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
@@ -901,6 +913,12 @@ Preconditions the automated clauses cannot arrange for themselves:
 - [x] `CL_DRM_SWITCH_VT=1 ./scripts/drm-tinywl-gate.sh` from the console: the probe switches
       away, sees the seat disabled, switches back and sees the output enabled again.
       **Walked 2026-11-27**, 19 checks, 0 failed
+- [x] the damage history on a card (D61):
+      `CL_DRM_MODESET_CARD=/dev/dri/card1 CL_DRM_MODESET_ALLOW=1 ./scripts/damage-probe.sh`
+      from the console. **Walked 2026-11-27**: 30 checks, 0 failed -- two full frames, then a
+      steady frame repainting 896 of 8,294,400 pixels, an idle frame repainting exactly the
+      change it owed and the next one not flipping at all, the sentinel intact at (10,2150),
+      and the CRTC and the descriptor count (`14 -> 14`) given back
 - [x] the VT keys with a compositor holding the keyboard: `Ctrl+Alt+F1` away from
       `cl-tinywl`, `Ctrl+Alt+F2` back to it, window still open. **Walked 2026-11-27** (it
       did not work at first -- libinput grabs the keyboard, so the compositor has to bind

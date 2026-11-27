@@ -3113,11 +3113,30 @@ into is filled with `#xFF5A5A5A`; afterwards (10,140) still holds the sentinel, 
 left holds no sentinel and no arrow, and the box it moved to does. One defect was found by that
 test and fixed here rather than after a commit: the preparer's two values came back through
 `prog1`, which keeps only the first, so every "paint this buffer whole" became "nothing to
-repaint" and the second frame drew nothing at all. What this does not do: the hardware half has
-not been re-run for this slice (the VT path was verified on `card1` in D60 with full repaints, and
-a partial repaint is only safe because the two buffers alternate and each flip waits for the
-kernel); no triple buffering (a third buffer could be three frames old, which the history would
-answer with a full repaint rather than with a longer story); no damage gathering across an
-in-flight flip; the nested backend unchanged, as above. The lesson: **buffer age asks what
+repaint" and the second frame drew nothing at all.
+
+**On the card.** `scripts/damage-probe.sh` is the measurement the unit pixels could not make: it
+takes `card1` through a seat exactly as clause 25 does, installs these hooks, flips eight frames
+while the pointer moves, and then reads a sentinel back out of the buffer. Run from a console on
+2026-11-27 at `3840x2160` on `HDMI-A-1`, pitch 15360: **30 checks, 0 failed**. Frames 1-2 are
+`:full` (buffers 159 and 162); frame 3 damages **(0 0 496 286)**, 141,856 of 8,294,400 pixels,
+because its change reaches back to where the cursor was; frames 4-5 settle at **(480 270 56 16)**
+-- **896 pixels**, 0.011% of the mode -- so the two-buffer rotation does not degrade to full;
+frame 6, drawn after the pointer stopped, flips and repaints **(500 270 36 16)** and nothing more,
+which is frame 5's *change* rather than frame 5's merged box **(480 270 56 16)**, so the per-buffer
+obligation is measured and not merely argued; frame 7 owes nothing, changes nothing, is drawn and
+**not flipped**, and still advances the sequence 6 -> 7; frame 8 repaints **(520 270 36 16)** and
+leaves `#xFF5A5A5A` intact at **(10, 2150)** while both 16x16 boxes inside the damage are clean of
+it. Closing gives the CRTC's framebuffer and mode back, and the descriptor count is `14 -> 14`, the
+same way clause 25 measures it. Two probe defects were found and fixed before this was accepted,
+and both are worth the sentence: `cf:render-frame` answers the pixman target, not the dumb buffer,
+so the buffer has to be read from `drm-scanout-next-buffer` before the draw; and an "idle" frame in
+a two-buffer rotation is *not* empty -- it owes the change of the frame it missed, which is
+precisely this decision -- so asserting that it does not flip was asserting the absence of the
+feature.
+
+What this does not do: no triple buffering (a third buffer could be three frames old, which the
+history would answer with a full repaint rather than with a longer story); no damage gathering
+across an in-flight flip; the nested backend unchanged, as above. The lesson: **buffer age asks what
 changed on the screen, not what a buffer was made to repaint -- the two answers differ on exactly
 one frame, and that frame decides whether incremental rendering ever starts.**

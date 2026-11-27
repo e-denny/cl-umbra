@@ -314,7 +314,8 @@ explicitly authorized step (it maps a window on the user's desktop).
 - [x] dumb buffers: create/map/addfb (D54)
 - [x] double buffering: two buffers, present waits for the flip that retires the frame (D55)
 - [x] per-buffer damage history: each scanout buffer repaints what changed since it was last
-      shown, and a frame with nothing to show does not flip (D61)
+      shown, and a frame with nothing to show does not flip (D61; measured on `card1` 2026-11-27:
+      896 of 8,294,400 pixels on a steady frame, 30 checks, 0 failed)
 - [ ] triple buffering
 - [x] `PAGE_FLIP` + `read()` of the kernel's completion event; monotonic sequences and
       timestamps checked (D55)
