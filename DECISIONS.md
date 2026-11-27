@@ -2743,3 +2743,100 @@ touch, tablet, gesture or switch events, no cursor in the scanout buffer, no `wl
 repeat handling beyond what phase 3 had. The lesson: **the honest test of a permission is
 opening the file, and the honest test of availability is the callback -- everything else is a
 guess about somebody else's machine.**
+
+---
+
+## D57 — The keymap is the library's, and it comes from the session
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** the keymap (phase 4, fourth slice, first part)
+
+Phase 3 owed clients a keymap it wrote itself: a table of forty-odd keys serialized into XKB
+text by hand, self-contained, small enough to diff. It could not be a keyboard layout, and D28
+said so -- libxkbcommon belongs with libinput. This slice links it, and `cf.input` becomes what
+wlroots' keyboard code is.
+
+**Decision.**
+
+1. **The keymap is compiled from the rules, not written out.** `xkb_keymap_new_from_names` with
+   rules `evdev`, model `pc105` and whatever `XKB_DEFAULT_LAYOUT`/`_VARIANT`/`_OPTIONS` say.
+   That is the whole point: a user's layout configures this compositor the way it configures
+   every other one, and nothing in this tree needs to know that code 21 is `y` here and `z`
+   there. The hand-written table is deleted rather than kept as a fallback: two keymaps that
+   disagree is exactly the defect the table's own history kept producing (TLDE missing, the
+   off-by-eight, the modifier column).
+
+2. **What a client receives is the merged map, serialized by the library.**
+   `xkb_keymap_get_as_string` writes the resolved map -- every `include` expanded, four levels
+   per key, dead keys and all -- into a sealed memfd the seat already knew how to send (D28).
+   The protocol's requirement is that the client needs no access to `/usr/share/X11/xkb`; the
+   serialized map is how that stays true, and parsing it back (`keymap-from-string`) is how this
+   project checks that the text *is* the keymap (clause 24). On this machine the default map is
+   35,757 bytes; the phase-3 hand-written one was about two thousand, and neither number matters
+   to a memfd.
+
+3. **A bad layout is two different answers.** `compile-keymap` with names of your own signals
+   `keymap-error` when they do not compile -- the mistake is the caller's, and a silent fallback
+   would hide a typo in a config. The *session's* keymap (`default-keymap`) falls back to
+   `evdev`/`pc105`/`us` with one line on stderr: refusing to start a compositor because
+   `XKB_DEFAULT_LAYOUT` has a typo is worse than starting with the default layout. Both behaviours
+   are asserted, because they are the two ways this can be wrong.
+
+4. **Keysyms are the index, not names.** A binding is written with a name (`"Tab"`, `"Alt_L"`),
+   and the reverse lookup has to answer two things a name-keyed table could not: case
+   insensitivity (`"f2"` is `F2`) and shifted keysyms (`"asciitilde"` finds the key that types
+   it). So the index is keysym -> keycode, built once by walking the keymap's keycodes and levels
+   with the levels *outside* the codes, so a key's unshifted keysym wins over its shifted one.
+   This was found by the gate: a name-keyed index passed `"F2"` and failed `"f2"`, which is the
+   kind of bug a config file produces on a user's first try.
+
+5. **A key's name comes from its unshifted level.** `key-name-for-code` answers the name a
+   binding is written with, and a binding names a key rather than a key-plus-shift. What the key
+   *types* in the current state is a different question, and it has its own answer
+   (`modifiers-keysym`/`-name`), which is what a client's own keymap does with the code it is
+   sent. `keycode` now takes an optional keymap for the same reason: the gate asks a `de` map and
+   a `us` map in the same process, and a function that could only ask the ambient one would be
+   untestable where it matters.
+
+6. **The masks are the keymap's, and the constants are checked against it.** Shift is bit 0 and
+   Mod1 is bit 3 in the standard rules, and a binding table is full of `+MODIFIER-MOD1+`. Rather
+   than assume, `keymap-modifier-mask` reads the mask out of the compiled keymap (Mod4 is 64
+   because Mod2 and Mod3 sit between), and the module asserts at load time that the four
+   constants agree -- a reordered keymap fails at load instead of mis-dispatching every Alt
+   binding with no error anywhere.
+
+7. **The state is an `xkb_state`, so the seat reports the library's answer.** Depressed, latched,
+   locked and the effective group are `xkb_state_serialize_*` on a state updated per key event.
+   Caps Lock is no longer special-cased: the compatibility rules decide, and what they decide is
+   *not* what the hand-written table did -- measured against the same keymap from C, a tap's press
+   applies the lock and the *second* tap's release clears it, where the old table toggled on the
+   press. So the test asserts the contract a person has (one tap locks, the next unlocks) and not
+   the intermediate masks, which belong to the library.
+
+8. **The environment claim is tested from outside the process.** libxkbcommon reads
+   `XKB_DEFAULT_*` when a keymap is compiled, so a single image cannot show that a layout is the
+   session's. Clause 24 runs the same probe twice, with `XKB_DEFAULT_LAYOUT=us` and `=de`, and
+   each run is told which letter code 21 must type. That is the cheapest honest test of "the
+   layout is not ours" that does not need a second machine.
+
+**Evidence.** `scripts/xkb-gate.sh` (clause 24): **90 checks** in two layouts (45 each), 0
+failed. The default keymap serializes to 35,757 bytes, keycodes 9..709; the serialized text
+parses back and names all eleven sampled codes identically and still types `A` with Shift held;
+`us` types `y` at code 21 and `de` types `z` there and `y` at 44; `Tab` = 15, `F2` = 60,
+`f2` = 60, `asciitilde` = 41 in `us`; Shift/Mod1/Mod4 are #x1/#x8/#x40 and `Alt_L` sets exactly
+Mod1; a letter repeats and `Control_L` does not; the state reports #x1 depressed after a Shift
+press and group 0, and a Caps Lock tap locks and the next unlocks. The seat gate (clause 12) now
+has a real client parse a rules-compiled map: `keymap: parses standalone, keycodes 9..709`, key
+16 with `unicode: 81` as before, descriptors flat. The focus gate (33 checks), the switcher gate
+(75) and tinywl parity (53 + 62) are unchanged -- which is the evidence that the names, the masks
+and the bindings still line up, since those gates dispatch Alt+Tab, Alt+F1 and Alt+Esc by name.
+Seventeen unit tests replace the eight that pinned the hand-written table, taking the suite from
+**413 tests in seventeen suites** to **422**. `libxkbcommon.so.0` becomes a load-time dependency
+of `cl-compositor-framework`, beside `libdrm`, `libseat` and `libinput`; the purity clause still
+finds no libwayland or libwlroots. What this does not do: no per-device layouts, no
+`xkb_state_key_get_utf8` feeding a text-input path, no compose or dead-key handling above the
+keymap (a client applies the map itself), no `input-method`, no LED state, and the keymap is
+still one per seat rather than one per keyboard. The lesson: **a layout is a fact about the
+session, so anything this project says about a key has to be a question to the keymap -- the
+moment it is a table here, it is wrong in another country.**

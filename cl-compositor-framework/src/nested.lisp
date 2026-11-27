@@ -750,10 +750,10 @@ a picture nobody is looking at."
       (:key
        (destructuring-bind (serial time key state) arguments
          (declare (ignore serial time))
-         ;; wl_keyboard.key carries the evdev code, which our table can look up.
-         ;; A key this compositor has no name for is not forwarded: sending the
-         ;; wrong name would be worse than dropping one key.
-         (let ((name (handler-case (input:key-name key) (error () nil))))
+         ;; wl_keyboard.key carries the evdev code, and the keymap names it.  A
+         ;; key this compositor has no name for is not forwarded: sending the wrong
+         ;; name would be worse than dropping one key.
+         (let ((name (handler-case (input:key-name-for-code key) (error () nil))))
            (when name
              (incf (slot-value backend 'key-count))
              (cf:inject-key compositor name

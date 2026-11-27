@@ -523,20 +523,22 @@ focus stack, cursor shapes and touch are still ahead.*
 - **Capabilities** are recomputed from actual devices and re-advertised on change. Today the
   headless backend advertises `pointer|keyboard`; touch is not advertised and `get_touch` is
   refused with `missing_capability`, which is what the protocol asks for.
-- **Keymap**: one keymap per seat, serialized into a memfd and sent via `wl_keyboard.keymap`,
-  with `repeat_info` after it (D28). `cf.input` generates the text from a table of keys — evdev
-  code, keysyms, the modifier each key sets — so nothing links libxkbcommon yet. The table covers
-  what a terminal session needs (Escape, F1–F4, the main block with its shifted keysyms,
-  modifiers, Return/BackSpace/Tab, the arrows and the editing keys), and a key that is *not* in
-  the table cannot be typed or bound at all: TLDE — the key between Escape and 1 — was missing
-  until it was found while looking for a binding, which is why `tests/unit/input.lisp` now
-  asserts every row's keycode, that the names are unique, and that the generated text declares
-  each key. A key is looked up by its base keysym (`"Escape"`, `"grave"`), its shifted keysym
-  (`"asciitilde"`) or its XKB name (`"ESC"`, `"TLDE"`). Phase 4c added the other direction --
-  `key-entry-for-code` and `key-name-for-code`, an index over the same table -- because libinput
-  reports evdev codes (D56); the slice after this one replaces the *generator* with
-  libxkbcommon's keymaps from libinput devices, and the protocol path and the modifier
-  bookkeeping do not change.
+- **Keymap**: one keymap per seat, compiled with libxkbcommon and sent via
+  `wl_keyboard.keymap` as a sealed memfd, with `repeat_info` after it (D28). The keymap is
+  compiled from the *rules* — `evdev` model, and the layout, variant and options the session
+  asked for through `XKB_DEFAULT_*` — and serialized with `xkb_keymap_get_as_string`, so what a
+  client receives is the merged layout (four levels per key, dead keys and all) with no need for
+  `/usr/share/X11/xkb` of its own (D57). Everything a compositor asks about a keyboard is then a
+  question to the keymap: `key-name-for-code` names an evdev code from its unshifted level,
+  `keycode` turns a binding's keysym name back into a code (case-insensitively, and a shifted
+  keysym like `"asciitilde"` finds the key that types it), `key-modifier-mask` presses a key in a
+  throwaway `xkb_state` to see what it sets, and `modifiers` *is* an `xkb_state`: the modifiers a
+  client is told about are the library's serialization of depressed, latched, locked and the
+  effective group. The `+modifier-*+` masks a binding table writes are checked against the
+  compiled keymap when it is compiled, because a reordered keymap otherwise mis-dispatches every
+  Alt binding silently. A layout the session names but the rules do not have is signalled by
+  `compile-keymap`; the *session's* keymap falls back to `evdev`/`pc105`/`us` with a line on
+  stderr rather than stopping a compositor over a preference.
 - **Input without a device**: `send-key-event` and `send-pointer-motion`/`-button`/`-axis` are
   the seam a backend calls; the headless backend wraps them as `cf:inject-*` so a test can type
   at a real client, and `cf.backend.libinput` calls the same four functions from real events

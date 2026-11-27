@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset drm-demo input tinywl soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset drm-demo input xkb tinywl soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset input tinywl
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset input xkb tinywl
 
 test:
 	./scripts/run-tests.sh
@@ -102,6 +102,11 @@ drm-demo:
 # grabbed, and a session another client controls is a skip (D56).
 input:
 	./scripts/input-gate.sh
+
+# The keymap: compiled from the session's rules, run once with XKB_DEFAULT_LAYOUT=us
+# and once with =de, parsed back to itself, masks and state checked (D57).
+xkb:
+	./scripts/xkb-gate.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:

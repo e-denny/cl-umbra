@@ -119,9 +119,13 @@ calls phase 3 already had: evdev codes named through `cf.input`'s table, pointer
 accumulated and clamped into the output, named buttons, scroll values, devices tracked by
 sysname. Access is the `input` group rather than a seat protocol (D56): nothing is grabbed and
 the session keeps its keyboard, and the gate proves the device path while a live compositor
-holds the session. What is left in phase 4 is 4d: tinywl on DRM with libxkbcommon, a cursor in
-the scanout buffer, and the five exit-gate items (TTY session, VT round trip, hotplug, soak,
-suspend). Tinywl, `cl-umbra` and a nested window on a foreign compositor are still their plan.
+holds the session. Phase 4d starts with the keymap (D57): `cf.input` is now libxkbcommon -- the keymap
+compiled from the session's rules and serialized for clients, names and keycodes answered by the
+keymap (keysyms indexed rather than names, so case and shifted keysyms work), modifier masks read
+from it and checked against the binding constants at load, and an `xkb_state` behind the
+modifiers a client is told about, so Caps Lock is the compatibility rules' business rather than a
+special case. What is left in phase 4 is the rest of 4d: tinywl on DRM, a cursor in the scanout
+buffer, and the five exit-gate items (TTY session, VT round trip, hotplug, soak, suspend). Tinywl, `cl-umbra` and a nested window on a foreign compositor are still their plan.
 
 ## 2. Packages
 

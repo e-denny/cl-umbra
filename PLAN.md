@@ -483,8 +483,13 @@ seat (34 checks, 1 skip: the live session's seat, which logind will not hand to 
 controller). What it deliberately does not have yet: touch/tablet/gesture decoding, libxkbcommon
 keymaps, VT callbacks exercised live, hotplug inside a running compositor.
 
-Remaining in phase 4: **4d** puts tinywl on DRM with libxkbcommon keymaps, a software cursor in
-the scanout buffer, and then walks the five exit-gate items above.
+**4d** started with the keymap, which landed as D57: `cf.input` is libxkbcommon now -- the map
+compiled from the session's rules (`XKB_DEFAULT_LAYOUT` and friends) and serialized for clients,
+names and codes answered by the map, masks read from it and checked against the binding
+constants, and an `xkb_state` behind what the seat reports. Clause 24 runs the probe in two
+layouts (`us`, `de`) so that "code 21 types a different letter" is measured rather than assumed
+(90 checks). What remains of 4d: tinywl on DRM with a software cursor in the scanout buffer, and
+then the five exit-gate items above.
 
 ### Phase 5 — GPU acceleration, only where it earns its place (5-8 weeks)
 

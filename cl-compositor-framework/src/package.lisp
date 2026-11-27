@@ -62,23 +62,44 @@ modifier mask each key sets.  Phase 4 adds libxkbcommon here, for real layouts a
 device-specific keymaps from libinput; the protocol and the rest of the framework
 already speak in keycodes and masks, so that change stays inside this package.")
   (:export
-   #:+keys+
-   #:key-entry
+   ;; the keymap
+   #:keymap
+   #:keymap-error
+   #:keymap-error-detail
+   #:compile-keymap
+   #:default-keymap
+   #:unref-keymap
+   #:keymap-text
+   #:keymap-from-string
+   #:make-keymap
+   #:keymap-rules
+   #:keymap-model
+   #:keymap-layout
+   #:keymap-variant
+   #:keymap-options
+   #:keymap-min-keycode
+   #:keymap-max-keycode
+   ;; names and codes
    #:keycode
    #:xkb-keycode
-   #:key-name
-   #:key-entry-for-code
    #:key-name-for-code
-   #:key-modifier
+   #:keysym
+   #:keysym-name
+   #:keymap-syms
+   #:key-repeats-p
+   ;; modifiers
    #:key-modifier-mask
    #:modifier-mask
-   #:make-keymap
+   #:keymap-modifier-mask
    #:modifiers
    #:make-modifiers
+   #:unref-modifiers
    #:modifiers-depressed
    #:modifiers-latched
    #:modifiers-locked
    #:modifiers-group
+   #:modifiers-keysym
+   #:modifiers-keysym-name
    #:update-modifiers
    #:+modifier-shift+
    #:+modifier-lock+

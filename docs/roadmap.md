@@ -322,8 +322,9 @@ explicitly authorized step (it maps a window on the user's desktop).
 - [x] libinput context: udev (assign seat, hotplug) and path (add by name) (D56)
 - [x] keyboard and pointer decoding; per-device settings (tap-to-click, natural scrolling) (D56)
 - [ ] touch, tablet, pad, switch and gesture decoding
-- [ ] xkb keymap compile, state, mods, keysyms, repeat
-- [ ] keymap memfd to clients; device-specific keymaps
+- [x] xkb keymap compile, state, mods, keysyms, repeat (D57)
+- [x] keymap memfd to clients: the rules-compiled map, parsed back and by a real client (D57)
+- [ ] device-specific keymaps (one layout per seat today)
 - [ ] software cursor in the scanout buffer
 
 **Gate:** the PLAN §5 phase 4 list — TTY session, VT switch, hotplug, 8-hour soak, resume.

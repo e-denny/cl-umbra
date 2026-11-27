@@ -10,8 +10,8 @@ compositor framework, and a tinywl port — as the six systems below.
 phase 3e, phase 3f, phase 3g, phase 3i and phase 3's exit gate — `cl-tinywl` — passing, plus
 the first three slices of phase 4 (the DRM card, its connectors and a dumb buffer, D54; the
 screen: master, a mode, page flips and the restore, D55; and the seat plus libinput's devices
-and decode path, D56).**
-`./scripts/gate.sh` checks twenty-three clauses. Phase 0: the unit suite (413 tests, seventeen suites), every vendored protocol compiling,
+and decode path, D56), and the keymap of the fourth (libxkbcommon, D57).**
+`./scripts/gate.sh` checks twenty-four clauses. Phase 0: the unit suite (422 tests, seventeen suites), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections
@@ -105,14 +105,17 @@ What exists:
   device open and close, the disable acknowledged, a VT switch asked for -- D56) and
   `cf.backend.libinput` (udev or path contexts, one flat event stream decoded into the seat:
   evdev codes named through `cf.input`, pointer deltas accumulated and clamped into the
-  output, buttons and scroll, devices tracked by sysname -- D56). `xdg_popup` and
+  output, buttons and scroll, devices tracked by sysname -- D56). `cf.input` is libxkbcommon
+  since 4d: the keymap is compiled from the session's rules and serialized for clients, names,
+  codes and modifier masks are the keymap's answers, and the state behind `wl_keyboard.modifiers`
+  is an `xkb_state` (D57). `xdg_popup` and
   `xdg_positioner` are implemented (menus,
   tooltips, their grabs and their dismissal), a focus stack decides who gets the keys when a
   window closes, `cf.switcher` draws that stack as an `Alt+Tab` overlay (`cf.font` is a 5x7
   bitmap font with a validated table of printable ASCII), and the renderer tracks damage, applies
   buffer scale and the eight buffer
-  transforms, and culls what an opaque window hides. Phase 4's last slice (tinywl on DRM,
-  libxkbcommon keymaps, a cursor in the scanout buffer) is 4d; GPU rendering is phase 5.
+  transforms, and culls what an opaque window hides. What is left of phase 4 is tinywl on
+  DRM and a cursor in the scanout buffer (4d); GPU rendering is phase 5.
 
 ## What this is
 

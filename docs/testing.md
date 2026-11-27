@@ -587,7 +587,34 @@ Phase 4's third slice adds the twenty-third:
     report, absolute devices, unknown keys, scroll sources, device tracking by sysname, and a
     sink that signals not stopping the decoder.
 
-All twenty-three clauses pass. Two details worth knowing: the protocol clause
+Phase 4's fourth slice starts with the keymap, and adds the twenty-fourth:
+
+24. **The keymap: compiled from the session's rules, and the same key somewhere else**
+    (`scripts/xkb-gate.sh`, `scripts/xkb-gate.lisp`). Run **twice**, with
+    `XKB_DEFAULT_LAYOUT=us` and `=de`, because the claim is about the environment: libxkbcommon
+    reads `XKB_DEFAULT_*` when a keymap is compiled, so one image cannot see both answers. Code
+    21 types `y` in `us` and `z` in `de`, and each run is told which to expect; the same code
+    typing a different letter in the two runs is the evidence that a layout is the session's
+    preference and not this build's. Inside each run: the serialized text parses back into a map
+    that names every sampled code the same way and whose state still types `A` with Shift held
+    (the only honest check that what a client receives is the keymap we think we compiled); the
+    keycode range covers every code `wl_keyboard.key` can carry (9..709 on this machine, since
+    modern keymaps include HID usages past evdev's 255); a binding's name finds its code, a
+    shifted keysym finds the key that types it, and a name the layout does not have is an error;
+    the four modifier masks equal the constants binding tables are written with; a letter repeats
+    and `Control_L` does not; and the state reports what a seat reports -- Shift depressed after a
+    press, `A` for code 30 with Shift held, group 0, and a Caps Lock tap locking with the next
+    tap unlocking. 45 checks per layout, **90 in two**. The clause needs no device, no session and
+    no privileges, and clause 12 is where a *real client* parses the keymap fd we send -- it now
+    parses a rules-compiled map and reports `keycodes 9..709`. Seventeen unit tests in
+    `tests/unit/input.lisp` pin the same ground with the API rather than a client: the default
+    keymap compiles and serializes once, a layout the rules do not have is signalled by
+    `compile-keymap` while `default-keymap` falls back and still names `Tab`, `us` and `de` differ
+    on the same code, names round-trip through the library, `xkb-keycode` is evdev + 8, the masks
+    are the keymap's, the state tracks what is held, and `key-name-for-code` answers from the
+    unshifted level and returns `NIL` for a code the layout has nothing for.
+
+All twenty-four clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs

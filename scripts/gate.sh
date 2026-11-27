@@ -118,6 +118,12 @@
 #      A real card has to be named and allowed; a card another session is using
 #      answers EBUSY and this clause skips (D55)
 #
+#  24. the keymap: compiled from the session's rules (run once with
+#      XKB_DEFAULT_LAYOUT=us and once with =de, where the same keycode types a
+#      different letter), serialized and parsed back to itself, its modifier masks
+#      checked against the binding constants, and the state a seat reports -- Shift
+#      types A, a Caps Lock tap locks and the next unlocks (D57)
+#
 #  23. input: the seat this session is already inside, every event node libinput can
 #      open (named, configured, closed with no descriptor leaked), and a raw evdev
 #      event through the decoder into a real compositor -- code 60 fires the F2
@@ -403,6 +409,14 @@ fi
 # (D56).
 printf '\nphase 4 gate: the seat, the devices and the decode chain\n\n'
 
+xkb_status=0
+gb "$log_dir/xkb.log" "$repo_root/scripts/xkb-gate.sh" || xkb_status=$?
+if [ "$xkb_status" -eq 0 ]; then
+  pass 'keymap' "$(grep -a '^xkb-gate: ' "$log_dir/xkb.log" | tail -n 1 | sed 's/^xkb-gate: //')"
+else
+  fail 'keymap' 'a keymap did not compile, parse back, or name its keys' "$log_dir/xkb.log"
+fi
+
 input_status=0
 gb "$log_dir/input.log" "$repo_root/scripts/input-gate.sh" || input_status=$?
 if [ "$input_status" -eq 0 ]; then
@@ -432,7 +446,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack, the switcher, the card, the screen and the input)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack, the switcher, the card, the screen, the input and the keymap)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi
