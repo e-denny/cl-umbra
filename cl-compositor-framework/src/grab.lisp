@@ -216,6 +216,11 @@ know where the edges are and the position is free."))
    ;; Last size asked for, so a quiet pointer does not send a configure per event.
    (requested-width :initarg :start-width :accessor resize-grab-requested-width)
    (requested-height :initarg :start-height :accessor resize-grab-requested-height)
+   ;; The size the client is believed to have: updated only when a commit shows it
+   ;; has changed, so a commit that is a repaint and nothing else does not undo a
+   ;; placement made for a request still in flight (D53).
+   (seen-width :initarg :seen-width :accessor resize-grab-seen-width)
+   (seen-height :initarg :seen-height :accessor resize-grab-seen-height)
    ;; The edge that must not move: the opposite one's position at the start.  A
    ;; resize from the left edge keeps the right edge where it was, so the node's
    ;; position is derived from it and the client's *actual* size (D42).
@@ -234,10 +239,21 @@ know where the edges are and the position is free."))
 
 A resize asks the client for a size and the client answers with one, so the node's
 size is not the grab's to set.  What the grab *can* do is keep the edge opposite the
-one being dragged still: dragging the left edge moves the window's left side while
-its right side stays put, which is what a person sees themselves doing.  It is
-anchored to the client's real size (GRAB-ANCHORED), not to the size requested, so
-the window never slides while its content does not (D42)."))
+one being dragged still while the dragged edge follows the pointer: dragging the left
+edge moves the window's left side under the hand and lets its right side stay put.
+
+The placement happens twice, and the two calls are different questions.  On every
+motion the window is placed at the size the drag *asked for* (PLACE-ANCHORED with the
+requested size), so the edge under the pointer is under the pointer now rather than
+one configure round trip later (D53).  When the client's answer arrives the window is
+placed at the size the client *chose* (GRAB-ANCHORED), which is the same place for a
+client that honours the configure and keeps the anchored edge exact for one that does
+not (D42).
+
+What is inside the window is the client's: while the answer is in flight the content
+is still the old size, so it is either short of the far edge or overlapping it by the
+difference.  That is the trade this makes -- the hand leads, the pixels follow -- and
+it is what every compositor with client-side decorations shows."))
 
 (defun node-geometry (node)
   "The window NODE's geometry in its own coordinates: (values x y width height).
@@ -272,6 +288,8 @@ unbounded, which is what a compositor that does not know its output gets."
                    :start-y y
                    :start-width (max 1 width)
                    :start-height (max 1 height)
+                   :seen-width (max 1 width)
+                   :seen-height (max 1 height)
                    :edges edges
                    :min-width min-width
                    :min-height min-height
@@ -327,27 +345,54 @@ cannot draw."
                        (t start-height))))
      (max min-height (if max-height (min wanted max-height) wanted)))))
 
+(defun place-anchored (grab width height)
+  "Put GRAB's node where the anchored edge says a WIDTH x HEIGHT window belongs.
+
+WIDTH and HEIGHT are *window geometry* numbers, not buffer sizes, so a decorated
+client's shadow stays outside the arithmetic (D42).  Only the edges being dragged
+move the node: a right or bottom drag places nothing, because the anchored edge is
+the left or top one and it has not moved.
+
+This is the whole positioning rule of a resize, and it is a pure consequence of the
+anchors taken when the grab began -- which is why it can be called with the size that
+was asked for (during the drag) and with the size that came back (on the client's
+answer) and mean something both times."
+  (let ((node (grab-node grab))
+        (edges (resize-grab-edges grab)))
+    (multiple-value-bind (geometry-x geometry-y) (node-geometry node)
+      (when (logtest +edge-left+ edges)
+        (setf (scene:node-x node) (- (resize-grab-anchor-right grab)
+                                     geometry-x
+                                     (max 1 width))))
+      (when (logtest +edge-top+ edges)
+        (setf (scene:node-y node) (- (resize-grab-anchor-bottom grab)
+                                     geometry-y
+                                     (max 1 height)))))
+    node))
+
 (defgeneric grab-anchored (grab)
   (:documentation
-   "Put the node back where the edge it is anchored to says it belongs.
+   "Put the node back where the edge it is anchored to says it belongs, by its size.
 
-Called after the request (nothing has changed yet, so it is cheap and harmless) and
-again when the client's new size arrives, which is the call that matters: the size
-is the client's, and this is how a compositor keeps the opposite edge still while
-the client's answer comes back.")
+The size is the node's *own* -- the client's answer -- so this is the call that makes
+the anchored edge exact however the client answered.  Called when a commit arrives
+for the grabbed surface; a grab that has no anchors (a move) does nothing.")
   (:method (grab) nil))
 
 (defmethod grab-anchored ((grab resize-grab))
-  "Keep the edge opposite the dragged one still, using the node's *actual* size."
-  (let ((node (grab-node grab))
-        (edges (resize-grab-edges grab)))
+  "Keep the edge opposite the dragged one still, using the node's *actual* size.
+
+Only when the client's size has actually changed: a commit that repaints without
+resizing is a client doing its work, not an answer to the request in flight, and
+re-placing the node for it would undo the placement the last motion made (D53)."
+  (let ((node (grab-node grab)))
     (multiple-value-bind (geometry-x geometry-y width height) (node-geometry node)
-      (when (logtest +edge-left+ edges)
-        (setf (scene:node-x node)
-              (- (resize-grab-anchor-right grab) geometry-x (max 1 width))))
-      (when (logtest +edge-top+ edges)
-        (setf (scene:node-y node)
-              (- (resize-grab-anchor-bottom grab) geometry-y (max 1 height)))))
+      (declare (ignore geometry-x geometry-y))
+      (unless (and (= (max 1 width) (resize-grab-seen-width grab))
+                   (= (max 1 height) (resize-grab-seen-height grab)))
+        (setf (resize-grab-seen-width grab) (max 1 width)
+              (resize-grab-seen-height grab) (max 1 height))
+        (place-anchored grab width height)))
     node))
 
 (defmethod grab-motion ((grab resize-grab) x y)
@@ -367,8 +412,10 @@ the client's answer comes back.")
         (setf (resize-grab-requested-width grab) width
               (resize-grab-requested-height grab) height)
         (grab-resize grab width height)
-        ;; The client's size may already be the new one (it may have answered the
-        ;; previous event), so the anchor is applied on every motion as well as on
-        ;; every size change.
-        (grab-anchored grab)
+        ;; The dragged edge follows the *pointer*, not the answer (D53): the node is
+        ;; placed at the size this drag asked for, so a left-edge drag has its left
+        ;; edge under the hand now.  The client's content follows one configure later,
+        ;; and when it does, GRAB-ANCHORED places the node by the size the client
+        ;; chose -- the same place for a client that honours the request.
+        (place-anchored grab width height)
         (grab-changed grab)))))

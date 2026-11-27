@@ -401,6 +401,13 @@ changed what you see and not what the key means. Gate clause 20 drives three tit
 it and reads the panel, the bar and every title back out of the frame
 (`scripts/switcher-gate.sh`).
 
+The resize's anchoring was revised as its own slice (D53): the node used to be placed only from the
+size the client answered with, so a left-edge drag moved the window one round trip behind the hand.
+It is now placed on every motion at the size the drag asked for -- the edge under the pointer is
+under the pointer -- and placed again at the client's answer, which keeps the anchored edge exact.
+Clause 16 asserts both states with a real client: x 40 with the content still 220, then 200 back
+with the right edge still 240.
+
 A row's picture followed as its own slice (3i, continued; D52): `snapshot-node` in the scene holds a
 window's pixels copied *once*, when the overlay opens, downscaled to the resolution the row will
 show -- so drawing it is a 1:1 copy, and a client that keeps repainting cannot make the panel

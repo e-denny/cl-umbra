@@ -2366,3 +2366,70 @@ live previews, thumbnails anywhere but the switcher, a picture cache that surviv
 animations, or a picture of a window that has no buffer (it gets its title, in its column). The
 lesson: **a thumbnail is a decision about freshness, and the only freshness a damage diff can
 believe is "taken once, at a known moment" -- so take it where the person opened the thing.**
+
+## D53 — The dragged edge follows the pointer; the anchored edge follows the client
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** edge-anchored resizing
+
+D42 gave a resize its geometry: the edge opposite the one being dragged is recorded when the grab
+begins, and the node is put back so that edge stays still -- using the size the client actually
+came back with, because the node's size is the client's and the compositor cannot resize a buffer
+it does not own. That was right about the anchor and wrong about the hand. Nothing placed the node
+on a motion, so a left-edge drag moved the window only when the client answered: the visible edge
+sat still under a pointer that had moved on, then jumped to it, once per configure round trip. The
+roadmap had it as open for two slices.
+
+**Decision.** A resize now places the node *twice*, and the two placements answer different
+questions.
+
+1. **On every motion, at the size the drag asked for.** `grab-motion` repositions the node with
+   `place-anchored` and the size it just requested, so a left-edge drag has its left edge under the
+   pointer in the same motion event that moved it. The window leads; the pixels follow.
+2. **On the client's answer, at the size the client chose.** `grab-anchored` still runs when a
+   commit arrives for the grabbed surface and places the node by the size that came back, so the
+   anchored edge is exact no matter how the client answered -- including a client that clamped the
+   request to its own minimum.
+3. **A commit that is only a repaint is not an answer.** The node's believed size is remembered
+   on the grab, and the placement at the client's size happens only when a commit shows a size
+   that differs from it. Without that guard a client redrawing during a drag -- which every client
+   does -- would put the node back where the old size said, and the next motion would move it
+   again: a visible jitter for as long as the hand moved.
+4. **The trade is stated rather than hidden.** Because the node *is* the buffer (D10), placing it
+   at the requested size while the content is still the old size means the content is briefly short
+   of the far edge (growing) or overlapping past it (shrinking) by the width of one round trip.
+   That is what a hand-led resize looks like in every compositor with client-side decorations, and
+   it is the right way round: a person dragging an edge is watching the edge, not the far corner.
+   The alternative -- only ever placing by the answer -- is what D42 built, and it makes the *edge
+   under the hand* lag, which is the one thing a drag cannot do.
+5. **The anchor arithmetic itself is untouched.** It is still in window-geometry coordinates, so a
+   decorated client's shadow stays outside it (D42), and the pure `resize-target-size` still
+   clamps both directions (D46). This slice changes *when* the node is placed, not where the edges
+   are.
+
+**Evidence.** Gate clause 16 (`scripts/tinywl-parity.sh`) drives a real `weston-eventdemo` client
+through a third drag on an 800x600 output, headless: Alt+right on the window's left border grabs
+the left edge; one motion to x 40 leaves the node's x at **40** with the buffer still the **220**
+the client last committed, i.e. the edge is at the pointer before any answer; the release and the
+client's answer then give a **200**-wide buffer with node x + width still **240**, the anchored
+right edge. 115 checks in the two runs (headless 53, nested 62), up from 110. Five new unit tests
+(`tests/unit/scene.lisp`): a left drag placing the window at the pointer at once, a repaint commit
+at the old size leaving that placement alone, and the anchor exact once the answer arrives; a
+shrinking drag doing the same the other way (the content briefly overlapping past the anchor); a
+top drag doing it on the y axis; a right-edge drag placing nothing because the left edge is the
+anchor; and a decorated drag subtracting `geometry-x` so the buffer starts its shadow's width left
+of the visible edge. The suite went from 318 to 323 tests; the gate
+is 20/20.
+
+**Consequences.** A left or top drag now tracks the pointer from the first motion, which is what
+the sixth manual test's finding asked for, and the anchor is still exact at rest for a client that
+honours the configure. A client that refuses part of a resize (clamps to a minimum) leaves the
+anchor where the drag's last placement put it plus its own answer -- one correction at the moment
+of the answer, which is the client's statement about its own size. What this does not do: cancel a
+resize with Escape and restore the starting size (a compositor can bind `end-grab`, but "put it
+back" needs remembered state, and it is a policy with a UI of its own); clip the window to the
+requested box during the round trip (that needs a per-node clip in the scene); or animate the
+correction. The lesson: **an anchor and a hand are two different rulers -- keep the far edge
+faithful to the client and the near edge faithful to the pointer, and never let one substitute for
+the other.**

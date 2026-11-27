@@ -341,6 +341,103 @@ different states, and only the first is acceptable for a cursor image."
     (ok (= 100 (scene:node-x node))
         "a right-edge resize leaves the left edge alone")))
 
+(deftest the-dragged-edge-follows-the-pointer-not-the-client
+  ;; D53: a resize places the node on every motion, at the size the drag asked for,
+  ;; so the edge under the hand is under the hand *now* instead of one configure round
+  ;; trip later.  What is inside the window is the client's -- it catches up when the
+  ;; answer arrives -- and the anchored edge is exact in both states.
+  (with-compositor (compositor :width 400 :height 400)
+    (multiple-value-bind (surface node) (window-node compositor 100 50 :width 200 :height 150)
+      (let ((grab (grab:begin-resize-grab node 102 125 grab:+edge-left+
+                                         :output-width 400 :output-height 400)))
+        (cf:start-grab compositor grab)
+        (cf:inject-pointer-motion compositor 80 125)         ; twenty-two to the left
+        (ok (= 78 (scene:node-x node))
+            "the left edge is at the pointer at once, before any answer")
+        (ok (= 200 (scene:node-width node))
+            "while the window is still the size the client last committed")
+        (ok (= 278 (+ (scene:node-x node) (scene:node-width node)))
+            "so the content stops short of the anchored edge for the moment")
+        (ok (= 222 (grab:resize-grab-requested-width grab))
+            "and the client was asked for 222")
+        ;; A commit that only repaints the old size must not undo that placement: it
+        ;; is a client doing its work, not an answer to the request in flight (D53).
+        (grab:grab-anchored grab)
+        (ok (= 78 (scene:node-x node))
+            "a repaint commit at the old size leaves the placement alone")
+        ;; The client answers the configure: the content fills the box it was given.
+        (setf (srv:surface-current-buffer surface)
+              (make-instance 'srv:shm-buffer :pool nil :offset 0 :width 222 :height 150
+                                             :stride (* 4 222) :format 0))
+        (grab:grab-anchored grab)
+        (ok (= 78 (scene:node-x node))
+            "the left edge stays where the pointer left it")
+        (ok (= 300 (+ (scene:node-x node) (scene:node-width node)))
+            "and the right edge is exactly the one that was anchored")))))
+
+(deftest a-shrinking-drag-places-the-window-the-same-way
+  ;; The other direction: the drag asks for less than the client has, so the content
+  ;; is briefly wider than the window it is in -- and the window is still placed by
+  ;; what the drag asked for, because the hand is what is being followed (D53).
+  (with-compositor (compositor :width 400 :height 400)
+    (multiple-value-bind (surface node) (window-node compositor 100 50 :width 200 :height 150)
+      (declare (ignore surface))
+      (let ((grab (grab:begin-resize-grab node 102 125 grab:+edge-left+
+                                         :output-width 400 :output-height 400)))
+        (cf:start-grab compositor grab)
+        (cf:inject-pointer-motion compositor 140 125)        ; thirty-eight to the right
+        (ok (= 138 (scene:node-x node)) "the left edge followed the pointer inward")
+        (ok (= 162 (grab:resize-grab-requested-width grab)) "and the drag asked for 162")
+        (ok (= 338 (+ (scene:node-x node) (scene:node-width node)))
+            "with the content briefly overlapping past the anchored edge")))))
+
+(deftest a-top-drag-places-the-window-on-the-y-axis
+  (with-compositor (compositor :width 400 :height 400)
+    (multiple-value-bind (surface node) (window-node compositor 100 50 :width 200 :height 150)
+      (declare (ignore surface))
+      (let ((grab (grab:begin-resize-grab node 200 52 grab:+edge-top+
+                                         :output-width 400 :output-height 400)))
+        (cf:start-grab compositor grab)
+        (cf:inject-pointer-motion compositor 200 30)         ; twenty-two up
+        (ok (= 28 (scene:node-y node)) "the top edge is at the pointer")
+        (ok (= 100 (scene:node-x node)) "and the x axis was not touched")
+        (ok (= 200 (grab:resize-grab-anchor-bottom grab))
+            "the bottom edge is the anchor")))))
+
+(deftest a-right-edge-drag-places-nothing
+  (with-compositor (compositor :width 400 :height 400)
+    (multiple-value-bind (surface node) (window-node compositor 100 50 :width 200 :height 150)
+      (declare (ignore surface))
+      (let ((grab (grab:begin-resize-grab node 295 125 grab:+edge-right+
+                                         :output-width 400 :output-height 400)))
+        (cf:start-grab compositor grab)
+        (cf:inject-pointer-motion compositor 340 125)
+        (ok (= 100 (scene:node-x node))
+            "a right-edge drag leaves the node where it was: the left edge is anchored")
+        (ok (= 245 (grab:resize-grab-requested-width grab)) "and asks for the width")
+        (ok (= 300 (grab:resize-grab-max-size grab))
+            "with the output's border as the bound (400 - the anchored left edge)")))))
+
+(deftest a-decorated-drag-keeps-the-shadow-out-of-the-arithmetic
+  ;; The node's position is where the *buffer* starts and the window starts geometry-x
+  ;; in from that, so a placement that forgot the offset would put a decorated window's
+  ;; visible edge its shadow's width away from the pointer (D42, D53).
+  (with-compositor (compositor :width 400 :height 400)
+    (multiple-value-bind (surface node) (window-node compositor 100 50 :width 200 :height 150)
+      (setf (srv:xdg-surface-window-geometry (srv:surface-shell-surface surface))
+            (list 32 32 136 86))
+      (multiple-value-bind (geometry-x geometry-y width height) (grab:node-geometry node)
+        (ok (equal (list geometry-x geometry-y width height) '(32 32 136 86))
+            "the fixture is a decorated window"))
+      (let ((grab (grab:begin-resize-grab node 134 125 grab:+edge-left+
+                                         :output-width 400 :output-height 400)))
+        (ok (= 268 (grab:resize-grab-anchor-right grab))
+            "the anchor is the visible right edge: 100 + 32 + 136")
+        (cf:start-grab compositor grab)
+        (cf:inject-pointer-motion compositor 114 125)        ; twenty to the left
+        (ok (= 80 (scene:node-x node))
+            "the buffer starts 32 pixels left of the visible edge, not on it")))))
+
 (deftest a-move-is-clamped-so-the-window-cannot-be-lost
   ;; A window narrower than the output is kept fully inside it; one wider than the
   ;; output may be pushed as far as the output's other edge and no further, so it

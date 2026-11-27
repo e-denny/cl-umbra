@@ -242,9 +242,14 @@ space, a visibility flag and a parent.
   the session's own arrow. A client's image is never a scene node (D40) but is drawn from the
   recording the seat keeps, and a nested session owns the picture inside its own window: it blanks
   its parent and draws the client's image, or its own arrow when there is none (D41).
-- **A resize moves the edge it grabbed**: `cf.grab` records the edge opposite the dragged one and
-  puts the node back so that edge stays still, using the size the client actually came back with
-  (`grab-anchored`, D42). And an edge is where the pointer can reach — a client-side decoration's
+- **A resize moves the edge it grabbed, and the dragged edge leads**: `cf.grab` records the edge
+  opposite the dragged one and puts the node back so that edge stays still. The placement happens
+  twice, on purpose: on every motion at *the size the drag asked for* (`place-anchored`), so the
+  edge under the hand is under the hand now rather than one configure round trip later (D53), and
+  when the client's answer arrives at *the size the client chose* (`grab-anchored`), which keeps the
+  anchored edge exact however a client answers (D42). What is inside the window is the client's, so
+  during that round trip the content is either short of the far edge or overlapping it — the hand
+  leads and the pixels follow. An edge is where the pointer can reach: a client-side decoration's
   input region, not its surface's bounding box (D42, `tinywl:pointer-reach`).
 - **Resize arithmetic speaks window geometry, and both directions have bounds**: `node-geometry`
   reads `xdg_surface.set_window_geometry`, so a configure asks for the size a client means rather

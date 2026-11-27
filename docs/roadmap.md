@@ -238,9 +238,9 @@ compositor is open below.
 - [ ] `xdg_activation`-style "demands attention", and a live preview rather than a snapshot
 - [x] clamping: a resize stops with the dragged edge at the output's border and the opposite
       edge anchored, and every window is re-clamped when the output shrinks (D46)
-- [ ] edge-anchored resizing: still open -- the node is placed from the client's answer on every
-      motion, so a top/left drag moves the window as the client answers rather than only at the
-      end; Escape-to-cancel bound by default is also open
+- [x] edge-anchored resizing (D53): the dragged edge is placed from the size the drag asked for
+      on every motion, so a top/left drag follows the pointer, and the anchor is made exact again
+      when the client answers; Escape-to-cancel bound by default is still open
 - [x] popup grabs: owner-events, dismissed by a press outside the stack or by Escape (phase 3f)
 - [x] grabs: `begin-move`/`begin-resize` from `move`/`resize`, serial validation (phase 3d, D33)
 - [ ] `wl_pointer.frame` and `wl_seat.release` (a version bump, not a rewrite)

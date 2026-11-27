@@ -292,8 +292,13 @@ twice*:
     moves the node by the pointer's delta and stops on the release, Alt+right at the corner
     produces `resize width: 240, height: 180` in the *client's* output and a 240x180 buffer, a
     second drag grabbed at the window's *left* border asks for `resize width: 220` and leaves the
-    right edge where it was while the left one follows the pointer (D42), a drag past the output's
-    corner stops with the window flush against it while the pointer goes where the device says, and
+    right edge where it was while the left one follows the pointer (D42); the *headless* run then
+    takes a third drag grabbed at that left border and asserts the thing a hand feels (D53): one
+    motion with no answer yet leaves the node's left edge at the pointer (x 40) while its content is
+    still the size the client last committed (220), and once the client answers with the 200 the
+    drag asked for the anchored right edge is still exactly where it was (240). A drag past the
+    output's corner stops with the window flush against it while the pointer goes where the device
+    says, and
     a drag whose pointer leaves the output ends instead of dragging on unseen (D43), Alt+F1 raises
     the bottom window, and Alt+Esc sends `xdg_toplevel.close` to both clients and stops the loop
     with no `wl_display.error` anywhere. On the decorated window both runs then require a resize

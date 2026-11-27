@@ -495,6 +495,44 @@ of lines of protocol."
                     "and its right edge did not move (~D -> ~D)"
                     right-before (+ (cf.scene:node-x node) (cf.scene:node-width node))))
 
+           ;; 5c. The dragged edge follows the *pointer*, not the client's answer
+           ;;     (D53): one motion places the window at once, at the size the drag
+           ;;     asked for, while the buffer is still the size the client last
+           ;;     committed -- and the anchor is exact again as soon as it answers.
+           ;;     Headless only: in a nested session the motion is itself a protocol
+           ;;     round trip, so "before the client answered" is not a state the gate
+           ;;     can stand in (the placement is the same code either way).
+           (when (null *parent*)
+             (let ((node (cf:surface-scene-node surface-a)))
+               (moves 20 75)
+               (pump 0.1)
+               (key "Alt_L" :pressed)
+               (button :right :pressed)
+               (settle)
+               (let ((grabbed (cf:compositor-grab *inner*)))
+                 (check (and (typep grabbed 'cf.grab:resize-grab)
+                             (= cf.grab:+edge-left+ (cf.grab:resize-grab-edges grabbed)))
+                        "alt+right on the left border grabs the left edge again"))
+               (let ((width-before (cf.scene:node-width node))
+                     (right-before (+ (cf.scene:node-x node) (cf.scene:node-width node))))
+                 (moves 40 75)
+                 (check (= 40 (cf.scene:node-x node))
+                        "the left edge is at the pointer with no answer yet (x ~D)"
+                        (cf.scene:node-x node))
+                 (check (= width-before (cf.scene:node-width node))
+                        "while the content is still the size the client last committed (~D)"
+                        (cf.scene:node-width node))
+                 (button :right :released)
+                 (key "Alt_L" :released)
+                 (pump 0.6)
+                 (check (= 200 (cf.scene:node-width node))
+                        "the client then answers with the size the drag asked for (~D)"
+                        (cf.scene:node-width node))
+                 (check (= right-before
+                           (+ (cf.scene:node-x node) (cf.scene:node-width node)))
+                        "and the anchored right edge is still where it was (~D)"
+                        (+ (cf.scene:node-x node) (cf.scene:node-width node))))))
+
            ;; 6. Alt+F1 sends the bottom window to the front and focuses it.
            (key "Alt_L" :pressed)
            (key "F1" :pressed)

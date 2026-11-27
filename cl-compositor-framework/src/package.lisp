@@ -241,6 +241,7 @@ two hooks.")
    #:resize-grab-anchor-right
    #:resize-grab-anchor-bottom
    #:grab-anchored
+   #:place-anchored
    #:clamp-to-output
    #:clamp-node-to-output
    #:node-geometry
@@ -258,6 +259,8 @@ two hooks.")
    #:resize-target-size
    #:resize-grab-requested-width
    #:resize-grab-requested-height
+   #:resize-grab-seen-width
+   #:resize-grab-seen-height
    #:+edge-top+
    #:+edge-bottom+
    #:+edge-left+
