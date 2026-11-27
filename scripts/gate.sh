@@ -113,6 +113,12 @@
 #      parent's keymap descriptor crossed the boundary; teardown removes the
 #      parent's window and leaks no descriptors
 #
+#  21. the DRM card: a real card enumerated without DRM master, its connectors, mode
+#      tables and driver name checked against /sys, and a scanout-sized dumb buffer
+#      allocated, painted through the pixman target, given a framebuffer id, released
+#      and proved not to have touched the screen (skipped, not failed, with no card
+#      or no permission)
+#
 # Logs land in a temporary directory that is printed when something fails.
 
 set -uo pipefail
@@ -327,6 +333,25 @@ else
   fail 'switcher' 'the overlay was not drawn, walked, committed or cleaned up' "$log_dir/switcher.log"
 fi
 
+# 21. The DRM card, its connectors and a dumb buffer --------------------------
+#
+# The first half of the DRM backend needs no master and sets no mode, so this
+# clause runs on the machine someone is using: it enumerates the card, compares
+# libdrm's view with the kernel's own (sysfs) view, and round-trips one
+# scanout-sized dumb buffer per connected connector.  77 means no card or no
+# permission, which is a skip and not a failure (D54).
+printf '\nphase 4 gate: the card, its connectors and a dumb buffer\n\n'
+
+drm_status=0
+gb "$log_dir/drm.log" "$repo_root/scripts/drm-gate.sh" || drm_status=$?
+if [ "$drm_status" -eq 0 ]; then
+  pass 'drm card' "$(grep -a '^drm-gate: ' "$log_dir/drm.log" | tail -n 1 | sed 's/^drm-gate: //')"
+elif [ "$drm_status" -eq 77 ]; then
+  skip 'drm card' "$(grep -a '^drm-gate: skip' "$log_dir/drm.log" | tail -n 1 | sed 's/^drm-gate: skip //')"
+else
+  fail 'drm card' 'a card was not enumerated, or the dumb-buffer round trip failed' "$log_dir/drm.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -346,7 +371,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack and the switcher)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack, the switcher and the card)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

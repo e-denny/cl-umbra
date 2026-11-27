@@ -19,7 +19,7 @@ decomposition is the part worth copying.
 | `cf.backend` | `wlr_backend` + autocreate | 2 | one interface over headless, nested, DRM; outputs and input device events |
 | `cf.backend.headless` | `wlr_backend_headless` | 2 | fake output(s), frame timer, deterministic pixels |
 | `cf.backend.nested` | `wlr_backend_wayland` | 3 | our compositor as a client of a parent compositor |
-| `cf.backend.drm` | `wlr_backend_drm` (dumb path) | 4 | KMS modes, dumb buffers, page flips |
+| `cf.backend.drm` | `wlr_backend_drm` (dumb path) | 4 | the card, connectors, encoders, CRTCs, mode choice and dumb buffers (D54); modeset, page flips and VT handover next |
 | `cf.backend.libinput` | `wlr_backend_libinput` | 4 | device enumeration, hotplug, event decoding |
 | `cf.backend.multi` | `wlr_backend_multi` | 4 | several backends in one session (DRM + nested for debugging) |
 | `cf.session` | `wlr_session` (libseat) | 4 | seat/VT ownership, device open, switch away/back |
@@ -126,6 +126,50 @@ nested session sets `compositor-cursor-visible-p` to NIL rather than drawing a s
 the same place (D39). `render-frame` projects that flag onto the scene immediately before
 drawing, so a compositor states the fact once and the renderer obeys it. A client's own cursor
 surface (`wl_pointer.set_cursor`) is recorded by the seat and still not drawn — phase 5.
+
+`cf.backend.drm` is the third backend, and its first half is the part of KMS that can run while
+another session owns the screen. It is deliberately not a `backend` object yet: it has no output
+and presents nothing, because presenting needs `SETCRTC` and `PAGE_FLIP`, which need DRM master,
+which means taking the display away from whoever has it (D54).
+
+```lisp
+(let ((device (cf.backend.drm:open-drm-device "/dev/dri/card1")))
+  (unwind-protect
+       (let* ((inventory (cf.backend.drm:drm-inventory device))
+              (connector (cf.backend.drm:drm-inventory-connector inventory "HDMI-A-1"))
+              (mode (cf.backend.drm:drm-pick-mode connector))
+              (buffer (cf.backend.drm:drm-create-dumb
+                       device
+                       (cf.backend.drm:drm-mode-hdisplay mode)
+                       (cf.backend.drm:drm-mode-vdisplay mode))))
+         (cf.backend.drm:drm-map-dumb device buffer)
+         ;; a pixman target over the mapping, at the driver's pitch, is a frame
+         (let ((target (cf:make-target-over-pointer
+                        (cf.backend.drm:dumb-buffer-mapping buffer)
+                        (cf.backend.drm:dumb-buffer-width buffer)
+                        (cf.backend.drm:dumb-buffer-height buffer)
+                        :stride (cf.backend.drm:dumb-buffer-pitch buffer))))
+           (cf:fill-target target #xFF101820)
+           (cf:destroy-target target))
+         (cf.backend.drm:drm-add-framebuffer device buffer)
+         (cf.backend.drm:drm-destroy-dumb device buffer))
+    (cf.backend.drm:close-drm-device device)))
+```
+
+What it provides: a device with its driver name, version, whether it is master and its
+capabilities; an inventory of CRTCs, connectors, encoders and framebuffers as Lisp structs with
+no C memory behind them; `drm-pick-mode` (exact size, then the monitor's preferred mode, then the
+largest, then the fastest) and integer millihertz refresh rates; dumb buffers with the driver's
+own pitch and size, mapped read-write, given a framebuffer id, and released in the order KMS
+requires. Every release is one call, `drm-destroy-dumb`, because the order is the contract
+(framebuffer, mapping, memory).
+
+Two things the module does on purpose. The kernel's six calls are generic functions
+(`drm-claim-dumb`, `drm-map-dumb-memory`, `drm-unmap-dumb-memory`, `drm-allocate-framebuffer`,
+`drm-release-framebuffer`, `drm-release-dumb`) and everything above them is plain functions over
+those, so a test can hand in a recording device and check the arguments and the release order
+with no card. And the structs are transcribed from the headers with their sizes asserted at load
+time, so a build needs libdrm's library and not its headers or a C compiler.
 
 Contracts:
 

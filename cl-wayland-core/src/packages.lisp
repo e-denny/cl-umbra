@@ -105,6 +105,7 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:listen-unix-socket
    #:accept-unix-socket
    #:unix-socket-peer-credentials
+   #:open-path
    #:open-lock-file
    #:chmod-path
    #:effective-uid

@@ -63,7 +63,11 @@
 (defconstant +enotsup+ 95)
 
 ;; open(2) and fcntl(2) values a server needs: a lock file it keeps open for the
-;; lifetime of the socket, and the listening socket itself.
+;; lifetime of the socket, and the listening socket itself -- plus the read-only
+;; and write-only directions OPEN-PATH offers, because a device node is opened
+;; for a direction rather than for a lock.
+(defconstant +o-rdonly+ 0)
+(defconstant +o-wronly+ 1)
 (defconstant +o-rdwr+ 2)
 (defconstant +o-creat+ #x40)
 (defconstant +o-cloexec+ #x80000)
@@ -549,6 +553,27 @@ someone tries to stop the process."
   (let ((handler (signal-disposition signal)))
     (not (or (cffi:null-pointer-p handler)
              (= 1 (cffi:pointer-address handler))))))
+
+(defun open-path (path &key (direction :io))
+  "Open PATH and return the descriptor, close-on-exec.
+
+DIRECTION is :input, :output or :io.  Close-on-exec is set atomically at open
+rather than afterwards: a descriptor a forked child inherits is a leak with a
+delay fuse, and a compositor forks clients.
+
+Failure is IO-ERROR with the errno, because the errno is the answer.  EACCES on
+a device node is the difference between `this machine has no card' and `this
+user's session was not given this card', and a caller printing either one is
+lying about what happened."
+  (let* ((flags (ecase direction
+                  (:input +o-rdonly+)
+                  (:output +o-wronly+)
+                  (:io +o-rdwr+)))
+         (fd (%retry-on-eintr
+              (lambda () (%open path (logior flags +o-cloexec+) 0)))))
+    (when (minusp fd)
+      (syscall-failed 'open (errno)))
+    fd))
 
 (defun open-lock-file (path &key (mode #o600))
   "Create and exclusively lock PATH, truncate it, and write our pid into it.

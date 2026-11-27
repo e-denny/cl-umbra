@@ -471,7 +471,41 @@ The visible switcher (phase 3i) adds the twentieth:
     stored picture and the drawn frame unchanged (the fixture maps a memfd so the test can play
     the client).
 
-All twenty clauses pass. Two details worth knowing: the protocol clause
+Phase 4's first half adds the twenty-first:
+
+21. **The DRM card, its connectors and a dumb buffer** (`scripts/drm-gate.sh`,
+    `scripts/drm-gate.lisp`). No clients, no pixels on screen, no mode set: this is the half of
+    KMS that works while somebody is using the machine (D54), and the clause is built to prove
+    that about itself. The probe opens `/dev/dri/cardN` read-write and checks the driver name
+    against `/sys/class/drm/cardN/device/uevent`, the DRM version's shape, that the device was
+    opened **without** DRM master, and that it has dumb buffers and PRIME. It then enumerates
+    resources, connectors, encoders and CRTCs, and compares every connector against the kernel's
+    own view in `/sys/class/drm/cardN-<connector>`: the same connector names, the same plug
+    state, a mode count that is at most sysfs's (sysfs prints the connector's whole table,
+    `GETCONNECTOR` the probed subset) with every mode libdrm reports being a size sysfs lists,
+    totals larger than visible sizes and refreshes between 20 and 240 Hz (a swapped or misread
+    field lands here), the preferred mode present in both, and every connector's encoder id and
+    encoder's CRTC id naming objects from the same enumeration. Each CRTC's current scanout is
+    read, which is the state the next slice has to restore. Then, per connected connector: a
+    dumb buffer at the picked mode, checked for a pitch of at least 4 x width and a size of at
+    least pitch x height, mapped, painted through the pixman target the frame will use
+    (background, then a rectangle at the origin), read back at three pixels, given a framebuffer
+    id by `ADDFB`, released by `RMFB`, and destroyed. Finally the claims that make it safe to run
+    on a working desktop: the connector state from sysfs is **identical** before and after, the
+    device still reports that it was never master, and the descriptor count is flat. On the
+    machine this was written on: 37 checks, `card1` (`amdgpu` 3.64.0) with 4 CRTCs, `DP-1`
+    disconnected, `HDMI-A-1` connected at 600x340 mm, 29 modes of which the preferred is
+    3840x2160 at 594000 kHz (60.000 Hz), a 3840x2160 dumb buffer at pitch 15360 and 33177600
+    bytes, and framebuffer 158 added and removed. No card, or a card this user was not given
+    (`EACCES`), exits 77 and the gate reports **SKIP** rather than failing: neither is a defect
+    in the code, and a gate that goes red on a machine without `/dev/dri` teaches people to
+    ignore it. Twenty-two unit tests (`tests/unit/drm.lisp`, suite 14, 345 tests in fourteen
+    suites) pin the parts a card cannot isolate: refresh arithmetic in integer millihertz, mode
+    choice as a total order, connector naming and status, pixel addressing through a padded
+    pitch over a real memfd, and -- through a recording device -- the arguments of `CREATE_DUMB`
+    and `ADDFB` and the release order `RMFB -> munmap -> DESTROY_DUMB`.
+
+All twenty-one clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs

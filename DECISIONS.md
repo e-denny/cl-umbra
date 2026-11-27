@@ -2433,3 +2433,122 @@ requested box during the round trip (that needs a per-node clip in the scene); o
 correction. The lesson: **an anchor and a hand are two different rulers -- keep the far edge
 faithful to the client and the near edge faithful to the pointer, and never let one substitute for
 the other.**
+
+## D54 — KMS splits at master, and the half that only describes the screen is built first
+
+**Date:** 2026-11-26
+**Status:** accepted
+**Slice:** the DRM card, its connectors, and a dumb buffer (phase 4, first half)
+
+Phase 4 as planned is six to eight weeks: DRM dumb buffers with page flips, libseat sessions,
+libinput, libxkbcommon, multi-output, a software cursor, and an exit gate that wants a real TTY
+session, twenty VT switches, hotplug, an eight-hour soak and suspend/resume. That is not one
+slice, and its first attempt has to run somewhere. The somewhere is the problem: the machine
+this project is being built on presents through Umbriel on VT 1, `/dev/tty2` belongs to root, so
+an unprivileged process cannot switch VTs; and taking DRM master on `card1` would take the
+display away from the session the user is sitting in front of, with nothing in the kernel that
+gives it back.
+
+**Decision.**
+
+1. **Phase 4 is four slices, cut at the master boundary, not at a file boundary.** 4a is the
+   card's describing half: resources, connectors, encoders, CRTCs, modes and dumb buffers,
+   with no `SETCRTC` and no `PAGE_FLIP`. 4b takes the display (modeset, page flips, restore).
+   4c is seats and input (libseat and libinput). 4d puts tinywl on DRM with libxkbcommon and
+   walks the phase-4 gate list. The cut is the one the kernel already makes: everything in 4a
+   is allowed on a card another process owns, and 4b is exactly the set of calls that needs to
+   own the screen.
+2. **4a is therefore shippable and gateable while somebody is using the machine.** The gate
+   proves that rather than promising it: the connector state read from sysfs is identical before
+   and after, the device reports that it was never master, and the descriptor count is flat.
+   Being able to check the hardware during a working day is what makes the risky half (4b)
+   smaller when it arrives.
+3. **libdrm, transcribed rather than groveled.** The structs we read -- `drmVersion`,
+   `drmModeRes`, `drmModeConnector`, `drmModeModeInfo`, `drmModeEncoder`, `drmModeCrtc` -- are
+   written out by hand and their sizes (56, 80, 88, 68, 20, 100) and the three offsets that
+   matter (mode name 36, connector modes 40, CRTC mode 28) are asserted at load time, the same
+   way `wayland.ffi` asserts its socket structs. A build that needs libdrm's headers and a C
+   compiler to *read* the card is a build that fails on a machine where only the library is
+   installed; and a wrong offset has to be a load error rather than a silent misread of kernel
+   memory. The calls themselves are libdrm's (`drmModeGetResources` and friends,
+   `drmModeCreateDumbBuffer`, `drmModeMapDumbBuffer`, `drmModeAddFB`, `drmModeRmFB`): the
+   libdrm ABI is stable, and hand-rolling the ioctls would be six chances to get an ioctl number
+   wrong for no gain.
+4. **Borrowed C memory is copied and freed before the next call.** An inventory is Lisp structs
+   with numbers and strings in them -- the same rule as D35, applied to the kernel's objects
+   instead of pixman's. The only foreign memory that outlives a call is a dumb buffer's mapping,
+   and that one is stated where it happens because it is ours for as long as the buffer exists.
+5. **Two layers: six kernel calls, and the contract above them.** `drm-claim-dumb`,
+   `drm-map-dumb-memory`, `drm-unmap-dumb-memory`, `drm-allocate-framebuffer`,
+   `drm-release-framebuffer` and `drm-release-dumb` are the only functions in the project that
+   make these calls, and they are generic functions. Everything a compositor uses
+   (`drm-create-dumb`, `drm-map-dumb`, `drm-add-framebuffer`, `drm-destroy-dumb`) is a plain
+   function over them that checks arguments, remembers what it made and releases it in order.
+   The reason is not layering for its own sake: it makes the marshalling testable without a
+   card. A recording device sees ADDFB asked for depth 24 and bpp 32 with the driver's pitch and
+   handle, and it sees the release order. 4b will want the same seam for a fake CRTC.
+6. **The release order is one function, because the order is the contract.** `drm-destroy-dumb`
+   removes the framebuffer, unmaps, then destroys the handle -- RMFB, then munmap, then
+   `DESTROY_DUMB`. A framebuffer left behind keeps the memory alive after the handle is gone; a
+   mapping left behind is a SIGBUS waiting for the next frame. No caller is offered the three
+   steps separately, so no caller can get it wrong.
+7. **Mode choice is a total order in Lisp, and refresh is integer millihertz.** An exact
+   width-by-height match wins, then the monitor's preferred mode, then the largest area, then
+   the fastest, then by name. 59.94 Hz and 60 Hz are `59940` and `60000` millihertz and compare
+   unequal; a float would have lost that, and the difference is real on this monitor's EDID.
+8. **The probe paints through the renderer that will draw the frame**, not through a byte loop
+   of its own: a pixman target over the dumb buffer's mapping, a background and one rectangle,
+   then three pixels read back at the corners and the rectangle's edge. A wrong pitch or a
+   mapping that is not the buffer becomes a wrong pixel, and the mapping is proved to compose
+   with the renderer 4b will use.
+9. **No card, or no permission, is a skip and not a failure.** `EACCES` on a device node is the
+   difference between *this machine has no card* and *this user's session was not given this
+   card*, and neither is a broken implementation: the clause exits 77, which the gate reports as
+   SKIP. A gate that fails on a laptop without `/dev/dri` teaches people to ignore it.
+10. **One dependency is stated rather than discovered later**: `drmModeGetConnectorTypeName`
+    needs libdrm 2.4.111 or later. Earlier versions had no such helper and every compositor
+    carried a copy of the kernel's enum; requiring the helper is one table fewer to be wrong.
+
+**Evidence.** Gate clause 21 (`scripts/drm-gate.sh`, `scripts/drm-gate.lisp`) runs the probe
+against this machine's card and makes **37 checks**. `card1` is `amdgpu` 3.64.0 (the same name
+`/sys/class/drm/card1/device/uevent` reports), opened with `master=NIL`, with dumb buffers and
+PRIME. It enumerates **4 CRTCs** (108, 114, 120, 126), **2 connectors**, **6 encoders** and no
+framebuffers. `DP-1` is disconnected by both libdrm and sysfs; `HDMI-A-1` (id 138, 600x340 mm) is
+connected by both, offers **29 modes** where `/sys` prints **34** -- sysfs prints the connector's
+whole table, `GETCONNECTOR` answers with the probed subset -- and every one of the 29 is a size
+sysfs lists; every mode has totals larger than its visible size and a refresh between 20 and 240
+Hz; the preferred mode is 3840x2160 at 594000 kHz, **60.000 Hz**, type `#x48`. Every connector's
+encoder id and every encoder's CRTC id names an object the same enumeration found. A dumb buffer
+at the preferred mode is **3840x2160, pitch 15360, 33177600 bytes**; mapped; painted through a
+pixman target; `(0,0)` and `(63,47)` read back `#xFFFF8000` (the rectangle), the last pixel and
+`(64,48)` read `#xFF101820` (the background); `ADDFB` named it framebuffer 158 and `RMFB`
+forgot it; destroying it left neither a mapping nor a framebuffer. Afterwards the descriptor
+count is **5 -> 5**, the device still reports it was never master, and the sysfs connector state
+is **identical** to before the probe. The CRTC read is the other half of the point: CRTC 108 is
+currently scanning out framebuffer 154 at 3840x2160, read without master -- that is the state 4b
+has to put back. The gate is **21/21 clauses** (clause 21 reports these 37 checks).
+Twenty-two new unit tests (`tests/unit/drm.lisp`, suite 14) take the suite from 323 to **345
+tests in 14 suites**: refresh arithmetic (60000 vs 59940 millihertz, and zero totals answering
+zero instead of dividing by it); the preferred flag against the driver flag; an exact size
+winning over a larger mode, then preferred, then largest, then fastest; the connector status
+decoding and the word sysfs uses; connector type names ("HDMI-A", "DP", "eDP", and a `TYPE-`
+fallback); an inventory found by name and by id; pixel addressing through a **padded** pitch over
+a real memfd mapping, with the padding byte proved never to be read as a pixel; an unmapped
+buffer refusing a pointer; CREATE_DUMB asked for 32 bits per pixel and the driver's pitch and
+size kept; a driver answering a pitch narrower than the width refused; ADDFB asked once, with
+depth 24, bpp 32, the pitch and the handle; the release order **RMFB -> munmap -> DESTROY_DUMB**
+and no RMFB at all when there is no framebuffer; map/unmap recording what they sent; a closed
+device refusing an inventory and naming itself; `open-drm-device` on a missing node reporting
+`ENOENT` and the path; and sysfs cards, connector state, device paths and the driver name
+from a uevent, all read from fixture trees instead of the live machine.
+
+**Consequences.** The hardware half of the framework now exists and can be exercised on a
+working desktop, and 4b starts from a card that is already enumerated, a mode already chosen,
+memory already allocated and the previous CRTC state already readable. What this does not do:
+set a mode, flip a page, present a frame, open an input device, hold a seat, own the screen,
+switch VTs, re-layout outputs on hotplug, or draw a cursor into the scanout buffer -- those are
+4b to 4d, and 4b needs an explicit decision about taking the display and a plan for giving it
+back. Nor does it read EDID properties or planes (4b and phase 5). The lesson: **the kernel's
+object model splits at master -- everything that *describes* the screen can be read by anyone
+the session trusts, and only the act of *showing* needs to own it -- so build, gate and live
+with the describing half first, on the machine you are using.**

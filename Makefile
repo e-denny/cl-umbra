@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher tinywl soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm tinywl soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher tinywl
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm tinywl
 
 test:
 	./scripts/run-tests.sh
@@ -81,6 +81,11 @@ tinywl-run:
 # tinywl itself: the parity script, run headless and nested, with two real clients.
 tinywl:
 	./scripts/tinywl-parity.sh
+
+# The card: enumerate without master, and round-trip a scanout-sized dumb buffer
+# against the kernel's own view in /sys.  Skips (exit 77) with no card.
+drm:
+	./scripts/drm-gate.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:

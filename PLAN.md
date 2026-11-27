@@ -450,6 +450,23 @@ therefore its own authorization).
 
 **Demo:** a real TTY session, no X, no Wayland, no EGL — dumb buffers and pixman.
 
+Phase 4 is being sliced at the kernel's own boundary — DRM master — rather than at a file
+boundary (D54). The first slice, **4a**, is the half of KMS that describes the screen:
+resources, connectors, encoders, CRTCs, mode choice and dumb buffers, with no `SETCRTC` and no
+`PAGE_FLIP`. It needs no master, so it runs while a session owns the card, and gate clause 21
+checks it against `/sys` and proves it left the connector state identical (37 checks). What
+that slice bought beyond the enumeration is the state 4b restores from: every CRTC's current
+framebuffer and mode, readable without master, and dumb buffers that already compose with the
+pixman target the frame will be drawn through.
+
+Remaining in phase 4: **4b** takes the display — `SETCRTC`, double-buffered `PAGE_FLIP` with
+`read()` for vblank, and the saved CRTC state put back on exit or signal (this one needs an
+explicit decision about taking the screen, and a recovery plan, because the machine it must be
+tested on is the machine somebody is using); **4c** is seats and input (libseat with seatd or
+logind, libinput decoding, the input-device access problem stated rather than assumed);
+**4d** puts tinywl on DRM with libxkbcommon keymaps, a software cursor in the scanout buffer,
+and then walks the five exit-gate items above.
+
 ### Phase 5 — GPU acceleration, only where it earns its place (5-8 weeks)
 
 **Build**

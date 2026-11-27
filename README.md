@@ -7,8 +7,9 @@ Everything that makes it possible is here too — the protocol implementation, t
 compositor framework, and a tinywl port — as the six systems below.
 
 **Status: phase 0, phase 1, phase 2a, phase 2b, phase 3a, phase 3b, phase 3c, phase 3d,
-phase 3e, phase 3f, phase 3g, phase 3i and phase 3's exit gate — `cl-tinywl` — passing.**
-`./scripts/gate.sh` checks twenty clauses. Phase 0: the unit suite (318 tests, thirteen suites), every vendored protocol compiling,
+phase 3e, phase 3f, phase 3g, phase 3i and phase 3's exit gate — `cl-tinywl` — passing, plus
+the first half of phase 4 (the DRM card, its connectors and a dumb buffer, D54).**
+`./scripts/gate.sh` checks twenty-one clauses. Phase 0: the unit suite (345 tests, fourteen suites), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections
@@ -48,7 +49,12 @@ click-away that is swallowed). Phase 3g keeps a focus stack, so a closing window
 to the window that was focused before it. Phase 3i draws that stack: `Alt+Tab` opens an overlay
 of window titles in a built-in 5x7 font, Tab walks it, releasing Alt focuses and raises the row
 that was showing, Escape and a click cancel it, and the frame it leaves is byte-identical to a
-full repaint (D51). Purity (no
+full repaint (D51). A row carries a picture of its window, taken once when the overlay opens
+(D52), and a resize keeps the dragged edge under the pointer instead of a round trip behind it
+(D53). Phase 4's first half is the DRM card: resources, connectors, encoders, CRTCs, mode
+choice and scanout-sized dumb buffers, checked against `/sys` and painted through the pixman
+target without DRM master, so the hardware path can be gated on a machine whose session owns
+the display (D54). Purity (no
 libwayland, no wlroots) runs over all of it. The gate exits 0.
 
 Three roadmap quality items are still open and are not gate clauses: fixed-size in/out
@@ -90,7 +96,8 @@ What exists:
   (generated keymaps, keycodes, modifier state), `cf.scene` (buffer/rect/image nodes, hit
   testing, a software cursor), `cf.grab`, `cf.keybindings`, and `cf.backend.nested` (our
   compositor as a client of another one: its frame goes into the parent's shm buffer, its input
-  comes from the parent's seat). `xdg_popup` and `xdg_positioner` are implemented (menus,
+  comes from the parent's seat), and `cf.backend.drm` (the card: connectors, encoders, CRTCs,
+  mode choice and dumb buffers, everything KMS allows without owning the screen). `xdg_popup` and `xdg_positioner` are implemented (menus,
   tooltips, their grabs and their dismissal), a focus stack decides who gets the keys when a
   window closes, `cf.switcher` draws that stack as an `Alt+Tab` overlay (`cf.font` is a 5x7
   bitmap font with a validated table of printable ASCII), and the renderer tracks damage, applies

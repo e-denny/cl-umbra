@@ -20,6 +20,7 @@ scene graph, seat and focus policy, and the shell protocol state machines."
                (:file "src/keybindings")
                (:file "src/xkb")
                (:file "src/png")
+               (:file "src/drm")
                (:file "src/headless")
                (:file "src/switcher")
                (:file "src/nested")))

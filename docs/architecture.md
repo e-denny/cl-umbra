@@ -103,8 +103,12 @@ buffers and descriptor sending, seat devices, the xdg-shell toplevel handshake) 
 `cf.backend.nested`: a headless compositor whose frame goes into a parent compositor's shm
 buffer and whose input devices are the parent's seat, with two function slots
 (`frame-preparer`/`frame-presenter`) as the whole backend seam. Two sockets, one image, a real
-client inside the nested session -- clause 15. Tinywl, `cl-umbra` and a nested window on a
-foreign compositor are still their plan.
+client inside the nested session -- clause 15. Phase 4a added `cf.backend.drm` v0: libdrm
+through CFFI for resources, connectors, encoders and CRTCs, mode choice, and dumb buffers that
+map and compose with the pixman target (D54). It stops at DRM master on purpose -- `SETCRTC`
+and `PAGE_FLIP` are phase 4b, because they take the display from whoever has it -- so the
+hardware path can be gated while a session is in use. Tinywl, `cl-umbra` and a nested window
+on a foreign compositor are still their plan.
 
 ## 2. Packages
 

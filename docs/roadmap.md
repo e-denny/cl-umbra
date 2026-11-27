@@ -304,8 +304,10 @@ explicitly authorized step (it maps a window on the user's desktop).
 `cf.session`, `cf.backend.drm`
 - [ ] libseat: `open_seat`, `open_device`, `close_device`, switch callbacks; seatd and
       logind; fallback direct VT path
-- [ ] resources/connectors/encoders/CRTCs; preferred mode; `SETCRTC`
-- [ ] dumb buffers: create/map/addfb; double + triple buffering
+- [x] resources/connectors/encoders/CRTCs; preferred mode; each CRTC's current scanout (D54)
+- [ ] `SETCRTC`: take the display, and restore the saved state on exit
+- [x] dumb buffers: create/map/addfb (D54)
+- [ ] double + triple buffering
 - [ ] `PAGE_FLIP` + `read()` vblank; frame callbacks with real timestamps
 - [ ] VT switch away/back; teardown and restore
 - [ ] hotplug add/remove; output re-layout

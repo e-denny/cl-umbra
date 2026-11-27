@@ -294,6 +294,144 @@ one filter byte per scanline, real CRC-32 and Adler-32), because a screenshot is
 a debugging artefact and a test fixture, not a compression benchmark.")
   (:export #:write-png))
 
+(defpackage #:cf.backend.drm
+  (:use #:cl)
+  (:local-nicknames (#:ffi #:wayland.ffi))
+  (:documentation
+   "The DRM backend, first half (docs/framework.md §2, PLAN.md phase 4).
+
+A card, what is plugged into it, mode choice and dumb buffers: the part of KMS
+that changes nothing on screen, and therefore works on a card another session
+already presents on.  SETCRTC and PAGE_FLIP need DRM master and arrive with the
+slice that takes the display, together with the state to put back (D54).")
+  (:export
+   ;; conditions
+   #:drm-error
+   #:drm-error-operation
+   #:drm-error-errno
+   #:drm-error-path
+   ;; the device
+   #:drm-device
+   #:open-drm-device
+   #:close-drm-device
+   #:drm-device-open-p
+   #:drm-device-path
+   #:drm-device-fd
+   #:drm-device-driver-name
+   #:drm-device-version
+   #:drm-device-version-major
+   #:drm-device-version-minor
+   #:drm-device-version-patchlevel
+   #:drm-device-master-p
+   #:drm-device-capabilities
+   #:drm-device-paths
+   ;; what the card says about itself
+   #:drm-inventory
+   #:drm-inventory-driver-name
+   #:drm-inventory-driver-version
+   #:drm-inventory-crtcs
+   #:drm-inventory-connectors
+   #:drm-inventory-encoders
+   #:drm-inventory-framebuffers
+   #:drm-inventory-min-width
+   #:drm-inventory-max-width
+   #:drm-inventory-min-height
+   #:drm-inventory-max-height
+   #:drm-inventory-connector
+   #:drm-inventory-crtc
+   #:drm-inventory-encoder
+   #:drm-inventory-connected-connectors
+   #:drm-mode
+   #:drm-mode-name
+   #:drm-mode-clock
+   #:drm-mode-hdisplay
+   #:drm-mode-hsync-start
+   #:drm-mode-hsync-end
+   #:drm-mode-htotal
+   #:drm-mode-hskew
+   #:drm-mode-vdisplay
+   #:drm-mode-vsync-start
+   #:drm-mode-vsync-end
+   #:drm-mode-vtotal
+   #:drm-mode-vscan
+   #:drm-mode-vrefresh
+   #:drm-mode-flags
+   #:drm-mode-type
+   #:drm-mode-refresh
+   #:drm-mode-refresh-milli-hz
+   #:drm-mode-preferred-p
+   #:drm-mode-better-p
+   #:drm-connection-status
+   #:drm-connector
+   #:drm-connector-id
+   #:drm-connector-name
+   #:drm-connector-type
+   #:drm-connector-type-id
+   #:drm-connector-status
+   #:drm-connector-connected-p
+   #:drm-connector-status-string
+   #:drm-connector-mm-width
+   #:drm-connector-mm-height
+   #:drm-connector-encoder-id
+   #:drm-connector-modes
+   #:drm-connector-encoders
+   #:drm-connector-preferred-mode
+   #:drm-connector-type-name
+   #:drm-pick-mode
+   #:drm-encoder
+   #:drm-encoder-id
+   #:drm-encoder-type
+   #:drm-encoder-crtc-id
+   #:drm-encoder-possible-crtcs
+   #:drm-encoder-possible-clones
+   #:drm-crtc
+   #:drm-crtc-id
+   #:drm-crtc-buffer-id
+   #:drm-crtc-x
+   #:drm-crtc-y
+   #:drm-crtc-width
+   #:drm-crtc-height
+   #:drm-crtc-mode-valid-p
+   #:drm-crtc-mode
+   ;; dumb buffers
+   #:dumb-buffer
+   #:dumb-buffer-device
+   #:dumb-buffer-width
+   #:dumb-buffer-height
+   #:dumb-buffer-bits-per-pixel
+   #:dumb-buffer-handle
+   #:dumb-buffer-pitch
+   #:dumb-buffer-size
+   #:dumb-buffer-mapping
+   #:dumb-buffer-framebuffer-id
+   #:dumb-buffer-mapped-p
+   #:dumb-buffer-framebuffer-p
+   #:dumb-buffer-minimum-size
+   #:dumb-buffer-pointer
+   #:dumb-buffer-pixel
+   #:dumb-buffer-octets
+   #:dumb-buffer-depth
+   #:drm-create-dumb
+   #:drm-map-dumb
+   #:drm-unmap-dumb
+   #:drm-add-framebuffer
+   #:drm-remove-framebuffer
+   #:drm-destroy-dumb
+   #:drm-inventory
+   #:drm-claim-dumb
+   #:drm-map-dumb-memory
+   #:drm-unmap-dumb-memory
+   #:drm-allocate-framebuffer
+   #:drm-release-framebuffer
+   #:drm-release-dumb
+   #:+dumb-buffer-bits-per-pixel+
+   #:+dumb-buffer-depth+
+   #:+mode-type-preferred+
+   ;; the kernel's own view
+   #:drm-sysfs-cards
+   #:drm-sysfs-state
+   #:drm-sysfs-driver-name))
+
 (defpackage #:cf.backend.headless
   (:use #:cl)
   (:local-nicknames (#:render #:cf.render.pixman)
