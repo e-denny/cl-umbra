@@ -41,8 +41,8 @@
    (mode :initarg :mode :initform nil :accessor vt-output-mode)
    (buffer-count :initarg :buffer-count :initform 2 :reader vt-output-buffer-count)
    ;; What is held while the seat is enabled.
-   (device :initform nil :accessor vt-output-device)
-   (device-id :initform nil :accessor vt-output-device-id)
+   (device :initarg :device :initform nil :accessor vt-output-device)
+   (device-id :initarg :device-id :initform nil :accessor vt-output-device-id)
    (scanout :initform nil :accessor vt-output-scanout)
    ;; One render target per scanout buffer, made on first use and kept until the
    ;; output is disabled: a target borrows a buffer's mapping, so making one per
@@ -132,8 +132,15 @@ the compositor still holds."
   (when (vt-output-enabled-p output)
     (return-from enable-vt-output output))
   (let ((session (vt-output-session output)))
+    ;; A device handed to OPEN-VT-OUTPUT is used as it is.  That is not a
+    ;; convenience: on a VT the seat grants DRM master to one descriptor per
+    ;; activation, so opening the card a second time to *check* it takes master away
+    ;; from the descriptor that wants it (measured: a probe's descriptor was master
+    ;; and the output's was refused EACCES a moment later).
     (multiple-value-bind (device id)
-        (open-vt-device output session (vt-output-path output))
+        (if (vt-output-device output)
+            (values (vt-output-device output) (vt-output-device-id output))
+            (open-vt-device output session (vt-output-path output)))
       (setf (vt-output-device output) device
             (vt-output-device-id output) id)
       (handler-case
@@ -178,7 +185,7 @@ two are one function and why the device is closed even if the restore signalled.
 ;;; ---------------------------------------------------------------------------
 
 (defun open-vt-output (session &key (path "/dev/dri/card0") connector crtc-id mode
-                                      (buffer-count 2))
+                                      (buffer-count 2) device device-id)
   "Make the card on PATH this compositor's screen, opened through SESSION.
 
 The output registers both hooks itself and enables immediately when the seat is
@@ -190,11 +197,18 @@ screen size.
 CONNECTOR is a name or NIL for the first connected one, CRTC-ID chooses a CRTC, and
 MODE defaults to the connector's preferred mode: the same choices DRM-OPEN-SCANOUT
 makes, passed through so a compositor can name a screen it wants.  After the first
-enable all three are remembered, so a switch back reprograms the same screen."
+enable all three are remembered, so a switch back reprograms the same screen.
+
+DEVICE and DEVICE-ID are a card the caller already opened through SESSION, and are
+used instead of opening one.  A seat grants DRM master to a single descriptor per VT
+activation, so a caller that has already opened the card must hand the descriptor
+over rather than have a second one opened beside it.  Most compositors pass neither
+and let this function open the card."
   (let ((output (make-instance 'vt-output
                                :session session :path path
                                :connector connector :crtc-id crtc-id :mode mode
-                               :buffer-count buffer-count)))
+                               :buffer-count buffer-count
+                               :device device :device-id device-id)))
     (setf (vt-output-enable-hook output)
           (lambda (session)
             (declare (ignore session))

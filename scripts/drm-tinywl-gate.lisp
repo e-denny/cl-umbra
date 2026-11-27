@@ -117,6 +117,29 @@ names the errno it got and the two things it usually means."
        "libseat answered EACCES: this user may not take the seat")
       (t (format nil "libseat failed with errno ~A" errno)))))
 
+(defun seat-device (session path)
+  "Open PATH through SESSION once, and report what the seat gave us.
+
+Returns (values DEVICE DEVICE-ID).  This is the *only* open of the card in this
+clause, and it is deliberate: a VT seat grants DRM master to one descriptor per
+activation, so a second descriptor opened to `check' the first is a second descriptor
+that takes master away from it (measured -- a probe's descriptor was master, and the
+output's own, opened a moment later, was refused EACCES).  The output is therefore
+handed this device instead of opening its own."
+  (multiple-value-bind (fd id) (cf.session:open-session-device session path)
+    (handler-case
+        (values (cf.backend.drm:open-drm-device-from-fd fd :path path) id)
+      (error (condition)
+        ;; DRM-OPEN-DEVICE-FROM-FD closed the descriptor; the seat still has it open.
+        (ignore-errors (cf.session:close-session-device session id))
+        (error condition)))))
+
+(defun master-refusal (condition)
+  "The errno when CONDITION is a refused TAKE-MASTER, else NIL."
+  (when (and (typep condition 'cf.backend.drm:drm-error)
+             (eq :take-master (cf.backend.drm:drm-error-operation condition)))
+    (cf.backend.drm:drm-error-errno condition)))
+
 (defun open-seat ()
   (handler-case
       (let ((session (cf.session:open-session :name "seat0")))
@@ -160,7 +183,22 @@ another compositor's"
       (unwind-protect
            (handler-case
                (progn
-                 (setf output (cf.backend.vt:open-vt-output session :path path))
+                 (multiple-value-bind (device device-id) (seat-device session path)
+                   (note "the seat's descriptor is master at open: ~:[no~;yes~]; it is the only descriptor this clause opens"
+                         (cf.backend.drm:drm-device-master-p device))
+                   (setf output
+                         (handler-case
+                             (cf.backend.vt:open-vt-output session :path path
+                                                           :device device
+                                                           :device-id device-id)
+                           (cf.backend.drm:drm-error (condition)
+                             (let ((errno (master-refusal condition)))
+                               (if (member errno (list wayland.ffi:+eacces+
+                                                       wayland.ffi:+ebusy+))
+                                   (skip "SET MASTER on ~A was refused (~A).  The seat's descriptor was ~:[not master~;master~] at open, so either another client holds master of the card or the console still owns it.  Nothing was taken; quit the compositor that owns the card (log out of its session, not just its window) and run this clause again" card
+                                         (wayland.ffi:strerror errno)
+                                         (cf.backend.drm:drm-device-master-p device))
+                                   (error condition)))))))
                  (check (cf.backend.vt:vt-output-enabled-p output)
                         "the seat opened ~A and the output came up with it" card)
                  (check (= 1 (cf.session:session-open-device-count session))
