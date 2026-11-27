@@ -3223,3 +3223,90 @@ there is nothing to ask until the VT comes back; the nested backend is untouched
 **a compositor that owns the screen owns the cable too, and the kernel will answer a question it
 cannot deliver -- the poll is not a workaround for udev, it is the same two ioctls udev's
 consumer would make.**
+
+## D63 — A suspend is a gap between two clocks
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** suspend/resume for the VT output (phase 4 exit gate, item 5)
+
+Nothing in this stack is told that the machine slept. logind's `PrepareForSleep` is a
+D-Bus signal and there is no D-Bus client here for the same reason there is no udev one
+(D62); libseat's listener carries `enable_seat` and `disable_seat` and nothing else --
+its own header says so -- and a suspend is not a VT switch, so neither fires. The
+symptom is not a crash: the compositor keeps running with its scanout buffers intact,
+the kernel restores the modeset on resume, and the screen shows whatever survived in
+VRAM, which is not the frame the compositor believes it last drew. With per-buffer
+damage (D61) the compositor then repaints only what changes, so a desktop that nobody
+touches can stay wrong indefinitely.
+
+**Decision.**
+
+1. **The sleep is the difference between two clocks.** `CLOCK_BOOTTIME` counts through a
+   suspend and `CLOCK_MONOTONIC` does not, so `BOOTTIME - MONOTONIC` is the time the
+   machine has spent asleep, and a jump between two iterations of the compositor's own
+   loop is a resume. Neither clock moves for an NTP step, so a corrected wall clock is
+   not mistaken for a sleep. `resume-gap` is the arithmetic alone -- previous and current
+   readings in, seconds out -- so the bounds are a test and not a comment: a negative gap
+   is clamped rather than believed, and a gap under the threshold (2 s) is the loop's own
+   lateness.
+2. **It is on every iteration, not on the hotplug's cadence.** Two `clock_gettime` calls
+   are cheap enough to pay twenty times a second, and the point of a resume is to repaint
+   *now*: a second of stale pixels is a visible bug. The hotplug poll stays at one second
+   because it is an enumeration (D62). The two are separate pumps for that reason, and
+   the compositor calls both.
+3. **The pixels are wrong, not the state -- so the frame history is what goes.** On a
+   resume the CRTC still names our framebuffer and the mode is the mode; what cannot be
+   trusted is the memory behind the buffers. `forget-vt-frame-history` makes every buffer
+   unknown, and a buffer nobody has painted is `:full` (D61), so the next frame repaints
+   everything through the machinery that already exists rather than through a second
+   "force full" flag. `pump-vt-resume` answers `:resumed` when it is that simple.
+4. **If the CRTC is not ours, it is programmed again first.** `vt-output-crtc-ours-p` asks
+   `GETCRTC` (no master needed) whether the CRTC is scanning out this output's front buffer
+   at a valid mode. When it is not -- a card or a driver that restores the console, or a
+   resume that came back to a dead CRTC -- the answer is `:reprogrammed`, which is the
+   hotplug path's blank-then-enable with the remembered connector and mode. Both answers
+   are followed by a full frame and a log line; the difference is that one of them costs a
+   modeset.
+5. **Input is reopened through the seat, and only while the seat is enabled.** libinput's
+   suspend/resume pair is the documented way to say the devices may have been through a
+   sleep: suspend closes them through the seat's callback, resume opens them again. A
+   resume that arrives while the VT belongs to somebody else does nothing here -- the
+   seat's enable hook is already the thing that resumes input when the VT comes back, and
+   reopening devices a disabled seat no longer grants would be a second error on top of a
+   switch we already handle (D56, D60).
+6. **No D-Bus, no lid handling, no save/restore of our own.** The kernel keeps the
+   modeset across a suspend, so there is nothing for us to restore; a suspend that
+   *does* take the seat away (logind switching VTs on the way down) arrives as a
+   disable/enable pair and is handled as a VT switch, not as a resume. A lid-close policy
+   is a desktop's, not a compositor backend's.
+
+**Evidence.** `tests/unit/drm-modeset.lisp` grows by 4 tests (suite 67), the whole suite
+goes from 459 to **463 tests in eighteen suites** (`./scripts/run-tests.sh`, `PASSED`),
+`./scripts/gate.sh` stays **23 passed, 0 failed, 2 skipped**, `./scripts/tinywl-parity.sh`
+still passes 53 headless and 62 nested checks with descriptors `4 -> 4`, and
+`./scripts/check-loads.sh` still reports `purity: no libwayland or libwlroots in the
+image`. The tests pin the arithmetic (no previous reading, an awake loop, thirty seconds
+asleep counted as thirty, an awake second inside the gap not counted, a backwards clock
+clamped) and both outcomes on a recording card: a resume that finds the CRTC ours asks
+the card nothing, forgets the history, counts itself and makes the next frame `:full`
+with no partial frames; a resume that finds the CRTC on framebuffer 0 gives the screen
+back and programs the same connector at the same mode (two modesets: off, then on), also
+full; and a resume with the seat away is `:no-card`, because a VT switch has already
+closed the descriptor. What no test can do is suspend the machine, and that half was **walked on
+2026-11-27**: several suspends with `cl-tinywl --drm` holding the VT, and the desktop came back
+fully redrawn on the return each time -- the case this decision exists for, because a stale frame
+is exactly what per-buffer damage would have preserved if the history had survived the sleep. The
+log lines were not captured for that walk; `cl-tinywl --drm` writes one `:info` line per resume
+with the gap in seconds, so a soak or a repeat walk can keep them.
+
+What this does not do: no `PrepareForSleep`, so a suspend is noticed on the way back
+rather than prepared for (nothing we hold needs closing before sleep, so nothing is lost);
+no lid or idle policy, which belongs to the desktop; no clock-drift discipline for
+animations, since they are event-driven; the nested and headless backends are untouched --
+a nested compositor's parent is awake whenever our loop is, so the gap has nothing to say
+there.
+
+The lesson: **a compositor with no event source for "the machine slept" can still ask the
+kernel -- monotonic time is the one clock a suspend cannot hide from, and the difference
+between the two clocks is the sleep itself, not an estimate of it.**

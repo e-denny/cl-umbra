@@ -138,6 +138,7 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:cmsg-space
    ;; clocks and byte streams
    #:monotonic-seconds
+   #:boottime-seconds
    #:read-into
    #:read-into-pointer
    #:write-from-pointer

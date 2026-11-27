@@ -82,7 +82,13 @@
    (disables :initform 0 :accessor vt-output-disable-count)
    ;; Evidence for the same reason the two above are: how many times a cable changing
    ;; made this output act.  A poll that finds nothing does not count (D62).
-   (hotplugs :initform 0 :accessor vt-output-hotplug-count))
+   (hotplugs :initform 0 :accessor vt-output-hotplug-count)
+   ;; The machine's two clocks as they were at the last iteration, so a gap between
+   ;; them -- the time the machine was suspended -- can be noticed at all (D63).
+   (last-boottime :initform nil :accessor vt-output-last-boottime)
+   (last-monotonic :initform nil :accessor vt-output-last-monotonic)
+   (sleep-gap :initform 0 :accessor vt-output-sleep-gap)
+   (resumes :initform 0 :accessor vt-output-resume-count))
   (:documentation
    "One screen, on a card the seat opens, that comes back by itself.
 
@@ -382,6 +388,88 @@ answer touches nothing but a read of the connector list."
              (adopt-vt-connector output connector)
              (blank-vt-output output)
              (if (attempt-enable) :reprogrammed :failed)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Resume (D63)
+;;; ---------------------------------------------------------------------------
+;;
+;; Nothing in this stack is told that the machine slept.  logind's PrepareForSleep is
+;; a D-Bus signal, and there is no D-Bus client here for the same reason there is no
+;; udev one (D62); libseat's listener has enable and disable and nothing else (its own
+;; header says so).  What is left is the clock: CLOCK_BOOTTIME counts through a
+;; suspend and CLOCK_MONOTONIC does not, so the difference between them is exactly the
+;; time the machine spent asleep -- and it does not move for an NTP step, because
+;; neither clock does.
+
+(defun resume-gap (boottime monotonic last-boottime last-monotonic)
+  "Seconds the machine spent suspended between two readings, or NIL if unknown.
+
+Pure, so the arithmetic is a test rather than a comment: BOOTTIME-THEN and
+MONOTONIC-THEN are the previous iteration's readings."
+  (when (and last-boottime last-monotonic)
+    (max 0 (- (- boottime last-boottime) (- monotonic last-monotonic)))))
+
+(defun vt-output-crtc-ours-p (output)
+  "Is the CRTC still scanning out one of this output's buffers?
+
+A resume may have left the kernel showing something else -- the console, or a
+framebuffer it restored from before this compositor existed -- and the only way to
+know is to ask the card, which GETCRTC answers without master."
+  (let* ((device (vt-output-device output))
+         (scanout (vt-output-scanout output))
+         (crtc-id (vt-output-crtc-id output)))
+    (and device scanout crtc-id
+         (handler-case
+             (let* ((state (drm:drm-crtc-state device crtc-id))
+                    (front (drm:drm-scanout-buffer scanout
+                                                   (drm:drm-scanout-front scanout))))
+               (and (drm:drm-crtc-mode-valid-p state)
+                    (= (drm:drm-crtc-buffer-id state)
+                       (drm:dumb-buffer-framebuffer-id front))))
+           (drm:drm-error () nil)))))
+
+(defun pump-vt-resume (output &key (boottime (ffi:boottime-seconds))
+                                       (monotonic (ffi:monotonic-seconds))
+                                       (threshold 2))
+  "Notice a suspend that happened since the last call, and answer what to do.
+
+Returns one of
+
+  :AWAKE         the clocks agree: the machine did not sleep
+  :RESUMED       it slept; the CRTC is still ours, and the frame history is forgotten
+                 so that the next frame repaints everything -- the pixels on the
+                 screen are not this compositor's any more, even though the state is
+  :REPROGRAMMED  it slept and the CRTC was not ours (or had no mode); the screen was
+                 programmed again with this output's connector and mode, and the next
+                 frame is full
+  :NO-CARD       it slept, but there is no descriptor to check with (the seat was
+                 disabled while we were away); the enable hook will program the screen
+
+The caller owns the clock and must call this once per loop iteration: it is two
+clock_gettime calls in the usual case, which is why it is not on the hotplug's
+one-second cadence (D63)."
+  (let ((gap (resume-gap boottime monotonic
+                         (vt-output-last-boottime output)
+                         (vt-output-last-monotonic output))))
+    (setf (vt-output-last-boottime output) boottime
+          (vt-output-last-monotonic output) monotonic)
+    (cond
+      ((null (vt-output-device output)) :no-card)
+      ((and gap (>= gap threshold))
+       (incf (vt-output-resume-count output))
+       (setf (vt-output-sleep-gap output) gap)
+       ;; The buffers' pixels may not have survived the sleep: whatever the CRTC is
+       ;; showing, nothing in them can be trusted to still be there.
+       (forget-vt-frame-history output)
+       (cond
+         ((and (vt-output-screen-p output) (vt-output-crtc-ours-p output))
+          :resumed)
+         ((vt-output-screen-p output)
+          (blank-vt-output output)
+          (enable-vt-output output :quiet-p t)
+          (if (vt-output-screen-p output) :reprogrammed :no-card))
+         (t :no-card)))
+      (t :awake))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The object a compositor holds

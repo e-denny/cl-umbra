@@ -136,7 +136,9 @@ VT switch -- so master is best effort and the CRTC is the judge, and the VT keys
 compositor's because libinput holds the keyboard. Of phase 4's exit gate, items 1 (TTY session) and
 2 (VT round trip) are walked; hotplug is walked (D62: the cable is polled, an unplug gives
 the screen back while keeping the card, and a replug programs it again -- several cycles on
-2026-11-27), and suspend/resume and the 8-hour soak remain. `cl-umbra` and a nested window on a foreign compositor are still
+2026-11-27), suspend/resume is walked (D63: the sleep is read from the two clocks, the
+frame after it is full, and the CRTC is reprogrammed if the kernel did not keep it -- several
+suspends on 2026-11-27, fully redrawn each return), and the 8-hour soak is what remains. `cl-umbra` and a nested window on a foreign compositor are still
 their plan.
 
 ## 2. Packages

@@ -833,6 +833,11 @@ the compositor's (D58's DRM-SCANOUT-RENDER is what draws into the buffer).")
    ;; hotplug, as a question rather than an event (D62)
    #:pump-vt-hotplug
    #:blank-vt-output
+   ;; resume, noticed from the two clocks (D63)
+   #:pump-vt-resume
+   #:resume-gap
+   #:vt-output-resume-count
+   #:vt-output-sleep-gap
    ;; drawing, one frame at a time
    #:vt-output-frame-target
    #:make-vt-frame-hooks

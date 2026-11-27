@@ -265,6 +265,15 @@ Four things are worth knowing about it.
   record a buffer's first paint as a screen-wide change and make every following frame full,
   D61), and does not flip at all when nothing changed. Drawing and presenting stay separate, and
   one frame is one vblank.
+* **A resume is a gap between two clocks.** Nothing here is told that the machine slept:
+  `PrepareForSleep` is D-Bus and there is no D-Bus client (as there is no udev, D62), and
+  libseat's listener carries enable and disable only. `CLOCK_BOOTTIME` counts through a suspend
+  and `CLOCK_MONOTONIC` does not, so `pump-vt-resume` -- two `clock_gettime` calls per loop
+  iteration -- calls a jump between them a resume (D63). The pixels are then the thing that is
+  wrong, not the state: the frame history is forgotten and the next frame is full, and if
+  `GETCRTC` says the CRTC is no longer scanning out this output's front buffer, the remembered
+  connector and mode are programmed again first. `cl-tinywl --drm` reopens input through the
+  seat on the same signal, and logs one line per resume with the gap in seconds.
 * **Master is best effort, and the CRTC is the judge.** A descriptor from logind does not
   arrive with the right to be master: on this machine `SET MASTER` answers `EACCES` while
   `SETCRTC`, `PAGE_FLIP` and a restore all succeed, so a refusal is recorded and the

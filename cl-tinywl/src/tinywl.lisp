@@ -688,6 +688,57 @@ the next poll asks again"))
           (srv:log-message :warn "tinywl: asking the card about its cable failed: ~A"
                            condition))))))
 
+(defun resume-hardware (session)
+  "Let input reopen its devices after a resume (D56, D63).
+
+libinput's suspend/resume pair is the documented way to say `the devices you hold may
+have been through a sleep': suspend closes them through the seat, resume opens them
+again.  It is called only while the seat is enabled -- a resume while the VT is
+somebody else's would reopen devices the seat no longer grants, and the seat's own
+enable hook is what handles that case when the VT comes back."
+  (let ((input (session-input session))
+        (seat (session-seat session)))
+    (when (and input seat (seat:session-enabled-p seat))
+      (cf:suspend-input input)
+      (cf:resume-input input))))
+
+(defun pump-resume (session)
+  "Notice a suspend the machine came back from, and make the screen true again (D63).
+
+Nothing here is told that the machine slept: logind's PrepareForSleep is D-Bus and this
+project has no D-Bus client (as it has no udev, D62).  CLOCK_BOOTTIME runs through a
+suspend and CLOCK_MONOTONIC does not, so the gap between them is the sleep, and it does
+not move for an NTP step.  What the gap buys is one honest thing: the pixels on the
+screen belong to memory that may not have survived, so the frame history is forgotten
+and the next frame is full -- and if the CRTC is no longer ours, the connector is
+programmed again before that frame."
+  (let ((output (session-vt-output session)))
+    (when output
+      (case (vt:pump-vt-resume output)
+        (:resumed
+         (cf:request-frame (session-compositor session))
+         (srv:log-message :info
+                          "tinywl: resumed after ~,1Fs asleep; the screen is still ours, ~
+so the next frame repaints it in full"
+                          (vt:vt-output-sleep-gap output))
+         (resume-hardware session))
+        (:reprogrammed
+         (let* ((compositor (session-compositor session))
+                (scale (cf:compositor-scale compositor)))
+           (cf:resize-compositor compositor
+                                  (max 1 (floor (vt:vt-output-width output) scale))
+                                  (max 1 (floor (vt:vt-output-height output) scale)))
+           (cf:request-frame compositor)
+           (srv:log-message :info
+                            "tinywl: resumed after ~,1Fs asleep; the screen was not ours, ~
+so ~A was programmed again at ~Dx~D"
+                            (vt:vt-output-sleep-gap output)
+                            (or (vt:vt-output-connector-name output) "the connector")
+                            (vt:vt-output-width output)
+                            (vt:vt-output-height output))
+           (resume-hardware session)))
+        (otherwise nil)))))
+
 (defun advance (session &key (timeout 0.01))
   "Advance SESSION one cycle and return it.
 
@@ -702,6 +753,9 @@ own loop; `run' is the loop for a session on its own."
        ;; The seat first: an enable or disable callback applies to this cycle's
        ;; frame, and a display cycle that ran first would draw a frame for a screen
        ;; the provider has already taken away.
+       ;; The machine may have slept and come back while this loop was not running:
+       ;; that is noticed first, because it can change what the screen even is (D63).
+       (pump-resume session)
        (when seat
          (seat:dispatch-session seat :timeout 0))
        ;; Then the cable, for the same reason: a screen given back or programmed by a

@@ -327,7 +327,9 @@ explicitly authorized step (it maps a window on the user's desktop).
       reprogrammed with its own mode (D62, polled -- no udev). Walked 2026-11-27 on `card1`:
       several pull/replace cycles, the desktop back with its windows each time
 - [ ] multi-output: a second connector as its own output; output re-layout
-- [ ] suspend/resume hooks
+- [x] suspend/resume: found from the `CLOCK_BOOTTIME`/`CLOCK_MONOTONIC` gap, full repaint
+      after it, CRTC verified and reprogrammed if needed, input reopened (D63). Walked
+      2026-11-27: several suspends, the desktop fully redrawn each return
 
 `cf.backend.libinput`, `cf.input` (xkbcommon)
 - [x] libinput context: udev (assign seat, hotplug) and path (add by name) (D56)

@@ -759,12 +759,28 @@ leak into a child."
   (clock-id :int) (time :pointer))
 
 (defconstant +clock-monotonic+ 1)
+(defconstant +clock-boottime+ 7
+  "CLOCK_BOOTTIME: the monotonic clock, plus the time the machine spent suspended.")
 
 (defun monotonic-seconds ()
   "CLOCK_MONOTONIC as seconds, for deadlines that must not jump when the wall
 clock is adjusted."
   (cffi:with-foreign-object (time '(:struct timespec))
     (when (minusp (%clock-gettime +clock-monotonic+ time))
+      (syscall-failed 'clock-gettime (errno)))
+    (+ (timespec-seconds time)
+       (/ (timespec-nanoseconds time) 1d9))))
+
+(defun boottime-seconds ()
+  "CLOCK_BOOTTIME as seconds: monotonic, and it keeps counting while suspended.
+
+The difference between this and MONOTONIC-SECONDS is the only thing a program with
+no D-Bus client can ask about a suspend: it does not move for an NTP step (neither
+clock does), and it moves by exactly the time the machine was asleep.  A compositor
+compares it with the previous iteration of its own loop and calls a jump a resume
+(D63)."
+  (cffi:with-foreign-object (time '(:struct timespec))
+    (when (minusp (%clock-gettime +clock-boottime+ time))
       (syscall-failed 'clock-gettime (errno)))
     (+ (timespec-seconds time)
        (/ (timespec-nanoseconds time) 1d9))))

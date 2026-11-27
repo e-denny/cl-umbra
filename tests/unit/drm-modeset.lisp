@@ -1261,3 +1261,85 @@ descriptor back."
     (session:note-seat-disabled session)
     (ok (eq :no-card (vt:pump-vt-hotplug output))
         "a VT switch closes the card, so there is nothing to poll until the seat comes back")))
+
+;;; ---------------------------------------------------------------------------
+;;; Resume: the sleep the clocks remember (D63)
+;;; ---------------------------------------------------------------------------
+
+(deftest the-resume-gap-is-the-time-the-machine-was-asleep
+  (ok (null (vt:resume-gap 100 50 nil nil))
+      "no previous reading is not a gap")
+  (ok (zerop (vt:resume-gap 100.5 50.5 100 50))
+      "two readings of an awake machine, one loop apart")
+  (ok (= 30 (round (vt:resume-gap 130.1 50.1 100 50)))
+      "boottime counts through a suspend and monotonic does not: thirty seconds is thirty")
+  (ok (= 29 (round (vt:resume-gap 130.1 51.1 100 50)))
+      "the loop's own second awake is not counted as sleep")
+  (ok (zerop (vt:resume-gap 99 51 100 50))
+      "a negative gap -- a clock that went backwards -- is clamped, not believed"))
+
+(defun call-count (device)
+  (length (recorded device)))
+
+(defun the-crtc-is-showing (device output)
+  "Make DEVICE's saved CRTC state claim the framebuffer OUTPUT is showing."
+  (let* ((scanout (vt:vt-output-scanout output))
+         (front (drm:drm-scanout-buffer scanout (drm:drm-scanout-front scanout)))
+         (crtc (drm:drm-inventory-crtc (recording-inventory device) 33)))
+    (setf (drm:drm-crtc-buffer-id crtc) (drm:dumb-buffer-framebuffer-id front)
+          (drm:drm-crtc-mode-valid-p crtc) t)
+    crtc))
+
+(deftest a-resume-that-finds-the-screen-ours-repaints-it-in-full
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (let ((device (vt:vt-output-device output)))
+      (cf:render-frame compositor)
+      (cf:render-frame compositor)
+      (ok (= 2 (vt:vt-output-frame-sequence output)) "two frames drawn")
+      (ok (eq :awake (vt:pump-vt-resume output :boottime 100 :monotonic 50))
+          "the first call has nothing to compare with")
+      (the-crtc-is-showing device output)
+      (let ((calls (call-count device)))
+        (ok (eq :resumed (vt:pump-vt-resume output :boottime 130.1 :monotonic 50.1))
+            "thirty seconds of boottime with no monotonic time is a sleep")
+        (ok (= calls (call-count device))
+            "and the card is asked nothing: the CRTC was still ours")
+        (ok (= 1 (vt:vt-output-resume-count output)) "the resume is counted")
+        (ok (= 30 (floor (vt:vt-output-sleep-gap output))) "with how long it lasted")
+        (ok (zerop (vt:vt-output-frame-sequence output))
+            "the buffers' pixels cannot be trusted, so the history is gone")
+        (cf:render-frame compositor)
+        (ok (eq :full (cf:output-damage-bounds compositor))
+            "and the frame after a resume is full, not whatever changed")
+        (ok (zerop (cf:compositor-partial-frame-count compositor))
+            "counted as a full frame")))))
+
+(deftest a-resume-that-finds-the-screen-not-ours-programs-it-again
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (let ((device (vt:vt-output-device output)))
+      (cf:render-frame compositor)
+      (vt:pump-vt-resume output :boottime 100 :monotonic 50)
+      ;; The CRTC still says framebuffer 0: the kernel restored something that is not
+      ;; ours, which is what a resume on a card without modeset restore looks like.
+      (setf (drm:drm-crtc-buffer-id
+             (drm:drm-inventory-crtc (recording-inventory device) 33))
+            0)
+      (let ((programs (length (find-calls device :set-crtc))))
+        (ok (eq :reprogrammed (vt:pump-vt-resume output
+                                               :boottime 145 :monotonic 50.2))
+            "forty-five seconds asleep, and the screen is not this compositor's")
+        (ok (= (+ 2 programs) (length (find-calls device :set-crtc)))
+            "so the screen is given back and programmed again -- two modesets, not one")
+        (let ((last-call (car (last (find-calls device :set-crtc)))))
+          (ok (equal '(7) (sixth last-call)) "through the same connector")
+          (ok (string= "1024x768" (seventh last-call)) "and at the same mode"))
+        (ok (= 1 (vt:vt-output-resume-count output)) "counted once")
+        (ok (= 1024 (vt:vt-output-width output)) "at the same connector and mode")))))
+
+(deftest a-resume-while-the-seat-is-away-has-nothing-to-program
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (declare (ignore compositor))
+    (vt:pump-vt-resume output :boottime 100 :monotonic 50)
+    (vt:disable-vt-output output)
+    (ok (eq :no-card (vt:pump-vt-resume output :boottime 130 :monotonic 50.1))
+        "a VT switch closed the descriptor: nothing to check until the seat comes back")))

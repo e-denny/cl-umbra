@@ -61,7 +61,7 @@ The scripts go through `wayland.test.runner`, which names the eighteen suites in
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 459 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 463 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -698,6 +698,19 @@ Phase 4's fifth slice is the VT, and it adds the twenty-fifth:
     **walked 2026-11-27**: several pull/replace cycles in one session, the desktop back each time
     with its windows, `cl-tinywl --drm` logging one line per transition.
 
+    Four more tests are resume (D63). Nothing tells this stack that the machine slept --
+    `PrepareForSleep` is D-Bus, and libseat's listener carries enable and disable only -- so the
+    sleep is the gap between `CLOCK_BOOTTIME` (which counts through a suspend) and
+    `CLOCK_MONOTONIC` (which does not), measured across two iterations of the compositor's own
+    loop. The arithmetic is pinned (no previous reading, an awake loop, thirty seconds asleep,
+    an awake second inside the gap, a backwards clock clamped), and so are both outcomes on a
+    recording card: a resume that finds the CRTC ours asks the card nothing, forgets the frame
+    history and makes the next frame `:full`; a resume that finds the CRTC on framebuffer 0
+    gives the screen back and programs the same connector and mode again; and a resume with the
+    seat away is `:no-card`, because the VT switch already closed the descriptor. What only a
+    suspend can answer is the §11 item, and it was **walked 2026-11-27**: several suspends from
+    the console, the desktop fully redrawn on each return.
+
 All twenty-five clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
@@ -942,7 +955,14 @@ Preconditions the automated clauses cannot arrange for themselves:
       stay alive; the return programs the connector again and resizes the compositor. The log
       lines (`tinywl: ... was unplugged`, `tinywl: ... is on again at WxH`) were not captured for
       this walk -- a later soak should keep them
-- [ ] suspend/resume ×5
+- [x] suspend/resume (D63). **Walked 2026-11-27**: several suspends with `cl-tinywl --drm`
+      holding the VT, and the desktop came back **fully redrawn** each time -- no stale frame, no
+      black screen, windows and typed text intact. The mechanism is in the clocks
+      (`CLOCK_BOOTTIME` against `CLOCK_MONOTONIC`), the frame history is forgotten so the first
+      frame after a resume is full, the CRTC is checked with `GETCRTC` and programmed again if it
+      is not ours, and input is reopened through the seat. The log lines
+      (`tinywl: resumed after N.Ns asleep; ...`) were not captured for this walk -- the soak
+      should keep them
 - [ ] lid close/open (if laptop)
 - [ ] 8-hour soak with an animating client
 - [ ] client kill -9 during drag, during resize, during a popup grab
