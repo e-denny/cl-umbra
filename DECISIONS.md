@@ -2646,3 +2646,100 @@ ours), no triple buffering, no damage-driven redraw (the demo repaints whole fra
 hotplug, no EGL. The lesson: **owning a screen is a debt, and the debt is paid in the state you
 read before you took it -- connectors included, because the kernel will not accept the mode
 without them.**
+
+---
+
+## D56 — Input is a decode path and a permission; the seat is an availability subscription
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** seats and input (phase 4, third slice)
+
+4b left phase 4 with a screen it could take and nothing to put on it. This slice is the other
+half of input: which device the kernel says a key came from, and who is allowed to open that
+device at all. It was built while a live compositor owned the session, which turned out to be
+the most informative constraint of the whole slice.
+
+**Decision.**
+
+1. **The slice is the decode path, not the session takeover.** `cf.session` (libseat) and
+   `cf.backend.libinput` land together, but the module that *runs a compositor on a VT* is 4d's
+   business. What is proved here is that a device's own reports arrive, are named, and reach a
+   compositor's seat through the same `inject-*` calls a test uses.
+
+2. **Access is the `input` group, chosen deliberately from four routes.** The candidates were a
+   virtual keyboard written through `/dev/uinput`, logind's `TakeDevice` through libseat, the
+   `input` group, and a decode-only slice with fixtures. The group wins because it is a
+   permission on the device nodes and not on the session: nothing is grabbed, no seat protocol
+   is entered, and the compositor already reading those nodes keeps its keys. It costs a
+   `usermod -aG input`, a re-login (group membership is applied by PAM, so a shell that predates
+   the change keeps the old set -- the gate says exactly that rather than reporting `EACCES` as
+   a defect), and it does not scale to multi-seat. `TakeDevice` is the multi-seat story and
+   belongs with the VT work in 4d, where a compositor owns a seat anyway.
+
+3. **A seat is a subscription, so the session is a state machine, not a file handle.** The
+   provider calls `enable_seat` when the seat becomes usable and `disable_seat` when it goes
+   away; devices may be revoked; a disable must be acknowledged after the devices are closed, or
+   the provider closes them itself and the closes then report `EBADF`. So: `:opening`,
+   `:enabled`, `:disabled`, `:closed`; enable and disable hooks called *after* the state changes
+   (a hook that reopens devices has to find the seat enabled); every callback error recorded
+   rather than signalled, because an error escaping a C callback unwinds through C; and eight
+   generics (`%open-seat`, `%close-seat`, `%acknowledge-disable`, `%open-device`,
+   `%close-device`, `%dispatch`, `%switch-session`, `%seat-fd`) so the machine has unit tests.
+
+4. **A session another client controls is a skip, and libseat's errno is the last backend's.**
+   Measured on this machine: seatd is inactive; logind answers `EBUSY` to `Session.TakeControl`
+   because the running compositor holds it (a C probe, `/tmp/seat-probe.c`, showed
+   `Could not take control of session: Device or resource busy`); libseat then falls through to
+   its no-op backend and returns `ENOSYS`. The gate names both errnos and skips. Working around
+   it -- stealing control, asking logind for a device behind the session's back -- would break
+   the session that is working, which is the same judgement D55 makes about a card another
+   master owns.
+
+5. **libinput opens devices through its interface, and the seat is optional.** The interface's
+   `open_restricted` asks `cf.session` when there is a seat and `open(2)` when there is not;
+   libinput cannot tell the difference. That is why one decode path serves both worlds, and why
+   the gate can prove the device half without a seat.
+
+6. **A delta becomes a position here, and the clamp is on the accumulator.** A mouse reports
+   movement, the seat wants a position; accumulating without clamping means a pointer pushed
+   5000 pixels past the edge and brought back five is at 4995, not 794. The clamp is applied to
+   the running position on every event (D47's rule, applied to the device instead of a grab).
+
+7. **The legacy axis event is not decoded.** Since libinput 1.19 every scroll is also delivered
+   as `SCROLL_WHEEL`/`SCROLL_FINGER`/`SCROLL_CONTINUOUS`, and `POINTER_AXIS` is documented as
+   sent *in addition*. Decoding both scrolls twice, which is a bug that feels like a sticky
+   wheel rather than a bug.
+
+8. **An unnamed key is reported, not dropped.** libinput reports evdev codes; the phase-3 table
+   names the keys a compositor needs. A key outside it is `:unknown-key` with its code, because
+   "nothing happened" and "there is no such key here" must not look the same in a log.
+
+9. **The evdev-to-keysym join lives in `cf.input`, beside the table.** `key-entry-for-code` and
+   `key-name-for-code` index the one table rather than adding a second one, so a key that is in
+   the keymap is a key a device can produce, and the shifted keysym name is never the answer for
+   an unshifted code.
+
+10. **No `/dev/uinput` in the gate.** A virtual keyboard would prove the round trip on a device
+    we create, and it would also appear in the live session as a real keyboard -- a test key
+    would be typed into whatever window has focus. The chain clause feeds raw events into a real
+    compositor's seat instead: same translation, no reach into somebody's session.
+
+**Evidence.** `scripts/input-gate.sh` (clause 23): **34 checks, 1 skip, 0 failed**, 18 event
+nodes present and 9 accepted by libinput (`Power Button`, `IKBC USB Keyboard` and its
+consumer/system/mouse siblings, the mouse, `Eee PC WMI hotkeys`), every accepted device announced
+exactly once and configured, descriptor count identical before and after, and the chain:
+evdev 60 fires an `F2` binding, 5000-pixel motion clamps to 799 and comes back from the edge
+(795), one wheel click is one axis event, code 240 is counted as unknown. The seat part skips
+with libseat's `ENOSYS` (logind's `EBUSY` behind it) because this session has an owner. Unit
+tests: `tests/unit/session.lisp` (12 tests) and `tests/unit/libinput.lisp` (16 tests) take the suite from **386 tests in fifteen suites** to **413 tests in seventeen**;
+`./scripts/run-tests.sh` prints `PASSED`. Cold build into an empty fasl tree: our files compile,
+babel's pre-existing warnings and nothing else. `libseat.so.1` and `libinput.so.10` are now
+load-time dependencies of `cl-compositor-framework`, like `libdrm.so.2` (D4's category, and the
+purity clause still finds no libwayland or libwlroots). What this does not do: no VT handover
+callbacks exercised (4d), no libxkbcommon (4d), no udev hotplug inside a running compositor
+(the path context is what the gate uses; the udev context is implemented and untested live), no
+touch, tablet, gesture or switch events, no cursor in the scanout buffer, no `wl_keyboard`
+repeat handling beyond what phase 3 had. The lesson: **the honest test of a permission is
+opening the file, and the honest test of availability is the callback -- everything else is a
+guess about somebody else's machine.**

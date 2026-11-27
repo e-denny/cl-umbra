@@ -155,6 +155,29 @@ person reading the keymap -- finds the row it is in."
   "The keysym name for NAME: what a keybinding table and a log line want."
   (sixth (key-entry name)))
 
+(defparameter +key-index-by-code+
+  (let ((table (make-hash-table)))
+    (dolist (entry +keys+ table)
+      (setf (gethash (second entry) table) entry)))
+  "evdev keycode -> that key's row in +KEYS+.
+
+An index, not a second table: the table above stays the single source of truth for
+the map, the modifier and the name, and a code it does not name simply has no row.")
+
+(defun key-entry-for-code (code)
+  "The +KEYS+ row whose evdev keycode is CODE, or NIL."
+  (and (integerp code) (gethash code +key-index-by-code+)))
+
+(defun key-name-for-code (code)
+  "The keysym name an evdev CODE produces, or NIL when the table has no row for it.
+
+This is the direction a real keyboard arrives in: libinput reports evdev codes, and
+the seat speaks keysym names (INJECT-KEY's argument), because that is what a
+keybinding table and a client's xkbcommon understand.  NIL is a fact worth
+reporting rather than an error -- a multimedia key is not a bug (D56)."
+  (let ((entry (key-entry-for-code code)))
+    (and entry (sixth entry))))
+
 (defparameter +modifier-shift+ 1)
 (defparameter +modifier-lock+ 2)
 (defparameter +modifier-control+ 4)

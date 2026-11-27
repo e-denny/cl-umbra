@@ -67,6 +67,8 @@ already speak in keycodes and masks, so that change stays inside this package.")
    #:keycode
    #:xkb-keycode
    #:key-name
+   #:key-entry-for-code
+   #:key-name-for-code
    #:key-modifier
    #:key-modifier-mask
    #:modifier-mask
@@ -497,6 +499,159 @@ project keeps rather than works around.")
    #:drm-sysfs-state
    #:drm-sysfs-driver-name))
 
+(defpackage #:cf.session
+  (:use #:cl)
+  (:local-nicknames (#:ffi #:wayland.ffi))
+  (:documentation
+   "The seat, through libseat (docs/framework.md §2, PLAN.md phase 4, D56).
+
+A seat is an availability subscription, not a file: logind (or seatd) calls
+enable_seat and disable_seat, every device it handed out may be revoked when the
+VT goes away, and a disable has to be acknowledged.  SESSION is that state
+machine; the eight generics at the bottom of the module are the calls that need a
+real seat, so a test can stand a recording session in their place.")
+  (:export
+   ;; conditions
+   #:session-error
+   #:session-error-operation
+   #:session-error-errno
+   #:session-error-path
+   #:session-not-enabled
+   ;; the session
+   #:session
+   #:session-id
+   #:session-name
+   #:session-seat-name
+   #:session-state
+   #:session-state-string
+   #:session-fd
+   #:session-seat-pointer
+   #:session-devices
+   #:session-device-paths
+   #:session-open-device-count
+   #:session-enabled-p
+   #:session-disabled-p
+   #:session-closed-p
+   #:session-enable-count
+   #:session-disable-count
+   #:session-dispatch-count
+   #:session-failed-closes
+   #:session-callback-errors
+   #:session-on-enabled
+   #:session-on-disabled
+   ;; what a compositor does with it
+   #:open-session
+   #:close-session
+   #:dispatch-session
+   #:open-session-device
+   #:close-session-device
+   #:close-all-session-devices
+   #:switch-session-to
+   ;; the state machine, for tests and for a fake seat
+   #:note-seat-enabled
+   #:note-seat-disabled
+   ;; the eight calls
+   #:%open-seat
+   #:%close-seat
+   #:%acknowledge-disable
+   #:%open-device
+   #:%close-device
+   #:%dispatch
+   #:%switch-session
+   #:%seat-fd))
+
+(defpackage #:cf.backend.libinput
+  (:use #:cl)
+  (:local-nicknames (#:ffi #:wayland.ffi)
+                    (#:input #:cf.input)
+                    (#:session #:cf.session)
+                    (#:reactor #:wayland.reactor)
+                    (#:srv #:wayland.server))
+  (:documentation
+   "Devices into events, events into the seat (docs/framework.md §2, D56).
+
+libinput's heuristics, a descriptor that has to be dispatched, and the
+translation from what a device reports (evdev codes, deltas, scroll values) to what
+the seat wants (keysym names, output coordinates, named buttons).  The pure half
+-- classification, pointer accumulation, clamping, key naming -- is what the unit
+tests drive; the context and the event pointers are the C half.")
+  (:export
+   #:input-error
+   #:input-error-operation
+   #:input-error-detail
+   #:input-driver
+   #:input-driver-id
+   #:input-driver-session
+   #:input-driver-width
+   #:input-driver-height
+   #:input-driver-pointer-x
+   #:input-driver-pointer-y
+   #:input-driver-devices
+   #:input-driver-device-names
+   #:input-driver-event-count
+   #:input-driver-key-count
+   #:input-driver-motion-count
+   #:input-driver-button-count
+   #:input-driver-axis-count
+   #:input-driver-ignored-count
+   #:input-driver-unknown-key-count
+   #:input-driver-device-added-count
+   #:input-driver-device-removed-count
+   #:input-driver-config-applied-count
+   #:input-driver-open-count
+   #:input-driver-suspended-p
+   #:input-driver-callback-errors
+   #:input-driver-source
+   #:input-driver-sink
+   #:make-input-driver
+   #:open-input
+   #:close-input
+   #:start-input
+   #:stop-input
+   #:suspend-input
+   #:resume-input
+   #:poll-input
+   #:add-input-device
+   #:input-fd
+   #:compositor-sink
+   #:deliver
+   #:apply-raw-event
+   #:read-event
+   #:handle-event
+   #:raw-event
+   #:make-raw-event
+   #:raw-event-type
+   #:raw-event-kind
+   #:raw-event-key
+   #:raw-event-key-state
+   #:raw-event-dx
+   #:raw-event-dy
+   #:raw-event-absolute-x
+   #:raw-event-absolute-y
+   #:raw-event-button
+   #:raw-event-button-state
+   #:raw-event-axis
+   #:raw-event-value
+   #:raw-event-device
+   #:event-kind
+   #:button-name
+   #:key-state-keyword
+   #:button-state-keyword
+   #:axis-keyword
+   #:clamp-coordinate
+   #:accumulate-pointer
+   #:+event-device-added+
+   #:+event-device-removed+
+   #:+event-keyboard-key+
+   #:+event-pointer-motion+
+   #:+event-pointer-button+
+   #:+event-pointer-scroll-wheel+
+   #:+event-pointer-scroll-finger+
+   #:+event-pointer-scroll-continuous+
+   #:+cap-keyboard+
+   #:+cap-pointer+
+   #:+cap-touch+))
+
 (defpackage #:cf.backend.headless
   (:use #:cl)
   (:local-nicknames (#:render #:cf.render.pixman)
@@ -793,6 +948,9 @@ that, so a compositor chooses it by binding START-SWITCHER.")
                 #:switcher-entries
                 #:switcher-index
                 #:switcher-selected)
+  (:import-from #:cf.backend.libinput
+                #:start-input
+                #:stop-input)
   (:documentation
    "The compositor framework: everything wlroots provides, in Lisp.
 
@@ -863,6 +1021,8 @@ docs/framework.md §1 follow.")
    #:inject-pointer-leave
    #:inject-pointer-button
    #:inject-pointer-axis
+   #:start-input
+   #:stop-input
    #:compositor-frame-count
    #:write-png
    #:write-frame-png

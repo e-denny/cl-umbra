@@ -19,10 +19,10 @@ decomposition is the part worth copying.
 | `cf.backend` | `wlr_backend` + autocreate | 2 | one interface over headless, nested, DRM; outputs and input device events |
 | `cf.backend.headless` | `wlr_backend_headless` | 2 | fake output(s), frame timer, deterministic pixels |
 | `cf.backend.nested` | `wlr_backend_wayland` | 3 | our compositor as a client of a parent compositor |
-| `cf.backend.drm` | `wlr_backend_drm` (dumb path) | 4 | the card, connectors, encoders, CRTCs, mode choice, dumb buffers (D54), and the screen: master, SETCRTC, page flips and restore (D55); seats/input and VT handover next |
-| `cf.backend.libinput` | `wlr_backend_libinput` | 4 | device enumeration, hotplug, event decoding |
+| `cf.backend.drm` | `wlr_backend_drm` (dumb path) | 4 | the card, connectors, encoders, CRTCs, mode choice, dumb buffers (D54), and the screen: master, SETCRTC, page flips and restore (D55); the seat is `cf.session` (D56), the cursor in the scanout and the VT handover are 4d |
+| `cf.backend.libinput` | `wlr_backend_libinput` | 4 | device enumeration and hotplug (udev), one flat event stream decoded into seat calls, pointer accumulation and clamping, key naming (D56) |
 | `cf.backend.multi` | `wlr_backend_multi` | 4 | several backends in one session (DRM + nested for debugging) |
-| `cf.session` | `wlr_session` (libseat) | 4 | seat/VT ownership, device open, switch away/back |
+| `cf.session` | `wlr_session` (libseat) | 4 | seat availability, device open and close, acknowledging a disable, switching VT (D56); the VT callbacks are exercised in 4d, when a compositor runs on one |
 | `cf.render` | `wlr_renderer` | 2 | renderer protocol, format tables, `init-wl-display` |
 | `cf.render.pixman` | `wlr_renderer_pixman` | 2 | CPU reference renderer |
 | `cf.render.gles2` | `wlr_renderer_gles2` | 5 | GPU renderer, EGL/GBM, shaders |
@@ -197,6 +197,67 @@ if an earlier one failed; presenting always waits; and restoring names the conne
 because `SETCRTC` with a mode and no connectors is `EINVAL`. Which cards a *program* is willing to
 take is that program's policy: the gate and the demo take a virtual one (`vkms`) unless a person
 names a card and sets `CL_DRM_MODESET_ALLOW=1`.
+
+### The seat and the devices
+
+Phase 4's third slice is the other end of phase 3's input: what a device reports, and who is
+allowed to open it. Two modules, because they fail for different reasons.
+
+`cf.session` is libseat and very little else, and what it wraps is an *availability
+subscription*, not a file: the provider calls `enable_seat` and `disable_seat`, every device
+fd it handed out may be revoked when the VT goes away, and a disable has to be acknowledged
+after the devices are closed or the provider closes them itself. The module is therefore a
+state machine (`:opening`, `:enabled`, `:disabled`, `:closed`) over eight generics
+(`%open-seat`, `%close-seat`, `%acknowledge-disable`, `%open-device`, `%close-device`,
+`%dispatch`, `%switch-session`, `%seat-fd`), so the machine has tests and the library has a
+seam.
+
+```lisp
+(let ((session (cf.session:open-session
+                :on-enabled (lambda (s) (declare (ignore s)) (reopen-my-devices))
+                :on-disabled (lambda (s) (declare (ignore s)) (suspend-my-devices)))))
+  (unwind-protect
+       (progn
+         ;; the seat connection is a reactor source like any other
+         (cf.session:dispatch-session session :timeout 0)
+         (multiple-value-bind (fd id) (cf.session:open-session-device session "/dev/input/event3")
+           (declare (ignore id))
+           ;; ... use fd ...
+           ))
+    (cf.session:close-session session)))
+```
+
+`cf.backend.libinput` is the decode path. libinput does the hard part -- acceleration, taps,
+disable-while-typing -- and hands back one flat stream: a key with an evdev code, a motion
+*delta*, a button, a scroll value. Above it everything is output coordinates, keysym names and
+Wayland serials, so this module owns exactly the translation plus the two pieces of state it
+needs: where the pointer is, and which devices are open. Its interface struct is how it opens
+devices, so it asks the seat when there is one and `open(2)` when there is not -- which is why
+the same code runs under logind and under a plain `input`-group login.
+
+```lisp
+(let ((driver (cf:start-input compositor)))       ; a reactor source over libinput's fd
+  (unwind-protect
+       (loop (cf:compositor-run-once compositor))
+    (cf:stop-input driver)))
+```
+
+Three rules it keeps. A `libinput_get_event` event is always destroyed, in an
+`unwind-protect`. A pointer delta is *clamped when accumulated*, not when reported, or a mouse
+pushed past the right edge and brought back jumps from 5000 pixels out. And a key the phase-3
+table does not name is reported (`:unknown-key` with its code), never dropped: "nothing
+happened" and "no such key" are different reports.
+
+`LIBINPUT_EVENT_POINTER_AXIS` (403) is deliberately not decoded: since libinput 1.19 every
+scroll is also delivered as `SCROLL_WHEEL`/`SCROLL_FINGER`/`SCROLL_CONTINUOUS`, and the legacy
+event is documented as sent *in addition* -- decoding both scrolls twice.
+
+Access is the decision the plan said not to assume. `/dev/input/event*` is `root:input 0660`
+with no ACL here, so this project's answer (D56) is the `input` group, which is a permission
+on the device nodes and not on the session: nothing enters the seat protocol, nothing is
+grabbed, and the compositor that already reads those nodes keeps its keys. The gate says which
+of the two worlds it is in, and skips the device part with that sentence when the group is not
+in the process's effective set.
 
 Contracts:
 
@@ -471,12 +532,15 @@ focus stack, cursor shapes and touch are still ahead.*
   until it was found while looking for a binding, which is why `tests/unit/input.lisp` now
   asserts every row's keycode, that the names are unique, and that the generated text declares
   each key. A key is looked up by its base keysym (`"Escape"`, `"grave"`), its shifted keysym
-  (`"asciitilde"`) or its XKB name (`"ESC"`, `"TLDE"`). Phase 4 replaces the *generator* with
-  libxkbcommon's keymaps from libinput devices; the protocol path and the modifier bookkeeping do
-  not change.
+  (`"asciitilde"`) or its XKB name (`"ESC"`, `"TLDE"`). Phase 4c added the other direction --
+  `key-entry-for-code` and `key-name-for-code`, an index over the same table -- because libinput
+  reports evdev codes (D56); the slice after this one replaces the *generator* with
+  libxkbcommon's keymaps from libinput devices, and the protocol path and the modifier
+  bookkeeping do not change.
 - **Input without a device**: `send-key-event` and `send-pointer-motion`/`-button`/`-axis` are
   the seam a backend calls; the headless backend wraps them as `cf:inject-*` so a test can type
-  at a real client, and a libinput backend will call the same four functions.
+  at a real client, and `cf.backend.libinput` calls the same four functions from real events
+  (D56).
 - **Version**: `wl_seat` is offered at 4 (D27), so `wl_pointer.frame` (v5), `wl_seat.release`
   (v5), `axis_source` (v6) and high-resolution scroll (v8) are unavailable, and a client that
   asks for one is told `invalid_method`.

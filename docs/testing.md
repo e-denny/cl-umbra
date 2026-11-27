@@ -57,11 +57,11 @@ ASDF. Assertions are Rove's own: `(ok FORM "description")` for a predicate, and
 `(ok (signals FORM 'condition-type))` for an expected error; a failure prints the test name,
 the assertion, its source location and the arguments' values.
 
-The scripts go through `wayland.test.runner`, which names the thirteen suites instead of letting
+The scripts go through `wayland.test.runner`, which names the seventeen suites instead of letting
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 318 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 413 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -505,8 +505,7 @@ Phase 4's first half adds the twenty-first:
     clause probes the real one first and says which it did not probe. No card, or a card this user was not given
     (`EACCES`), exits 77 and the gate reports **SKIP** rather than failing: neither is a defect
     in the code, and a gate that goes red on a machine without `/dev/dri` teaches people to
-    ignore it. Twenty-two unit tests (`tests/unit/drm.lisp`, suite 14, 345 tests in fourteen
-    suites) pin the parts a card cannot isolate: refresh arithmetic in integer millihertz, mode
+    ignore it. Twenty-two unit tests (`tests/unit/drm.lisp`, suite 14) pin the parts a card cannot isolate: refresh arithmetic in integer millihertz, mode
     choice as a total order, connector naming and status, pixel addressing through a padded
     pitch over a real memfd, and -- through a recording device -- the arguments of `CREATE_DUMB`
     and `ADDFB` and the release order `RMFB -> munmap -> DESTROY_DUMB`.
@@ -550,7 +549,45 @@ Phase 4's second half adds the twenty-second:
     handed to pixman, which wrote before the mapping and faulted; the test maps a guard page in
     front of the target and checks it afterwards.
 
-All twenty-two clauses pass. Two details worth knowing: the protocol clause
+Phase 4's third slice adds the twenty-third:
+
+23. **The seat, the devices and the decode chain** (`scripts/input-gate.sh`,
+    `scripts/input-gate.lisp`). Three parts, for three different reasons to fail. *The seat*:
+    `cf.session` opens logind's seat for this session through libseat and reports its fd, its
+    name and its availability; on a machine somebody is using, logind has already given control
+    of that session to the running compositor and the open is refused, which the clause reports
+    as a **SKIP** with the errno rather than as a failure -- D55's policy for a card another
+    master holds, applied to a session another client controls. (libseat's own report is the
+    *last* backend's errno: seatd's socket is absent here, logind answers `EBUSY` to
+    `TakeControl`, and the no-op fallback turns that into `ENOSYS`, which is why the clause
+    names both.) *The devices*: every `/dev/input/event*` is handed to a libinput path context,
+    dispatched, and checked -- each opened device announced exactly once, named by the kernel,
+    given the framework's defaults (tap-to-click, natural scrolling), at least one of them a
+    keyboard, and the process's descriptor count identical afterwards. libinput refuses devices
+    it has nothing to do with, so "opened 9 of 18 nodes" is the expected shape and each refusal
+    is reported rather than counted as a defect. *The chain*: raw events -- what a device would
+    have produced -- go through the decoder into a **real compositor's** seat, where evdev code
+    60 must fire an `F2` binding (the join from code to keysym name to keybinding), a
+    5000-pixel motion must land on column 799 rather than somewhere past it and come back from
+    the edge on the next event, a wheel tick must deliver exactly one axis event (the legacy
+    `POINTER_AXIS` is deliberately not decoded, or every scroll would be doubled), and an
+    unnamed key (240) must be counted as unknown rather than dropped. On the machine this was
+    written on: 34 checks, 1 skip (the seat), 18 event nodes present and 9 accepted by libinput
+    -- `Power Button`, `IKBC USB Keyboard` and its consumer/system/mouse siblings, the mouse,
+    and the WMI hotkeys. A virtual keyboard written through `/dev/uinput` was considered and
+    **not** used: it would prove the round trip, and it would also appear in the live session as
+    a real keyboard, so a test key would be typed into whatever window has focus. The chain
+    covers the same translation with none of that reach. Twelve unit tests in
+    `tests/unit/session.lisp` (the `wayland.test.session` suite) pin the availability machine against a recording seat
+    -- enable during open, dispatch once, a hook that runs after the state changes, a device
+    refused on a disabled seat, closes before the acknowledgement, a failing close counted,
+    a second `close` doing nothing -- and sixteen in `tests/unit/libinput.lisp` (`wayland.test.libinput`) pin
+    what no device can isolate: type classification, the deliberate absence of 403, the evdev
+    code to keysym name join in both directions, clamping at the edge and not only at the
+    report, absolute devices, unknown keys, scroll sources, device tracking by sysname, and a
+    sink that signals not stopping the decoder.
+
+All twenty-three clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs
@@ -758,6 +795,13 @@ asserted zero in steady state for the input, commit and render paths.
   (`vkms` gives a virtual KMS device — useful for page-flip tests without a monitor).
 
 ## 11. Manual hardware checklist (per phase 4+)
+
+Preconditions the automated clauses cannot arrange for themselves:
+
+- [ ] the person running it is in the `input` group *and the shell is newer than the
+      `usermod`* (group membership is applied at login; the input clause says which it found)
+- [ ] a free VT with a getty, for anything that owns the screen (4b's page flips take master;
+      4c's seat reports `EBUSY` while a compositor holds the session)
 
 - [ ] TTY start, clean exit, no leaked fds (`ls /proc/<pid>/fd | wc -l`)
 - [ ] VT switch away and back ×20

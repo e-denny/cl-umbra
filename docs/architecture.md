@@ -112,7 +112,16 @@ hardware path can be gated while a session is in use. Phase 4b added that half (
 that owns the debt -- the CRTC's framebuffer, mode and connectors, restored on close. It is
 verified against vkms, the kernel's virtual KMS, so a real driver and real flips are exercised
 with no display attached; a card another client holds answers `EBUSY` and is left alone.
-Tinywl, `cl-umbra` and a nested window on a foreign compositor are still their plan.
+Phase 4c added the input half (D56): `cf.session` wraps libseat as an availability machine --
+enable/disable callbacks, devices closed before the disable is acknowledged, a VT switch asked
+for rather than taken -- and `cf.backend.libinput` decodes one flat event stream into the seat
+calls phase 3 already had: evdev codes named through `cf.input`'s table, pointer deltas
+accumulated and clamped into the output, named buttons, scroll values, devices tracked by
+sysname. Access is the `input` group rather than a seat protocol (D56): nothing is grabbed and
+the session keeps its keyboard, and the gate proves the device path while a live compositor
+holds the session. What is left in phase 4 is 4d: tinywl on DRM with libxkbcommon, a cursor in
+the scanout buffer, and the five exit-gate items (TTY session, VT round trip, hotplug, soak,
+suspend). Tinywl, `cl-umbra` and a nested window on a foreign compositor are still their plan.
 
 ## 2. Packages
 

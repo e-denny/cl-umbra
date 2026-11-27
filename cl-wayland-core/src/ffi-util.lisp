@@ -565,10 +565,12 @@ someone tries to stop the process."
     (not (or (cffi:null-pointer-p handler)
              (= 1 (cffi:pointer-address handler))))))
 
-(defun open-path (path &key (direction :io))
+(defun open-path (path &key (direction :io) nonblock)
   "Open PATH and return the descriptor, close-on-exec.
 
-DIRECTION is :input, :output or :io.  Close-on-exec is set atomically at open
+DIRECTION is :input, :output or :io.  NONBLOCK adds O_NONBLOCK, which a device a
+library reads asynchronously needs (libinput's interface asks for it and dispatch
+is edge-triggered by the caller's poll).  Close-on-exec is set atomically at open
 rather than afterwards: a descriptor a forked child inherits is a leak with a
 delay fuse, and a compositor forks clients.
 
@@ -580,6 +582,7 @@ lying about what happened."
                   (:input +o-rdonly+)
                   (:output +o-wronly+)
                   (:io +o-rdwr+)))
+         (flags (if nonblock (logior flags +o-nonblock+) flags))
          (fd (%retry-on-eintr
               (lambda () (%open path (logior flags +o-cloexec+) 0)))))
     (when (minusp fd)

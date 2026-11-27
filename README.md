@@ -8,9 +8,10 @@ compositor framework, and a tinywl port — as the six systems below.
 
 **Status: phase 0, phase 1, phase 2a, phase 2b, phase 3a, phase 3b, phase 3c, phase 3d,
 phase 3e, phase 3f, phase 3g, phase 3i and phase 3's exit gate — `cl-tinywl` — passing, plus
-the first two slices of phase 4 (the DRM card, its connectors and a dumb buffer, D54; and the
-screen: master, a mode, page flips and the restore, D55).**
-`./scripts/gate.sh` checks twenty-two clauses. Phase 0: the unit suite (386 tests, fifteen suites), every vendored protocol compiling,
+the first three slices of phase 4 (the DRM card, its connectors and a dumb buffer, D54; the
+screen: master, a mode, page flips and the restore, D55; and the seat plus libinput's devices
+and decode path, D56).**
+`./scripts/gate.sh` checks twenty-three clauses. Phase 0: the unit suite (413 tests, seventeen suites), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections
@@ -100,12 +101,18 @@ What exists:
   comes from the parent's seat), and `cf.backend.drm` (the card: connectors, encoders, CRTCs,
   mode choice and dumb buffers, everything KMS allows without owning the screen, plus a
   `drm-scanout` that takes master, programs a CRTC, flips two buffers and restores what it
-  found -- D55). `xdg_popup` and `xdg_positioner` are implemented (menus,
+  found -- D55), `cf.session` (libseat as an availability machine: enable/disable callbacks,
+  device open and close, the disable acknowledged, a VT switch asked for -- D56) and
+  `cf.backend.libinput` (udev or path contexts, one flat event stream decoded into the seat:
+  evdev codes named through `cf.input`, pointer deltas accumulated and clamped into the
+  output, buttons and scroll, devices tracked by sysname -- D56). `xdg_popup` and
+  `xdg_positioner` are implemented (menus,
   tooltips, their grabs and their dismissal), a focus stack decides who gets the keys when a
   window closes, `cf.switcher` draws that stack as an `Alt+Tab` overlay (`cf.font` is a 5x7
   bitmap font with a validated table of printable ASCII), and the renderer tracks damage, applies
   buffer scale and the eight buffer
-  transforms, and culls what an opaque window hides. The DRM/libinput backends are phases 4-5.
+  transforms, and culls what an opaque window hides. Phase 4's last slice (tinywl on DRM,
+  libxkbcommon keymaps, a cursor in the scanout buffer) is 4d; GPU rendering is phase 5.
 
 ## What this is
 

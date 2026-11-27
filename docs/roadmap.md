@@ -302,8 +302,10 @@ explicitly authorized step (it maps a window on the user's desktop).
 ## Phase 4 — DRM dumb buffers, libinput, sessions (6-8 weeks)
 
 `cf.session`, `cf.backend.drm`
-- [ ] libseat: `open_seat`, `open_device`, `close_device`, switch callbacks; seatd and
-      logind; fallback direct VT path
+- [x] libseat: `open_seat`, `open_device`, `close_device`, `disable_seat` acknowledgement,
+      enable/disable state machine; seatd and logind both compiled in (D56)
+- [ ] switch callbacks exercised live: VT away/back from a compositor that owns one (4d)
+- [ ] fallback direct VT path (`VT_GETSTATE`/`VT_ACTIVATE`, `KDGKBMODE`)
 - [x] resources/connectors/encoders/CRTCs; preferred mode; each CRTC's current scanout (D54)
 - [x] `SETCRTC`, `SET MASTER`, and the saved state put back on close (D55)
 - [x] dumb buffers: create/map/addfb (D54)
@@ -313,12 +315,13 @@ explicitly authorized step (it maps a window on the user's desktop).
       timestamps checked (D55)
 - [ ] frame callbacks with the kernel's real timestamps
 - [ ] VT switch away/back; teardown and restore
-- [ ] hotplug add/remove; output re-layout
+- [ ] hotplug add/remove; output re-layout (4d; the libinput udev context is implemented)
 - [ ] suspend/resume hooks
 
 `cf.backend.libinput`, `cf.input` (xkbcommon)
-- [ ] udev + libinput context, assign seat, hotplug
-- [ ] keyboard/pointer/touch/tablet/switch decoding; per-device settings
+- [x] libinput context: udev (assign seat, hotplug) and path (add by name) (D56)
+- [x] keyboard and pointer decoding; per-device settings (tap-to-click, natural scrolling) (D56)
+- [ ] touch, tablet, pad, switch and gesture decoding
 - [ ] xkb keymap compile, state, mods, keysyms, repeat
 - [ ] keymap memfd to clients; device-specific keymaps
 - [ ] software cursor in the scanout buffer

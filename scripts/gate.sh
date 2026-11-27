@@ -118,6 +118,14 @@
 #      A real card has to be named and allowed; a card another session is using
 #      answers EBUSY and this clause skips (D55)
 #
+#  23. input: the seat this session is already inside, every event node libinput can
+#      open (named, configured, closed with no descriptor leaked), and a raw evdev
+#      event through the decoder into a real compositor -- code 60 fires the F2
+#      binding, a 5000-pixel motion clamps to the last pixel, an unnamed key is
+#      reported.  Nothing grabs a device and nothing presses a key on the live
+#      session.  A seat another client holds control of, and a login without the
+#      `input' group, are reported as skips (D56)
+#
 #  15. our compositor runs as a client of another compositor, in one image and two
 #      sockets: the parent sees a mapped, titled, activated xdg_toplevel; the
 #      parent's pixels equal the nested compositor's own target; a pointer motion
@@ -385,6 +393,26 @@ else
   fail 'drm modeset' 'a mode was not set, a flip was not retired, or the CRTC was not restored' "$log_dir/drm-modeset.log"
 fi
 
+# 23. Input: the seat, the devices and the decode chain ----------------------
+#
+# Three parts that fail for different reasons, and only the third of them is
+# entirely ours: logind gives one client control of a session, so a running
+# compositor makes the seat a skip; the `input' group is what opens an event node,
+# so a login without it makes the devices a skip; the decode chain needs neither
+# and always runs.  Nothing is grabbed and no key is pressed on the live session
+# (D56).
+printf '\nphase 4 gate: the seat, the devices and the decode chain\n\n'
+
+input_status=0
+gb "$log_dir/input.log" "$repo_root/scripts/input-gate.sh" || input_status=$?
+if [ "$input_status" -eq 0 ]; then
+  pass 'input' "$(grep -a '^input-gate: ' "$log_dir/input.log" | tail -n 1 | sed 's/^input-gate: //')"
+elif [ "$input_status" -eq 77 ]; then
+  skip 'input' "$(grep -a '^input-gate: ' "$log_dir/input.log" | tail -n 1 | sed 's/^input-gate: //')"
+else
+  fail 'input' 'a device was not opened, or the decode chain did not reach the seat' "$log_dir/input.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -404,7 +432,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack, the switcher, the card and the screen)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack, the switcher, the card, the screen and the input)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

@@ -471,11 +471,20 @@ and allowed, and a card another master holds answers `EBUSY` and is skipped. The
 have yet: the atomic API, planes, a cursor in the scanout buffer, VT handover, hotplug and
 damage-driven redraw.
 
-Remaining in phase 4: **4c** is seats and input (libseat with seatd or logind, libinput decoding,
-the input-device access problem stated rather than assumed -- `/dev/input/event*` is `root:input`
-with no ACL for this user, so logind's `TakeDevice` or a group change is the decision to make);
-**4d** puts tinywl on DRM with libxkbcommon keymaps, a software cursor in the scanout buffer,
-and then walks the five exit-gate items above.
+The third slice, **4c**, landed as D56: `cf.session` (libseat as an availability machine --
+enable/disable callbacks, devices closed before the disable is acknowledged, `switch_session`
+asked for rather than taken) and `cf.backend.libinput` (udev or path contexts, one flat event
+stream decoded into the seat calls phase 3 already had, pointer deltas accumulated and clamped,
+evdev codes named through `cf.input`'s table). The access question the plan said not to assume
+is answered with the `input` group: a permission on the device nodes, not on the session, so
+nothing is grabbed and a live compositor keeps its keys. Clause 23 checks it -- the seat, every
+event node libinput will open, and an evdev code through the decoder into a real compositor's
+seat (34 checks, 1 skip: the live session's seat, which logind will not hand to a second
+controller). What it deliberately does not have yet: touch/tablet/gesture decoding, libxkbcommon
+keymaps, VT callbacks exercised live, hotplug inside a running compositor.
+
+Remaining in phase 4: **4d** puts tinywl on DRM with libxkbcommon keymaps, a software cursor in
+the scanout buffer, and then walks the five exit-gate items above.
 
 ### Phase 5 — GPU acceleration, only where it earns its place (5-8 weeks)
 

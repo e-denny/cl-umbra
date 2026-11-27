@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset drm-demo tinywl soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset drm-demo input tinywl soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset tinywl
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset input tinywl
 
 test:
 	./scripts/run-tests.sh
@@ -96,6 +96,12 @@ drm-modeset:
 # The same path as an animation: 300 frames of double-buffered flipping.
 drm-demo:
 	./scripts/drm-demo.sh
+
+# Input: the seat this session is already inside, every event node libinput can
+# open, and an evdev code through the decoder into a real compositor.  Nothing is
+# grabbed, and a session another client controls is a skip (D56).
+input:
+	./scripts/input-gate.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:
