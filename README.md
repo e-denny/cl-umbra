@@ -8,8 +8,9 @@ compositor framework, and a tinywl port — as the six systems below.
 
 **Status: phase 0, phase 1, phase 2a, phase 2b, phase 3a, phase 3b, phase 3c, phase 3d,
 phase 3e, phase 3f, phase 3g, phase 3i and phase 3's exit gate — `cl-tinywl` — passing, plus
-the first half of phase 4 (the DRM card, its connectors and a dumb buffer, D54).**
-`./scripts/gate.sh` checks twenty-one clauses. Phase 0: the unit suite (345 tests, fourteen suites), every vendored protocol compiling,
+the first two slices of phase 4 (the DRM card, its connectors and a dumb buffer, D54; and the
+screen: master, a mode, page flips and the restore, D55).**
+`./scripts/gate.sh` checks twenty-two clauses. Phase 0: the unit suite (386 tests, fifteen suites), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections
@@ -97,7 +98,9 @@ What exists:
   testing, a software cursor), `cf.grab`, `cf.keybindings`, and `cf.backend.nested` (our
   compositor as a client of another one: its frame goes into the parent's shm buffer, its input
   comes from the parent's seat), and `cf.backend.drm` (the card: connectors, encoders, CRTCs,
-  mode choice and dumb buffers, everything KMS allows without owning the screen). `xdg_popup` and `xdg_positioner` are implemented (menus,
+  mode choice and dumb buffers, everything KMS allows without owning the screen, plus a
+  `drm-scanout` that takes master, programs a CRTC, flips two buffers and restores what it
+  found -- D55). `xdg_popup` and `xdg_positioner` are implemented (menus,
   tooltips, their grabs and their dismissal), a focus stack decides who gets the keys when a
   window closes, `cf.switcher` draws that stack as an `Alt+Tab` overlay (`cf.font` is a 5x7
   bitmap font with a validated table of printable ASCII), and the renderer tracks damage, applies

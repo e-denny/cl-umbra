@@ -300,10 +300,15 @@ a debugging artefact and a test fixture, not a compression benchmark.")
   (:documentation
    "The DRM backend, first half (docs/framework.md §2, PLAN.md phase 4).
 
-A card, what is plugged into it, mode choice and dumb buffers: the part of KMS
-that changes nothing on screen, and therefore works on a card another session
-already presents on.  SETCRTC and PAGE_FLIP need DRM master and arrive with the
-slice that takes the display, together with the state to put back (D54).")
+A card, what is plugged into it, mode choice, dumb buffers, and the screen
+(D54, D55).
+
+The first half describes a card and changes nothing on it, so it works on a card
+another session already presents on.  The second half takes the screen: master,
+SETCRTC, page flips and the events they retire with, wrapped as a DRM-SCANOUT that
+saves the CRTC's state when it opens and puts it back when it closes.  A card
+somebody is presenting on answers EBUSY to master, and that is the answer the
+project keeps rather than works around.")
   (:export
    ;; conditions
    #:drm-error
@@ -325,6 +330,7 @@ slice that takes the display, together with the state to put back (D54).")
    #:drm-device-master-p
    #:drm-device-capabilities
    #:drm-device-paths
+   #:drm-driver-at
    ;; what the card says about itself
    #:drm-inventory
    #:drm-inventory-driver-name
@@ -428,6 +434,65 @@ slice that takes the display, together with the state to put back (D54).")
    #:+dumb-buffer-depth+
    #:+mode-type-preferred+
    ;; the kernel's own view
+   ;; the screen
+   #:drm-take-master
+   #:drm-drop-master
+   #:drm-refresh-master
+   #:drm-crtc-state
+   #:drm-crtc-connectors
+   #:drm-set-mode
+   #:drm-restore-crtc
+   #:drm-page-flip
+   #:drm-await-flip
+   #:drm-next-event
+   #:drm-virtual-driver-p
+   #:drm-connector-crtcs
+   #:drm-scanout-crtc
+   #:drm-scanout
+   #:drm-open-scanout
+   #:drm-close-scanout
+   #:drm-scanout-device
+   #:drm-scanout-crtc-id
+   #:drm-scanout-connector
+   #:drm-scanout-mode
+   #:drm-scanout-buffers
+   #:drm-scanout-saved-state
+   #:drm-scanout-saved-connectors
+   #:drm-scanout-front
+   #:drm-scanout-frames
+   #:drm-scanout-master-p
+   #:drm-scanout-last-event
+   #:drm-scanout-open-p
+   #:drm-scanout-width
+   #:drm-scanout-height
+   #:drm-scanout-buffer
+   #:drm-scanout-buffer-count
+   #:drm-scanout-next-buffer
+   #:drm-scanout-present
+   #:drm-scanout-present-next
+   ;; the kernel-call protocol
+   #:drm-program-crtc
+   #:drm-queue-page-flip
+   #:drm-query-master
+   #:drm-request-master
+   #:drm-release-master
+   #:drm-read-events
+   #:drm-claim-dumb
+   #:drm-map-dumb-memory
+   #:drm-unmap-dumb-memory
+   #:drm-allocate-framebuffer
+   #:drm-release-framebuffer
+   #:drm-release-dumb
+   ;; events and modes as the kernel spells them
+   #:parse-drm-events
+   #:drm-event-type
+   #:write-mode-info
+   ;; the CFFI struct SETCRTC is given a mode in; callers allocate one of these
+   #:drm-mode-info
+   #:read-mode-info
+   #:+event-vblank+
+   #:+event-flip-complete+
+   #:+page-flip-event+
    #:drm-sysfs-cards
    #:drm-sysfs-state
    #:drm-sysfs-driver-name))

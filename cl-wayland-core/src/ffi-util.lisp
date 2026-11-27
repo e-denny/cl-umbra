@@ -61,6 +61,17 @@
 (defconstant +eaddrinuse+ 98)
 (defconstant +econnaborted+ 103)
 (defconstant +enotsup+ 95)
+;; EBUSY is how a card says somebody else is driving it, which is a different
+;; answer from "not allowed" and from "not there".
+(defconstant +ebusy+ 16)
+
+;; poll(2) events.  POLLIN and POLLOUT are the two a caller asks for; the rest
+;; only ever appear in REVENTS.
+(defconstant +poll-in+ #x1)
+(defconstant +poll-out+ #x4)
+(defconstant +poll-err+ #x8)
+(defconstant +poll-hup+ #x10)
+(defconstant +poll-nval+ #x20)
 
 ;; open(2) and fcntl(2) values a server needs: a lock file it keeps open for the
 ;; lifetime of the socket, and the listening socket itself -- plus the read-only
@@ -784,6 +795,57 @@ return with LENGTH above zero is end of stream.  EINTR is retried."
             ((= (errno) +eintr+))
             ((= (errno) +eagain+) (return 0))
             (t (syscall-failed 'write (errno)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Waiting on one descriptor
+;;; ---------------------------------------------------------------------------
+;;
+;; One descriptor, one timeout, one answer.  The reactor is the right tool for a
+;; compositor's event loop and this is the right tool for "is the kernel's answer
+;; there yet": a page-flip completion, a device that has begun to say something.
+;; Keeping it here means a caller that needs a bounded wait does not have to own
+;; an epoll instance to get one.
+
+(cffi:defcstruct (pollfd :conc-name pollfd-)
+  (fd :int)
+  (events :short)
+  (revents :short))
+
+(cffi:defcfun ("poll" %poll) :int
+  (fds :pointer) (count :unsigned-long) (timeout :int))
+
+(defun poll-fd (fd &key (events :read) (timeout-ms -1))
+  "poll(2) one descriptor for EVENTS, at most TIMEOUT-MS milliseconds (-1 waits
+forever, 0 does not wait at all).
+
+Returns :READ, :WRITE, :TIMEOUT, :ERROR, :HUNG-UP or :INVALID -- one keyword,
+because a caller that has to ask two questions about one descriptor is a caller
+that will forget the second one.  EINTR restarts the wait with the full timeout,
+which is what a signal arriving before the deadline means: the deadline has not
+passed."
+  (unless (member events '(:read :write :read-write))
+    (error "poll-fd does not poll ~S" events))
+  (cffi:with-foreign-object (descriptor '(:struct pollfd))
+    (setf (pollfd-fd descriptor) fd
+          (pollfd-events descriptor)
+          (ecase events
+            (:read +poll-in+)
+            (:write +poll-out+)
+            (:read-write (logior +poll-in+ +poll-out+)))
+          (pollfd-revents descriptor) 0)
+    (loop
+      (let ((result (%poll descriptor 1 timeout-ms)))
+        (cond ((plusp result)
+               (let ((revents (pollfd-revents descriptor)))
+                 (cond ((logtest revents +poll-nval+) (return :invalid))
+                       ((logtest revents +poll-err+) (return :error))
+                       ((logtest revents +poll-hup+) (return :hung-up))
+                       ((logtest revents +poll-in+) (return :read))
+                       ((logtest revents +poll-out+) (return :write))
+                       (t (return :error)))))
+              ((zerop result) (return :timeout))
+              ((= (errno) +eintr+))
+              (t (syscall-failed 'poll (errno))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; eventfd, timerfd, signalfd

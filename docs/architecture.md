@@ -107,8 +107,12 @@ client inside the nested session -- clause 15. Phase 4a added `cf.backend.drm` v
 through CFFI for resources, connectors, encoders and CRTCs, mode choice, and dumb buffers that
 map and compose with the pixman target (D54). It stops at DRM master on purpose -- `SETCRTC`
 and `PAGE_FLIP` are phase 4b, because they take the display from whoever has it -- so the
-hardware path can be gated while a session is in use. Tinywl, `cl-umbra` and a nested window
-on a foreign compositor are still their plan.
+hardware path can be gated while a session is in use. Phase 4b added that half (D55): master,
+`SETCRTC`, page flips with the kernel's completion read as an event stream, and a `drm-scanout`
+that owns the debt -- the CRTC's framebuffer, mode and connectors, restored on close. It is
+verified against vkms, the kernel's virtual KMS, so a real driver and real flips are exercised
+with no display attached; a card another client holds answers `EBUSY` and is left alone.
+Tinywl, `cl-umbra` and a nested window on a foreign compositor are still their plan.
 
 ## 2. Packages
 

@@ -11,11 +11,21 @@
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The clause that takes the screen has to run as root, because SET MASTER is a
+# privileged ioctl even on a virtual card; under sudo, $HOME is root's and the
+# person's Quicklisp is somewhere else.  SUDO_USER's home is searched for that
+# reason and only for that reason: dropping to root should not mean installing a
+# second copy of CFFI.
 find_quicklisp() {
-  local candidate
+  local sudo_home="" candidate
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+  fi
   for candidate in "${QUICKLISP_SETUP:-}" \
                    "$HOME/quicklisp/setup.lisp" \
-                   "$HOME/Packages/quicklisp/setup.lisp"; do
+                   "$HOME/Packages/quicklisp/setup.lisp" \
+                   ${sudo_home:+"$sudo_home/quicklisp/setup.lisp"} \
+                   ${sudo_home:+"$sudo_home/Packages/quicklisp/setup.lisp"}; do
     if [ -n "$candidate" ] && [ -f "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0

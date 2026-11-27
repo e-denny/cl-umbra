@@ -42,6 +42,7 @@
     wayland.test.scene
     wayland.test.render
     wayland.test.drm
+    wayland.test.drm-modeset
     wayland.test.switcher
     wayland.test.tinywl)
   "Test packages, in dependency order.  Each holds one file's tests.")

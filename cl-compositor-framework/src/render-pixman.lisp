@@ -611,16 +611,25 @@ clip region), so a window hanging off the edge loses the outside part."
 (defun fill-rect (target x y width height argb)
   "Fill a X, Y, WIDTH x HEIGHT rectangle of TARGET with premultiplied ARGB.
 
-Clipped by pixman to the target (and to the target's clip region, when one is
-set), so a rectangle hanging off the edge is drawn as much as fits; a degenerate
-one draws nothing."
+A rectangle hanging off the edge is drawn as much as fits; a degenerate one draws
+nothing.  The intersection with the target is computed *here* and not left to
+pixman: `pixman_image_fill_boxes' with a box that starts left of the image writes
+before the first pixel, and a target over a wl_shm or dumb-buffer mapping has
+unmapped memory there -- a fault, not a wrong pixel.  Measured: a strip at x=-15
+on a 1024-wide memfd target wrote 60 bytes at mapping-4 and killed the process.
+The scene draws a window dragged past the left edge through exactly this call."
   (when (and (plusp width) (plusp height))
-    (cffi:with-foreign-object (box '(:struct pixman-box32))
-      (setf (cffi:foreign-slot-value box '(:struct pixman-box32) 'x1) x
-            (cffi:foreign-slot-value box '(:struct pixman-box32) 'y1) y
-            (cffi:foreign-slot-value box '(:struct pixman-box32) 'x2) (+ x width)
-            (cffi:foreign-slot-value box '(:struct pixman-box32) 'y2) (+ y height))
-      (fill-boxes-with target box 1 argb))))
+    (let ((x1 (max 0 x))
+          (y1 (max 0 y))
+          (x2 (min (target-width target) (+ x width)))
+          (y2 (min (target-height target) (+ y height))))
+      (when (and (< x1 x2) (< y1 y2))
+        (cffi:with-foreign-object (box '(:struct pixman-box32))
+          (setf (cffi:foreign-slot-value box '(:struct pixman-box32) 'x1) x1
+                (cffi:foreign-slot-value box '(:struct pixman-box32) 'y1) y1
+                (cffi:foreign-slot-value box '(:struct pixman-box32) 'x2) x2
+                (cffi:foreign-slot-value box '(:struct pixman-box32) 'y2) y2)
+          (fill-boxes-with target box 1 argb))))))
 
 (defun composite-bitmap (target octets width height &key (x 0) (y 0)
                                                   dest-width dest-height)

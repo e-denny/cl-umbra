@@ -64,6 +64,20 @@ scope, so a check cannot pass because its arguments were reassembled wrongly."
   "The sysfs card name for a /dev/dri/cardN path."
   (file-namestring path))
 
+(defun writeback-connector-p (entry)
+  "Is this /sys connector directory a writeback connector?
+
+Writeback connectors appear in /sys/class/drm/cardN-Writeback-M and are not in
+GETRESOURCES' connector list at all: they are configured through atomic properties
+and are not drmModeConnectors.  Comparing them with the inventory would compare two
+different questions, so they are left out of the comparison and named here instead
+of being silently dropped."
+  (uiop:string-prefix-p "Writeback-" (getf entry :name)))
+
+(defun framebuffer-connectors (state)
+  "The /sys connectors libdrm is supposed to know about: everything but writeback."
+  (remove-if #'writeback-connector-p state))
+
 (defun sysfs-sizes (strings)
   "Mode sizes from a sysfs modes file, with a trailing `i' removed.
 
@@ -242,15 +256,30 @@ framebuffer, and release everything."
        (descriptors-before (fd-count))
        (candidates (loop for path in paths
                          for card = (card-of path)
-                         for state = (cf.backend.drm:drm-sysfs-state card)
+                         for state = (framebuffer-connectors
+                                      (cf.backend.drm:drm-sysfs-state card))
                          for connected = (find "connected" state
                                                :key (lambda (entry) (getf entry :status))
                                                :test #'string=)
-                         when connected collect (list path card state))))
+                         for driver = (handler-case (cf.backend.drm:drm-driver-at path)
+                                        (cf.backend.drm:drm-error () nil))
+                         when (and driver connected)
+                           collect (list path card driver state))))
   (unless candidates
     (skip "no /dev/dri/card* with a connected connector~@[ (cards: ~{~A~^, ~})~]"
           paths))
-  (destructuring-bind (path card sysfs-before) (first candidates)
+  ;; A real card first when there is one: this clause is about the driver's own
+  ;; numbers, and a virtual card is clause 22's test bed.  Naming the rest says
+  ;; what was not looked at rather than leaving it to be guessed.
+  (let ((ordered (sort (copy-list candidates)
+                       (lambda (left right)
+                         (< (if (cf.backend.drm:drm-virtual-driver-p (third left)) 1 0)
+                            (if (cf.backend.drm:drm-virtual-driver-p (third right)) 1 0))))))
+    (when (rest ordered)
+      (note "also present and not probed: ~{~A~^, ~}"
+            (mapcar (lambda (candidate) (second candidate)) (rest ordered))))
+  (destructuring-bind (path card driver sysfs-before)
+      (first ordered)
     (note "card ~A (~A): ~{~A~^, ~}"
           card path
           (loop for entry in sysfs-before
@@ -279,9 +308,19 @@ framebuffer, and release everything."
                                                       :separator ".")))
                       "the DRM version is major.minor.patch: ~A"
                       (cf.backend.drm:drm-device-version device))
-               (check (string= (cf.backend.drm:drm-device-driver-name device)
-                               (cf.backend.drm:drm-sysfs-driver-name card))
-                      "the driver name matches /sys: ~A" (cf.backend.drm:drm-sysfs-driver-name card))
+               ;; A virtual card presents as a faux device, so its uevent says
+               ;; `faux_driver' while the driver says `vkms'.  Every real driver's
+               ;; two names agree; only a virtual one is exempt, and it is said so.
+               (check (if (cf.backend.drm:drm-virtual-driver-p
+                           (cf.backend.drm:drm-device-driver-name device))
+                          t
+                          (string= (cf.backend.drm:drm-device-driver-name device)
+                                   (cf.backend.drm:drm-sysfs-driver-name card)))
+                      "the driver is ~A~@[ (its uevent calls the device ~A)~]"
+                      (cf.backend.drm:drm-device-driver-name device)
+                      (unless (string= (cf.backend.drm:drm-device-driver-name device)
+                                       (cf.backend.drm:drm-sysfs-driver-name card))
+                        (cf.backend.drm:drm-sysfs-driver-name card)))
                (check (null (cf.backend.drm:drm-device-master-p device))
                       "the card was opened without DRM master")
                (check (getf (cf.backend.drm:drm-device-capabilities device) :dumb-buffer)
@@ -302,10 +341,12 @@ framebuffer, and release everything."
                "the device was never master, so it never touched the screen")
         (check (= descriptors-before (fd-count))
                "no descriptor leaked (~D before, ~D after)" descriptors-before (fd-count))
-        (check (equal sysfs-before (cf.backend.drm:drm-sysfs-state card))
+        (check (equal sysfs-before (framebuffer-connectors
+                                    (cf.backend.drm:drm-sysfs-state card)))
                "the kernel's connector state is identical to before the probe")
         (unless (equal sysfs-before (cf.backend.drm:drm-sysfs-state card))
           (note "before: ~S" sysfs-before)
-          (note "after:  ~S" (cf.backend.drm:drm-sysfs-state card)))
+          (note "after:  ~S" (framebuffer-connectors
+                              (cf.backend.drm:drm-sysfs-state card))))
         (finish "~A enumerated, ~D connector(s) buffered, no mode set, nothing on screen changed"
-                card connected-count)))))
+                card connected-count))))))

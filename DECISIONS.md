@@ -2552,3 +2552,97 @@ back. Nor does it read EDID properties or planes (4b and phase 5). The lesson: *
 object model splits at master -- everything that *describes* the screen can be read by anyone
 the session trusts, and only the act of *showing* needs to own it -- so build, gate and live
 with the describing half first, on the machine you are using.**
+
+## D55 — The screen is taken with two settings and given back with its connectors
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** master, SETCRTC, page flips and the restore (phase 4, second half)
+
+4a left 4b as the set of calls that need to own the screen. This slice makes them, and the
+whole design is about the fact that owning a screen is a decision with a debt: a mode set is a
+screen changed, and the debt is the state that was there before. The slice was built against
+**vkms**, the kernel's virtual KMS -- a real KMS driver with a connector, modes, page flips and
+vblank, and no display on the other end.
+
+**Decision.**
+
+1. **A card another client holds is not taken, and EBUSY is the answer we keep.**
+   `SET MASTER` on a card with a master answers `EBUSY`, and this project reports that as a
+   skip rather than retrying, stealing or asking logind to help. That is not politeness: it is
+   the only mechanism that made this slice testable on a machine somebody was using. Loading
+   vkms handed the live compositor a second output, and it claimed the card within seconds;
+   the gate said EBUSY and stopped. Pausing the session (a VT switch, which logind turns into
+   a device release) is what freed the card.
+2. **Which cards a program may take is the program's policy, stated at the edges.** The module
+   will take whatever it is pointed at, because a compositor on a real TTY must. The gate and
+   the demo take a virtual driver -- `vkms` -- and nothing else, unless a person names a card
+   *and* sets an allow variable: two settings, because taking a screen should take two
+   deliberate acts. The driver is asked through libdrm and not `/sys`, because vkms presents as
+   a faux device and its uevent says `faux_driver` while the driver says `vkms`.
+3. **The scanout is the unit, and it owns the debt.** `DRM-OPEN-SCANOUT` becomes master, saves
+   the CRTC's state *and the connectors it was feeding*, allocates, maps and names the buffers,
+   then programs the CRTC; a failure anywhere undoes those steps in reverse and re-signals, so
+   a failed open never leaves a card taken. `DRM-CLOSE-SCANOUT` restores, destroys and drops
+   master, attempts each step even when an earlier one failed, and signals the first failure
+   afterwards: a restore that fails must not also leak the buffers, and a buffer that will not
+   go away must not leave the card taken.
+4. **Restoring means naming the connectors again.** `SETCRTC` with a mode and an empty connector
+   list is `EINVAL` -- measured, on vkms, on the first attempt at a restore. So the state to put
+   back is not only "framebuffer and mode" but "framebuffer, mode, and what it was lighting",
+   and the scanout saves all three. A saved state that is inconsistent (a mode with no
+   framebuffer, which the kernel will not accept back) is restored as off, because off is the
+   nearest legal state rather than an error that leaves a CRTC half set.
+5. **There is no present that does not wait.** `DRM-SCANOUT-PRESENT` queues the flip and waits
+   for the kernel's completion before it returns, because drawing into a buffer the display is
+   still reading is the one thing double buffering exists to prevent. The wait has a deadline
+   and a timeout is a `DRM-ERROR` about time, not a hang.
+6. **Events are a stream parsed by a pure function.** No `drmHandleEvent`, no libdrm callbacks:
+   `read(2)` on the descriptor is one of the kernel-call generics, and the parser is an ordinary
+   function over octets, so several completions in one read, a record cut in half, an unknown
+   kind and a corrupt length are unit tests instead of things discovered mid-flip. What the
+   parser does not consume is kept -- whole events on the device, partial bytes for the next
+   read. The flip's user-data is a per-device counter the kernel echoes back, so a completion is
+   self-describing; the sequence numbers and timestamps are the kernel's, and monotonicity of
+   both is what the gate asserts.
+7. **`SET MASTER` is privileged even on a virtual card.** Unprivileged it is `EACCES`, so the
+   clause that takes a screen runs as root -- and `scripts/lib.sh` learns to find the person's
+   Quicklisp through `SUDO_USER` rather than requiring a second copy of CFFI under `/root`.
+   Related and measured: on a *free* primary node the kernel makes the first opener master, so
+   "take master" is a real transition only on a contended card; the gate records the state at
+   open instead of asserting it is NIL.
+8. **A defect found by the slice belongs to the slice.** The demo's first run crashed the
+   process: `fill-rect` passed a negative `x` through to `pixman_image_fill_boxes`, which wrote
+   **60 bytes before the mapping** and faulted. That is not a DRM bug -- it is a renderer bug
+   that any window dragged past the left edge would have hit -- and it is fixed here, in
+   `fill-rect`, by computing the intersection with the target instead of trusting pixman to clip
+   a box that starts outside it. The regression test maps a guard page in front of the target,
+   so a recurrence is a dirty page rather than a dead test process.
+
+**Evidence.** Gate clause 22 (`scripts/drm-modeset-gate.sh`) makes **31 checks, 0 failed**
+against `/dev/dri/card0` = vkms 1.0.0, on a VT the session had been paused off, so logind had
+released the card. It enumerates 1 CRTC (45), 1 connector `Virtual-1` (id 53, connected, 34
+modes), 1 encoder (52, possible CRTCs `#b1`), preferred mode 1024x768 at clock 65000 with totals
+1344x806, **60.004 Hz**; vkms's own state at load was framebuffer 55 scanning 1024x768. It takes
+master, opens a scanout (two buffers, 1024x768, pitch **4096**, framebuffer ids 57 and 58),
+`GETCRTC` agrees the CRTC scans framebuffer 57 at 1024x768, both mappings are painted through
+the pixman target and read back, and **three page flips are retired by the kernel**: sequences
+**83407, 83408, 83409**, vblank timestamps 44429.364187 / 44429.380852 / 44429.397518 (16.6 ms
+apart), our CRTC id and our user-data 1, 2, 3 echoed in each, in 0.044 s. Closing restores
+framebuffer **55** and 1024x768, drops master, closes the descriptor, leaves the descriptor count
+at **6**, and leaves the sysfs connector state **identical**. The demo (`scripts/drm-demo.sh`,
+`--frames 300`) then flipped **300 frames**: mean interval **16.65 ms** (13.35 fastest, 17.20
+slowest) = **60.1 Hz**, sequence numbers **83440 to 83739 contiguous and monotonic**, and it too
+restored framebuffer 55 and dropped master. Measured around it: `SET MASTER` unprivileged is
+`EACCES`; on a contended card it is `EBUSY`; without master, `CREATE_DUMB`, `MAP_DUMB` and
+`ADDFB` succeed while `SETCRTC` and `PAGE_FLIP` are both `EACCES`; the first restore attempt
+failed `EINVAL` because it named no connectors, and the first demo run died with a memory fault
+60 bytes before a dumb-buffer mapping at `x=-15`. Thirty-eight new unit tests
+(`tests/unit/drm-modeset.lisp`, suite 15, 38 tests) and three new render tests take the suite
+from 345 to **386 tests in fifteen suites**, and clause 22's skip branches cover no card, no vkms, `EACCES`
+and `EBUSY`. What this does not do: no atomic API, no planes, no cursor into the scanout buffer
+(4d), no VT handover or seat management (4c -- the VT switch used here was logind's doing, not
+ours), no triple buffering, no damage-driven redraw (the demo repaints whole frames), no
+hotplug, no EGL. The lesson: **owning a screen is a debt, and the debt is paid in the state you
+read before you took it -- connectors included, because the kernel will not accept the mode
+without them.**

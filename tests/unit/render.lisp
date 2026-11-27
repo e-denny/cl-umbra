@@ -493,3 +493,74 @@ test makes, and it has to mean the same thing as a frame that damaged everything
              (ok (= 0 (render::target-pixel target 10 10))
                  "while the rest of the target was left alone")))
       (render:destroy-target target))))
+
+;;; ---------------------------------------------------------------------------
+;;; Rectangles that hang off the target
+;;; ---------------------------------------------------------------------------
+;;
+;; A target is often a mapping -- a wl_shm pool, a dumb buffer -- and the memory
+;; before it is not ours.  pixman's fill-boxes path with a box starting left of the
+;; image writes before the first pixel (measured: a strip at x=-15 wrote 60 bytes
+;; at mapping-4), so the clipping has to happen in FILL-RECT.  These tests map a
+;; guard page in front of the target and check it afterwards: a regression shows up
+;; as a dirty guard page rather than as a dead test process.
+
+(defun make-guarded-target (width height &key (stride (* width 4)))
+  "A target over a mapping with one untouched page in front of it.
+
+Returns (values target guard-pointer guard-length); the target's pointer is the
+guard plus a page, so anything written before the first pixel lands in memory these
+tests can read."
+  (let* ((page 4096)
+         (length (* stride height))
+         (fd (wayland.ffi:memfd-create "guarded-target"))
+         (base (progn (wayland.ffi:set-file-size fd (+ page length))
+                      (wayland.ffi:map-file fd (+ page length)
+                                            :protection (logior wayland.ffi:+prot-read+
+                                                                wayland.ffi:+prot-write+)))))
+    (cffi:foreign-funcall "memset" :pointer base :int 0 :size (+ page length) :pointer)
+    (values (render:make-target-over-pointer (cffi:inc-pointer base page)
+                                             width height :stride stride)
+            base page)))
+
+(deftest a-rectangle-past-the-left-edge-paints-only-inside-the-target
+  (multiple-value-bind (target guard guard-length) (make-guarded-target 64 32)
+    (unwind-protect
+         (progn
+           (render:fill-target target #xFF101820)
+           (render:fill-rect target -15 0 140 32 #xFF00FF00)
+           (ok (= #xFF00FF00 (render::target-pixel target 0 0))
+               "the visible part of the rectangle is painted, from column 0")
+           (ok (= #xFF00FF00 (render::target-pixel target 63 31))
+               "and reaches the right edge, because the rectangle is 140 wide")
+           (ok (= #xFF00FF00 (render::target-pixel target 0 31))
+               "the rectangle is 32 rows tall, so its last row reaches the bottom")
+           (ok (zerop (cffi:mem-aref guard :uint8 (1- guard-length)))
+               "and nothing was written before the target's first pixel"))
+      (render:destroy-target target))))
+
+(deftest a-rectangle-entirely-left-of-the-target-draws-nothing
+  (multiple-value-bind (target guard guard-length) (make-guarded-target 64 32)
+    (unwind-protect
+         (progn
+           (render:fill-target target #xFF101820)
+           (render:fill-rect target -200 0 100 32 #xFF00FF00)
+           (ok (= #xFF101820 (render::target-pixel target 0 0))
+               "the target is untouched")
+           (ok (zerop (cffi:mem-aref guard :uint8 0)) "and so is the guard page"))
+      (render:destroy-target target))))
+
+(deftest a-rectangle-past-the-top-and-right-edges-is-clipped-the-same-way
+  (multiple-value-bind (target guard guard-length) (make-guarded-target 64 32)
+    (unwind-protect
+         (progn
+           (render:fill-target target #xFF101820)
+           (render:fill-rect target 32 -8 200 200 #xFF00FF00)
+           (ok (= #xFF00FF00 (render::target-pixel target 32 0))
+               "the top row is painted where the rectangle starts")
+           (ok (= #xFF00FF00 (render::target-pixel target 63 31))
+               "and so is the bottom-right corner")
+           (ok (= #xFF101820 (render::target-pixel target 31 31))
+               "while the columns before x=32 keep the background")
+           (ok (zerop (cffi:mem-aref guard :uint8 0)) "and the guard page is clean"))
+      (render:destroy-target target))))

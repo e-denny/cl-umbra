@@ -58,6 +58,7 @@
                              (:file "scene")
                              (:file "render")
                              (:file "drm")
+                             (:file "drm-modeset")
                              (:file "switcher")
                              (:file "tinywl"))))
   ;; The perform body is read while this file is loaded, long before the runner

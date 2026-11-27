@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm tinywl soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset drm-demo tinywl soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm tinywl
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset tinywl
 
 test:
 	./scripts/run-tests.sh
@@ -86,6 +86,16 @@ tinywl:
 # against the kernel's own view in /sys.  Skips (exit 77) with no card.
 drm:
 	./scripts/drm-gate.sh
+
+# The screen: take a virtual card (vkms), set a mode, flip three frames, restore.
+# A real card needs CL_DRM_MODESET_CARD and CL_DRM_MODESET_ALLOW=1.  Skips with no
+# vkms, or when the card belongs to another master.
+drm-modeset:
+	./scripts/drm-modeset-gate.sh
+
+# The same path as an animation: 300 frames of double-buffered flipping.
+drm-demo:
+	./scripts/drm-demo.sh
 
 # The expensive half: 10k connect/disconnect cycles.  SOAK_CYCLES overrides.
 soak:

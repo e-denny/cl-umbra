@@ -99,6 +99,7 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:+eexist+
    #:+enotsup+
    #:+eaddrinuse+
+   #:+ebusy+
    ;; descriptors
    #:make-socket-pair
    #:connect-unix-socket
@@ -139,6 +140,9 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:read-into
    #:read-into-pointer
    #:write-from-pointer
+   #:poll-fd
+   #:+poll-in+
+   #:+poll-out+
    ;; event sources
    #:make-event-fd
    #:read-event-fd

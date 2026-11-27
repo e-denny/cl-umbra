@@ -19,7 +19,7 @@ decomposition is the part worth copying.
 | `cf.backend` | `wlr_backend` + autocreate | 2 | one interface over headless, nested, DRM; outputs and input device events |
 | `cf.backend.headless` | `wlr_backend_headless` | 2 | fake output(s), frame timer, deterministic pixels |
 | `cf.backend.nested` | `wlr_backend_wayland` | 3 | our compositor as a client of a parent compositor |
-| `cf.backend.drm` | `wlr_backend_drm` (dumb path) | 4 | the card, connectors, encoders, CRTCs, mode choice and dumb buffers (D54); modeset, page flips and VT handover next |
+| `cf.backend.drm` | `wlr_backend_drm` (dumb path) | 4 | the card, connectors, encoders, CRTCs, mode choice, dumb buffers (D54), and the screen: master, SETCRTC, page flips and restore (D55); seats/input and VT handover next |
 | `cf.backend.libinput` | `wlr_backend_libinput` | 4 | device enumeration, hotplug, event decoding |
 | `cf.backend.multi` | `wlr_backend_multi` | 4 | several backends in one session (DRM + nested for debugging) |
 | `cf.session` | `wlr_session` (libseat) | 4 | seat/VT ownership, device open, switch away/back |
@@ -127,10 +127,11 @@ the same place (D39). `render-frame` projects that flag onto the scene immediate
 drawing, so a compositor states the fact once and the renderer obeys it. A client's own cursor
 surface (`wl_pointer.set_cursor`) is recorded by the seat and still not drawn — phase 5.
 
-`cf.backend.drm` is the third backend, and its first half is the part of KMS that can run while
-another session owns the screen. It is deliberately not a `backend` object yet: it has no output
-and presents nothing, because presenting needs `SETCRTC` and `PAGE_FLIP`, which need DRM master,
-which means taking the display away from whoever has it (D54).
+`cf.backend.drm` is the third backend, and it comes in the two halves the kernel itself splits.
+The first describes the card and changes nothing on it, so it runs while another session owns the
+screen (D54). The second owns the screen -- master, `SETCRTC`, page flips, the events they retire
+with, and the state needed to give it back (D55) -- and it is still not a `backend` object: it has
+a scanout, not an output, and it does not know about seats, VTs or clients. That is 4c and 4d.
 
 ```lisp
 (let ((device (cf.backend.drm:open-drm-device "/dev/dri/card1")))
@@ -164,12 +165,38 @@ own pitch and size, mapped read-write, given a framebuffer id, and released in t
 requires. Every release is one call, `drm-destroy-dumb`, because the order is the contract
 (framebuffer, mapping, memory).
 
-Two things the module does on purpose. The kernel's six calls are generic functions
+Two things the module does on purpose. The kernel's twelve calls are generic functions
 (`drm-claim-dumb`, `drm-map-dumb-memory`, `drm-unmap-dumb-memory`, `drm-allocate-framebuffer`,
-`drm-release-framebuffer`, `drm-release-dumb`) and everything above them is plain functions over
-those, so a test can hand in a recording device and check the arguments and the release order
-with no card. And the structs are transcribed from the headers with their sizes asserted at load
-time, so a build needs libdrm's library and not its headers or a C compiler.
+`drm-release-framebuffer`, `drm-release-dumb`, `drm-query-master`, `drm-request-master`,
+`drm-release-master`, `drm-program-crtc`, `drm-queue-page-flip`, `drm-read-events`) and everything
+above them is plain functions over those, so a test can hand in a recording device and check the
+arguments and the order with no card. And the structs are transcribed from the headers with their
+sizes asserted at load time, so a build needs libdrm's library and not its headers or a C compiler.
+
+The screen half in three calls:
+
+```lisp
+(let* ((device (cf.backend.drm:open-drm-device "/dev/dri/card0"))
+       (inventory (cf.backend.drm:drm-inventory device))
+       (connector (first (cf.backend.drm:drm-inventory-connected-connectors inventory)))
+       ;; master, saved CRTC state, saved connectors, two buffers, SETCRTC
+       (scanout (cf.backend.drm:drm-open-scanout device :connector connector)))
+  (unwind-protect
+       (dotimes (frame 300)
+         (let ((buffer (cf.backend.drm:drm-scanout-next-buffer scanout)))
+           ;; ... draw into the buffer's mapping through a pixman target ...
+           ;; flips and waits for the kernel's completion before returning
+           (cf.backend.drm:drm-scanout-present scanout buffer)))
+    ;; restore the CRTC, destroy the buffers, drop master
+    (cf.backend.drm:drm-close-scanout scanout)))
+```
+
+What gives it its manners: `EBUSY` from `SET MASTER` means another client owns the card and is
+where the story ends, not a problem to work around; `DRM-CLOSE-SCANOUT` attempts every step even
+if an earlier one failed; presenting always waits; and restoring names the connectors again,
+because `SETCRTC` with a mode and no connectors is `EINVAL`. Which cards a *program* is willing to
+take is that program's policy: the gate and the demo take a virtual one (`vkms`) unless a person
+names a card and sets `CL_DRM_MODESET_ALLOW=1`.
 
 Contracts:
 

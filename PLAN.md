@@ -459,11 +459,21 @@ that slice bought beyond the enumeration is the state 4b restores from: every CR
 framebuffer and mode, readable without master, and dumb buffers that already compose with the
 pixman target the frame will be drawn through.
 
-Remaining in phase 4: **4b** takes the display — `SETCRTC`, double-buffered `PAGE_FLIP` with
-`read()` for vblank, and the saved CRTC state put back on exit or signal (this one needs an
-explicit decision about taking the screen, and a recovery plan, because the machine it must be
-tested on is the machine somebody is using); **4c** is seats and input (libseat with seatd or
-logind, libinput decoding, the input-device access problem stated rather than assumed);
+The second slice, **4b**, landed as D55: `SET MASTER`, `SETCRTC`, page flips with `read()` for
+the kernel's completion event, and the CRTC's state -- framebuffer, mode *and* the connectors it
+was feeding -- saved on open and put back on close. It is built on a `drm-scanout`: two dumb
+buffers, a present that always waits for the vblank that retires the frame, and a close that
+restores, destroys and drops master even when an earlier step failed. Clause 22 checks it against
+**vkms**, the kernel's virtual KMS, so the risky path is exercised on a real driver with no
+display attached (31 checks, three flips retired, the CRTC restored); a real card has to be named
+and allowed, and a card another master holds answers `EBUSY` and is skipped. The demo
+(`scripts/drm-demo.sh`) flips 300 frames at a measured 60.1 Hz. What it deliberately does not
+have yet: the atomic API, planes, a cursor in the scanout buffer, VT handover, hotplug and
+damage-driven redraw.
+
+Remaining in phase 4: **4c** is seats and input (libseat with seatd or logind, libinput decoding,
+the input-device access problem stated rather than assumed -- `/dev/input/event*` is `root:input`
+with no ACL for this user, so logind's `TakeDevice` or a group change is the decision to make);
 **4d** puts tinywl on DRM with libxkbcommon keymaps, a software cursor in the scanout buffer,
 and then walks the five exit-gate items above.
 

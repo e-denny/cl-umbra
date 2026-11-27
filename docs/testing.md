@@ -496,7 +496,13 @@ Phase 4's first half adds the twenty-first:
     machine this was written on: 37 checks, `card1` (`amdgpu` 3.64.0) with 4 CRTCs, `DP-1`
     disconnected, `HDMI-A-1` connected at 600x340 mm, 29 modes of which the preferred is
     3840x2160 at 594000 kHz (60.000 Hz), a 3840x2160 dumb buffer at pitch 15360 and 33177600
-    bytes, and framebuffer 158 added and removed. No card, or a card this user was not given
+    bytes, and framebuffer 158 added and removed. Two shapes of card were found to need
+    stating rather than assuming: a writeback connector (`cardN-Writeback-M`) is in `/sys` and
+    not in `GETRESOURCES` at all -- writeback is configured through atomic properties -- so it is
+    excluded from the comparison by name, and a virtual card's uevent names a faux device
+    (`faux_driver` for `vkms`) so the driver-name comparison is exempted only for a virtual
+    driver, with the `/sys` name printed instead. When more than one card has a connector, the
+    clause probes the real one first and says which it did not probe. No card, or a card this user was not given
     (`EACCES`), exits 77 and the gate reports **SKIP** rather than failing: neither is a defect
     in the code, and a gate that goes red on a machine without `/dev/dri` teaches people to
     ignore it. Twenty-two unit tests (`tests/unit/drm.lisp`, suite 14, 345 tests in fourteen
@@ -505,7 +511,46 @@ Phase 4's first half adds the twenty-first:
     pitch over a real memfd, and -- through a recording device -- the arguments of `CREATE_DUMB`
     and `ADDFB` and the release order `RMFB -> munmap -> DESTROY_DUMB`.
 
-All twenty-one clauses pass. Two details worth knowing: the protocol clause
+Phase 4's second half adds the twenty-second:
+
+22. **The screen: master, a mode, three flips and the state put back**
+    (`scripts/drm-modeset-gate.sh`, `scripts/drm-modeset-gate.lisp`). The clause that changes a
+    display, and therefore a clause about *which* display: by default only a virtual card --
+    `vkms`, which is a real KMS driver with a connector, modes, page flips and vblank and no
+    screen on the other end -- and a real card only when a person names it with
+    `CL_DRM_MODESET_CARD` *and* allows it with `CL_DRM_MODESET_ALLOW=1`. The driver is asked
+    through libdrm rather than `/sys`, because vkms presents as a faux device and its uevent
+    says `faux_driver`. The probe records the state at open (on a free primary node the kernel
+    makes the first opener master, so that is recorded and not asserted), takes master, opens a
+    scanout, and checks that two buffers exist and that `GETCRTC` now reports our framebuffer
+    and the mode we set; it paints both mappings through the pixman target and reads them back
+    at the driver's pitch; it flips three times and requires each completion to be the
+    kernel's -- our CRTC id, our user-data, and sequence numbers and vblank timestamps that
+    only go forward. Then it closes the scanout and checks the debt was paid: master dropped,
+    the CRTC scanning the framebuffer and mode it had before, the descriptor closed, the
+    descriptor count flat and the sysfs connector state **identical**. On the machine this was
+    written on, against `card0` = vkms 1.0.0 on a VT the session had been paused off: 31
+    checks, 1 CRTC, `Virtual-1` connected with 34 modes and a preferred 1024x768 at 60.004 Hz,
+    vkms's own framebuffer 55 at load, two buffers at pitch 4096 (framebuffers 57 and 58),
+    sequences 83407/83408/83409 retired 16.6 ms apart, restore to framebuffer 55, and 300
+    frames in the demo at a mean 16.65 ms (60.1 Hz) with 300 contiguous sequence numbers.
+    Four answers are **SKIP** and not failure: no `vkms`, no connected connector, `EACCES` on
+    `SET MASTER` (it is a privileged ioctl, so the clause wants root), and `EBUSY` because
+    another master owns the card. The last one is not hypothetical: on this machine, loading
+    vkms made the live compositor claim the card, and the clause refused it -- which is the
+    behaviour the skip exists for. Thirty-eight unit tests (`tests/unit/drm-modeset.lisp`,
+    suite 15) pin what a card cannot isolate: a mode written into the ABI struct and read back
+    field for field, the event parser (several events per read, a partial record, an unknown
+    kind, a corrupt length), the scanout's order of operations on a recording device
+    (`take master -> save -> create -> map -> ADDFB -> SETCRTC`, and `restore -> RMFB ->
+    munmap -> DESTROY_DUMB -> drop master`), `EBUSY` leaving nothing allocated, a half-built
+    scanout undoing itself, and a restore that names the connectors or switches the CRTC off.
+    Three more in the render suite cover the defect this slice found: a rectangle that starts
+    left of the target, above it, or entirely outside it is clipped in `fill-rect` rather than
+    handed to pixman, which wrote before the mapping and faulted; the test maps a guard page in
+    front of the target and checks it afterwards.
+
+All twenty-two clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs

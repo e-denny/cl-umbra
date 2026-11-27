@@ -105,6 +105,19 @@
 #      repaint, Escape and a click cancelling without moving the focus, and an
 #      overlay that is never hit-tested
 #
+# Phase 4 (the card):
+#
+#  21. the card, its connectors, a mode and a scanout-sized dumb buffer, with no
+#      master and no mode set: libdrm's view compared with the kernel's own (sysfs)
+#      view, and one buffer per connected connector painted through the renderer and
+#      read back.  77 = no card or no permission (D54)
+#
+#  22. the screen: a virtual card (vkms) taken with master, a CRTC programmed with
+#      the connector's mode, two buffers flipped three times with every completion
+#      read from the kernel, then the CRTC's saved state restored and master dropped.
+#      A real card has to be named and allowed; a card another session is using
+#      answers EBUSY and this clause skips (D55)
+#
 #  15. our compositor runs as a client of another compositor, in one image and two
 #      sockets: the parent sees a mapped, titled, activated xdg_toplevel; the
 #      parent's pixels equal the nested compositor's own target; a pointer motion
@@ -352,6 +365,26 @@ else
   fail 'drm card' 'a card was not enumerated, or the dumb-buffer round trip failed' "$log_dir/drm.log"
 fi
 
+# 22. The screen: master, SETCRTC, page flips and the state put back ----------
+#
+# The half of KMS that changes a display, and therefore a clause about *which*
+# display: by default only a virtual card (vkms), because that is a real KMS path
+# -- connector, mode, flips, vblank -- with no screen on the other end.  A real
+# card has to be named with CL_DRM_MODESET_CARD *and* allowed with
+# CL_DRM_MODESET_ALLOW=1.  77 means no virtual card, no permission, or a card
+# another master holds (EBUSY), which is a skip and not a failure (D55).
+printf '\nphase 4 gate: master, a mode, three flips and the screen put back\n\n'
+
+drm_modeset_status=0
+gb "$log_dir/drm-modeset.log" "$repo_root/scripts/drm-modeset-gate.sh" || drm_modeset_status=$?
+if [ "$drm_modeset_status" -eq 0 ]; then
+  pass 'drm modeset' "$(grep -a '^drm-modeset-gate: ' "$log_dir/drm-modeset.log" | tail -n 1 | sed 's/^drm-modeset-gate: //')"
+elif [ "$drm_modeset_status" -eq 77 ]; then
+  skip 'drm modeset' "$(grep -a '^drm-modeset-gate: skip' "$log_dir/drm-modeset.log" | tail -n 1 | sed 's/^drm-modeset-gate: skip //')"
+else
+  fail 'drm modeset' 'a mode was not set, a flip was not retired, or the CRTC was not restored' "$log_dir/drm-modeset.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -371,7 +404,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack, the switcher and the card)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack, the switcher, the card and the screen)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

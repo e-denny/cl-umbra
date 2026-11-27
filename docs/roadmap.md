@@ -305,10 +305,13 @@ explicitly authorized step (it maps a window on the user's desktop).
 - [ ] libseat: `open_seat`, `open_device`, `close_device`, switch callbacks; seatd and
       logind; fallback direct VT path
 - [x] resources/connectors/encoders/CRTCs; preferred mode; each CRTC's current scanout (D54)
-- [ ] `SETCRTC`: take the display, and restore the saved state on exit
+- [x] `SETCRTC`, `SET MASTER`, and the saved state put back on close (D55)
 - [x] dumb buffers: create/map/addfb (D54)
-- [ ] double + triple buffering
-- [ ] `PAGE_FLIP` + `read()` vblank; frame callbacks with real timestamps
+- [x] double buffering: two buffers, present waits for the flip that retires the frame (D55)
+- [ ] triple buffering
+- [x] `PAGE_FLIP` + `read()` of the kernel's completion event; monotonic sequences and
+      timestamps checked (D55)
+- [ ] frame callbacks with the kernel's real timestamps
 - [ ] VT switch away/back; teardown and restore
 - [ ] hotplug add/remove; output re-layout
 - [ ] suspend/resume hooks
