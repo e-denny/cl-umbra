@@ -590,52 +590,6 @@ real seat, so a test can stand a recording session in their place.")
    #:%switch-session
    #:%seat-fd))
 
-(defpackage #:cf.backend.vt
-  (:use #:cl)
-  (:local-nicknames (#:ffi #:wayland.ffi)
-                    (#:drm #:cf.backend.drm)
-                    (#:session #:cf.session)
-                    (#:render #:cf.render.pixman)
-                    (#:scene #:cf.scene))
-  (:documentation
-   "The card a seat hands out -- the VT backend (docs/framework.md §2, 4d-3).
-
-On a VT the compositor never opens /dev/dri itself: libseat opens the card on its
-behalf, hands over a descriptor, and revokes it when the VT goes away (D56's
-TakeDevice route).  VT-OUTPUT is the thing that survives that: it remembers which
-card, connector and mode it programmed, opens the descriptor through the session,
-takes the screen with DRM-OPEN-SCANOUT, and gives both back on a disable -- so a
-compositor's whole VT story is registering this object and doing nothing else.
-
-It does not own the reactor and does not draw: the frame loop and the renderer are
-the compositor's (D58's DRM-SCANOUT-RENDER is what draws into the buffer).")
-  (:export
-   ;; the output
-   #:vt-output
-   #:open-vt-output
-   #:close-vt-output
-   #:enable-vt-output
-   #:disable-vt-output
-   #:vt-output-enabled-p
-   #:vt-output-session
-   #:vt-output-path
-   #:vt-output-device
-   #:vt-output-scanout
-   #:vt-output-connector-name
-   #:vt-output-crtc-id
-   #:vt-output-mode
-   #:vt-output-width
-   #:vt-output-height
-   #:vt-output-enable-count
-   #:vt-output-disable-count
-   ;; drawing, one frame at a time
-   #:vt-output-frame-target
-   #:make-vt-frame-hooks
-   #:render-vt-output
-   #:present-vt-output
-   ;; the seam a test replaces: a descriptor into a card
-   #:open-vt-device))
-
 (defpackage #:cf.backend.libinput
   (:use #:cl)
   (:local-nicknames (#:ffi #:wayland.ffi)
@@ -768,6 +722,7 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:compositor-device-height
    #:invalidate-output
    #:output-damage-bounds
+   #:compositor-frame-change
    #:compositor-partial-frame-count
    #:frame-pixel-device
    #:frame-octets
@@ -828,6 +783,60 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:write-frame-png
    #:cf-surface
    #:cf-compositor))
+
+(defpackage #:cf.backend.vt
+  (:use #:cl)
+  (:local-nicknames (#:ffi #:wayland.ffi)
+                    (#:drm #:cf.backend.drm)
+                    (#:headless #:cf.backend.headless)
+                    (#:session #:cf.session)
+                    (#:render #:cf.render.pixman)
+                    (#:scene #:cf.scene))
+  (:documentation
+   "The card a seat hands out -- the VT backend (docs/framework.md §2, 4d-3).
+
+On a VT the compositor never opens /dev/dri itself: libseat opens the card on its
+behalf, hands over a descriptor, and revokes it when the VT goes away (D56's
+TakeDevice route).  VT-OUTPUT is the thing that survives that: it remembers which
+card, connector and mode it programmed, opens the descriptor through the session,
+takes the screen with DRM-OPEN-SCANOUT, and gives both back on a disable -- so a
+compositor's whole VT story is registering this object and doing nothing else.
+
+It does not own the reactor and does not draw: the frame loop and the renderer are
+the compositor's (D58's DRM-SCANOUT-RENDER is what draws into the buffer).")
+  (:export
+   ;; the output
+   #:vt-output
+   #:open-vt-output
+   #:close-vt-output
+   #:enable-vt-output
+   #:disable-vt-output
+   #:vt-output-enabled-p
+   #:vt-output-session
+   #:vt-output-path
+   #:vt-output-device
+   #:vt-output-scanout
+   #:vt-output-connector-name
+   #:vt-output-crtc-id
+   #:vt-output-mode
+   #:vt-output-width
+   #:vt-output-height
+   #:vt-output-enable-count
+   #:vt-output-disable-count
+   ;; drawing, one frame at a time
+   #:vt-output-frame-target
+   #:make-vt-frame-hooks
+   #:render-vt-output
+   #:present-vt-output
+   ;; what each buffer may still be trusted to hold (D61)
+   #:vt-buffer-repaint-region
+   #:record-vt-frame-damage
+   #:forget-vt-frame-history
+   #:vt-output-frame-sequence
+   #:vt-output-current-frame
+   #:vt-output-damage-history
+   ;; the seam a test replaces: a descriptor into a card
+   #:open-vt-device))
 
 (defpackage #:cf.backend.nested
   (:use #:cl)
@@ -941,6 +950,7 @@ that, so a compositor chooses it by binding START-SWITCHER.")
                 #:compositor-device-height
                 #:invalidate-output
                 #:output-damage-bounds
+                #:compositor-frame-change
                 #:compositor-partial-frame-count
                 #:frame-pixel-device
                 #:frame-octets
@@ -1073,6 +1083,7 @@ docs/framework.md §1 follow.")
    #:compositor-device-height
    #:invalidate-output
    #:output-damage-bounds
+   #:compositor-frame-change
    #:compositor-partial-frame-count
    #:frame-pixel-device
    #:frame-octets

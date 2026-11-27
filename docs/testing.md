@@ -61,7 +61,7 @@ The scripts go through `wayland.test.runner`, which names the eighteen suites in
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 442 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 451 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -662,6 +662,18 @@ Phase 4's fifth slice is the VT, and it adds the twenty-fifth:
     adoption fails, and refusing something that is not a descriptor. `tests/unit/tinywl.lisp`
     adds the command line: `--drm` with `--card` and `--connector` reaches `start` as
     `:mode :drm` and the two names, and a card option with no value is an error.
+
+    Nine more tests in the same suite are the VT output's damage history (D61): five pin
+    the age arithmetic (a buffer nobody has painted, one that missed one frame and owes
+    that frame's change, one that missed a wholesale repaint, one whose missing frame was
+    never recorded, and a history that keeps two entries and reuses its regions), and four
+    draw real frames into a `pixel-screen-device` -- a recording card whose dumb buffers
+    are memfds with 16 bytes of padding per row, and whose flips always retire. The
+    claims a full repaint would hide are the ones asserted: the first two frames are full
+    and the third is not, a sentinel painted into the buffer before the frame survives
+    everywhere the frame did not damage, the box the pointer left holds no arrow, a frame
+    with nothing to show does not flip but still takes a frame number, and a VT switch
+    forgets every buffer.
 
 All twenty-five clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface

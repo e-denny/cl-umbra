@@ -22,8 +22,8 @@
 ;;;;     itself with the session and survives every switch without the compositor
 ;;;;     touching it.
 ;;;;
-;;;; What it does not do: no reactor source, no frame loop, no damage tracking.  A
-;;;; compositor asks for a target, draws, presents, and the seat does the rest.
+;;;; What it does not do: no reactor source and no frame loop.  A compositor asks for
+;;;; a target, draws, presents, and the seat does the rest.
 
 (in-package #:cf.backend.vt)
 
@@ -48,6 +48,23 @@
    ;; output is disabled: a target borrows a buffer's mapping, so making one per
    ;; frame would be a pixman image per frame for nothing.
    (targets :initform (make-hash-table :test #'eq) :reader vt-output-targets)
+   ;; Frames, and what each of the two buffers may still be trusted to hold.  With
+   ;; two buffers a buffer is at most two frames behind, so a buffer's age is the
+   ;; number of frames it missed and the history needs those and no more (D50, D61).
+   ;; SEQUENCE counts frames prepared, whether or not they reached the card -- a
+   ;; frame that painted nothing still happened, and the history has to be able to
+   ;; say so.  BUFFER-FRAMES is which frame's pixels each buffer holds, so "what did
+   ;; this buffer miss?" is a subtraction.  DAMAGE-HISTORY is the change of the last
+   ;; two frames, newest first; HISTORY-REGIONS is the pair it reuses, so recording
+   ;; a frame allocates nothing.
+   (sequence :initform 0 :accessor vt-output-frame-sequence)
+   (current-frame :initform nil :accessor vt-output-current-frame)
+   (buffer-frames :initform (make-hash-table :test #'eq)
+                  :reader vt-output-buffer-frames)
+   (buffer-repaints :initform (make-hash-table :test #'eq)
+                    :reader vt-output-buffer-repaints)
+   (damage-history :initform nil :accessor vt-output-damage-history)
+   (history-regions :initform nil :accessor vt-output-history-regions)
    (width :initform 0 :accessor vt-output-width)
    (height :initform 0 :accessor vt-output-height)
    ;; The hooks, kept so CLOSE-VT-OUTPUT can remove the two it added.
@@ -163,6 +180,19 @@ the compositor still holds."
           (close-vt-device output)
           (error condition))))))
 
+(defun forget-vt-frame-history (output)
+  "Forget every buffer and every recorded frame; returns nothing.
+
+A disable destroys the scanout's buffers, so their frame numbers name memory that
+no longer exists: a re-enable gets fresh buffers, and a fresh buffer is one nobody
+has painted, which is :FULL and not a stale claim about pixels."
+  (clrhash (vt-output-buffer-frames output))
+  (clrhash (vt-output-buffer-repaints output))
+  (setf (vt-output-damage-history output) nil
+        (vt-output-frame-sequence output) 0
+        (vt-output-current-frame output) nil)
+  (values))
+
 (defun disable-vt-output (output)
   "Give the screen back and the descriptor back.  Idempotent.
 
@@ -174,6 +204,7 @@ two are one function and why the device is closed even if the restore signalled.
       (incf (vt-output-disable-count output))
       (setf (vt-output-scanout output) nil)
       (discard-frame-targets output)
+      (forget-vt-frame-history output)
       (unwind-protect
            (when scanout
              (drm:drm-close-scanout scanout))
@@ -271,13 +302,95 @@ mapping is: DISABLE-VT-OUTPUT does that, in that order."
              targets)
     (clrhash targets)))
 
+;;; ---------------------------------------------------------------------------
+;;; What each buffer may still be trusted to hold
+;;; ---------------------------------------------------------------------------
+;;
+;; A frame is drawn into a buffer the display is not reading, so with two buffers a
+;; frame's pixels are either the last frame's or the one before last: a buffer is at
+;; most two frames behind, and "what did this buffer miss?" has an answer (D50).
+;;
+;; The arithmetic is the nested backend's; the *input* to it is the difference, and
+;; that difference is the whole of this slice.  What goes into the history is what
+;; changed on the screen -- what a frame painted relative to the frame before -- and
+;; never what a buffer had to repaint because it was whole.  Those look alike until
+;; a buffer's first paint: recording that frame as "everything changed" makes every
+;; buffer that missed it whole, which makes the next frame's paint whole, which is
+;; recorded as "everything changed" again.  A two-buffer scanout alternates buffers
+;; by construction (DRM-SCANOUT-NEXT-BUFFER is FRAMES modulo the count), so that
+;; loop would never end and the whole output would be repainted every frame (D61).
+
+(defun vt-buffer-repaint-region (output buffer next-frame)
+  "What BUFFER has to repaint before frame NEXT-FRAME can be shown from it.
+
+A buffer the card has never been given is painted whole; so is one more than two
+frames behind, because the history keeps two entries and would otherwise have to
+invent the rest.  Otherwise the answer is the union of the change of every frame
+this buffer missed -- and a frame recorded as :FULL (a stacking change, the first
+frame) makes any buffer that missed it whole, because after a wholesale repaint
+that buffer's pixels are unknown rather than partly known.
+
+The returned region belongs to OUTPUT and is reused for that buffer, so a caller
+must either merge it into its own region or draw before the next prepare."
+  (let ((last (gethash buffer (vt-output-buffer-frames output))))
+    (cond
+      ((null last) :full)
+      ((> (- next-frame last) 2) :full)
+      (t
+       (let* ((missed (- next-frame last 1))
+              (entries (remove-if (lambda (entry) (<= (car entry) last))
+                                  (vt-output-damage-history output))))
+         (cond
+           ;; The history has to cover every frame between LAST and NEXT, or there
+           ;; is a frame whose change nobody kept.
+           ((< (length entries) missed) :full)
+           ((some (lambda (entry) (null (cdr entry))) entries) :full)
+           (t
+            (let ((region (or (gethash buffer (vt-output-buffer-repaints output))
+                              (setf (gethash buffer (vt-output-buffer-repaints output))
+                                    (render:make-region)))))
+              (render:region-clear region)
+              (dolist (entry entries)
+                (render:region-union region region (cdr entry)))
+              region))))))))
+
+(defun record-vt-frame-damage (output frame change)
+  "Remember what FRAME changed on the screen: CHANGE, or NIL for `everything'.
+
+The history is the last two changes and no more: with two buffers a buffer can only
+be two frames behind, so anything older is a full repaint by definition.  The
+regions come from a fixed pair -- frame N uses region N mod 2, which is the entry
+about to fall off the end -- so recording a frame allocates nothing."
+  (let ((pool (or (vt-output-history-regions output)
+                  (setf (vt-output-history-regions output)
+                        (list (render:make-region) (render:make-region)))))
+        (entry nil))
+    (if (null change)
+        (setf entry (cons frame nil))
+        (let ((region (nth (mod frame 2) pool)))
+          (render:region-copy region change)
+          (setf entry (cons frame region))))
+    ;; Newest first, never more than two: frames arrive in order, so this is a push
+    ;; and a truncation, not a sort.  CDDR is out of bounds on a shorter list, which
+    ;; is exactly the first two frames.
+    (setf (vt-output-damage-history output)
+          (let ((entries (cons entry (vt-output-damage-history output))))
+            (if (cddr entries)
+                (list (first entries) (second entries))
+                entries)))
+    nil))
+
 (defun render-vt-output (output scene &key damage (background #xFF000000))
   "Draw SCENE into the buffer the next flip will show; return that buffer.
 
 DAMAGE is a device-pixel region or NIL for a full repaint (D50, D58): a damaged
 frame paints no background, so what it did not damage keeps the pixels it had.  An
 output the seat has disabled has no buffer to draw into, and says so instead of
-drawing into memory nothing will ever scan out."
+drawing into memory nothing will ever scan out.
+
+This is the manual frame path, for a REPL or a probe: it does not consume a frame
+number and does not record what it painted, so a compositor that wants the damage
+history of MAKE-VT-FRAME-HOOKS uses those hooks and not this."
   (let ((scanout (vt-output-scanout output)))
     (unless scanout
       (error "this output is disabled: the seat has not given its card back yet"))
@@ -303,22 +416,45 @@ would tear."
   "The two functions a compositor needs to render into OUTPUT; values PREPARER PRESENTER.
 
 CF's compositor seam (docs/framework.md §2): the preparer answers which target this
-frame draws into, and the presenter is told after the pixels are in it, so drawing
-and flipping stay in that order (D58).
+frame draws into and the least that buffer can be trusted to keep, and the presenter
+is told after the pixels are in it, so drawing and flipping stay in that order (D58).
 
-The preparer answers :FULL every time, and that is the honest state of this backend
-rather than a shortcut: with two buffers, the one this frame draws into holds the
-frame before last, so a region computed against the last frame is not damage to
-*this* buffer.  Per-buffer damage history -- what the nested backend keeps -- is the
-next slice's job; a full repaint is correct, and costs a full redraw per frame."
+The second answer is not :FULL every time: each buffer keeps its own damage history
+(VT-BUFFER-REPAINT-REGION), so a buffer that was drawn two frames ago needs the change
+of the frame it missed, and the compositor merges that with what changed since its own
+last frame.  The presenter records the *compositor's* change -- not the merged region
+-- because that is what the other buffer will owe when it comes round (D61); a frame
+with nothing to show does not flip at all, since a flip costs a vblank's wait and
+paints no pixels (D50)."
   (values (lambda (compositor)
             (declare (ignore compositor))
             (let ((scanout (vt-output-scanout output)))
               (when scanout
-                (values (vt-output-frame-target
-                         output (drm:drm-scanout-next-buffer scanout))
-                        :full))))
+                (let* ((buffer (drm:drm-scanout-next-buffer scanout))
+                       (next-frame (1+ (vt-output-frame-sequence output))))
+                  ;; MULTIPLE-VALUE-PROG1, not PROG1: the preparer answers two values
+                  ;; and PROG1 keeps only the first -- which silently turns every
+                  ;; "paint this buffer whole" into "there is nothing to trust with"
+                  ;; and then, one frame later, into "paint nothing".
+                  (multiple-value-prog1
+                      (values (vt-output-frame-target output buffer)
+                              (vt-buffer-repaint-region output buffer next-frame))
+                    ;; The frame number is consumed before the draw and recorded on the
+                    ;; buffer before the present, so the history and the next prepare
+                    ;; agree about this buffer's age even when nothing is flipped.
+                    (setf (vt-output-frame-sequence output) next-frame
+                          (vt-output-current-frame output) next-frame)
+                    (setf (gethash buffer (vt-output-buffer-frames output))
+                          next-frame))))))
           (lambda (compositor target damage)
-            (declare (ignore compositor target damage))
+            (declare (ignore target))
             (when (vt-output-enabled-p output)
-              (present-vt-output output)))))
+              (let ((frame (vt-output-current-frame output)))
+                (when frame
+                  (record-vt-frame-damage
+                   output frame
+                   (let ((change (headless:compositor-frame-change compositor)))
+                     (if (eq change :full) nil change)))
+                  (unless (and (not (eq damage :full))
+                               (render:region-empty-p damage))
+                    (present-vt-output output))))))))

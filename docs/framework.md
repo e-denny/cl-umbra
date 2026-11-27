@@ -89,7 +89,11 @@ The presenter is handed a target that already holds the frame it is presenting: 
 the damage), prune, draw, present, then release the clients' buffers and fire their callbacks.
 `damage` is `:full` or a region in device pixels — what the frame actually painted — and a
 nested presenter turns exactly that into `wl_surface.damage`, so a nested frame costs its damage
-rather than its size (D48, D50). A nested target is the parent's `wl_shm` mapping and the parent
+rather than its size (D48, D50). Separately, `cf.backend.headless:compositor-frame-change` is the
+frame's *change* — its difference from the frame before — computed before the backend's minimum
+damage is merged in: `:full` or a region the compositor reuses. A backend whose buffers each need
+their own history records the change, because a buffer that must repaint whole for its own reasons
+(say, its first paint) has not thereby changed anything on the screen (D61). A nested target is the parent's `wl_shm` mapping and the parent
 reads it when it likes, so presenting before the draw commits the background paint and nothing
 else — a flickering, half-drawn window in the parent (D38). An empty frame is presented too, with
 an empty region: the backend decides that there is nothing to send, and returns the buffer it was
@@ -241,9 +245,15 @@ Four things are worth knowing about it.
   `close-session-device`, and the DRM device is told its number is gone rather than closing it a
   second time: after a disable the provider already closed it, and a second `close(2)` on a
   reused number would close somebody else's file.
-* **The frame hooks are the compositor seam.** The preparer answers a target over the buffer the
-  next flip will show, at the driver's pitch (D58); the presenter flips and waits for the
-  kernel's completion. Drawing and presenting stay separate, and one frame is one vblank.
+* **The frame hooks are the compositor seam, and each scanout buffer keeps its own damage.** The
+  preparer answers a target over the buffer the next flip will show, at the driver's pitch (D58),
+  and the least that buffer may still be trusted to keep: a buffer the card has never been given
+  is whole, and so is one more than two frames old, but a buffer drawn two frames ago owes only
+  the change of the frame it missed. The presenter flips and waits for the kernel's completion,
+  records the *compositor's* change for the other buffer (never the merged region -- that would
+  record a buffer's first paint as a screen-wide change and make every following frame full,
+  D61), and does not flip at all when nothing changed. Drawing and presenting stay separate, and
+  one frame is one vblank.
 * **Master is best effort, and the CRTC is the judge.** A descriptor from logind does not
   arrive with the right to be master: on this machine `SET MASTER` answers `EACCES` while
   `SETCRTC`, `PAGE_FLIP` and a restore all succeed, so a refusal is recorded and the

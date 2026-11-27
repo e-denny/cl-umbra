@@ -28,6 +28,9 @@
   (:local-nicknames (#:drm #:cf.backend.drm)
                     (#:session #:cf.session)
                     (#:vt #:cf.backend.vt)
+                    (#:headless #:cf.backend.headless)
+                    (#:render #:cf.render.pixman)
+                    (#:srv #:wayland.server)
                     (#:ffi #:wayland.ffi))
   (:documentation "Tests for the DRM screen path: modes written back, events
 parsed, a scanout's order (D55), and the screen a seat hands out (4d-3)."))
@@ -691,7 +694,9 @@ header, which is how an unknown event looks."
    (next-id :initform 0 :accessor fake-next-id)
    (open-fds :initform (make-hash-table) :accessor fake-open-fds)
    (opened-fds :initform '() :accessor fake-opened-fds)
-   (card-error :initform nil :accessor fake-card-error))
+   (card-error :initform nil :accessor fake-card-error)
+   (card-class :initarg :card-class :initform 'recording-screen-device
+               :accessor fake-card-class))
   (:documentation
    "A seat whose provider is the test: no logind, no seatd, and descriptors that
 are real files, so closing them is observable."))
@@ -739,9 +744,10 @@ are real files, so closing them is observable."))
 
 (defmethod session:%seat-fd ((session fake-session)) -1)
 
-(defun make-seat (&key (enabled t))
+(defun make-seat (&key (enabled t) (card-class 'recording-screen-device))
   "A seat that is already enabled, the way logind hands one over."
-  (let ((session (session:open-session :class 'fake-session :name "seat0")))
+  (let ((session (session:open-session :class 'fake-session :name "seat0"
+                                       :initargs (list :card-class card-class))))
     (when enabled
       (session:note-seat-enabled session))
     session))
@@ -753,7 +759,7 @@ are real files, so closing them is observable."))
 (defmethod vt:open-vt-device ((output vt:vt-output) (session fake-session) path)
   "A recording card in place of the kernel's: the descriptor is real, the card is not."
   (multiple-value-bind (fd id) (session:open-session-device session path)
-    (values (make-instance 'recording-screen-device
+    (values (make-instance (fake-card-class session)
                            :path path :fd fd :driver-name "vkms"
                            :inventory (make-inventory)
                            :program-error (fake-card-error session))
@@ -867,3 +873,242 @@ are real files, so closing them is observable."))
     (ok (= 1 (vt:vt-output-enable-count output))
         "a compositor that closed its output is not overruled by the seat")
     (ok (not (vt:vt-output-enabled-p output)))))
+
+;;; ---------------------------------------------------------------------------
+;;; What each buffer may still be trusted to hold (D61)
+;;; ---------------------------------------------------------------------------
+;;
+;; The arithmetic is the nested backend's (D50); this is the card's version of it,
+;; and the input to it is the difference.  Two levels again: the age arithmetic on
+;; its own -- a buffer nobody has painted, one that missed a frame, one that missed
+;; a wholesale repaint -- and then a real frame through the compositor's own seam,
+;; into real memory with a padded pitch, where what was claimed is also what the
+;; pixels say.
+
+(defclass pixel-screen-device (recording-screen-device)
+  ((mappings :initform (make-hash-table :test #'eql) :accessor pixel-mappings)
+   (padding :initarg :padding :initform 16 :reader pixel-padding)
+   (flips :initform 0 :accessor pixel-flips))
+  (:documentation
+   "A recording card whose dumb buffers are real memory, with a padded pitch.
+
+A renderer reads the pitch and every write goes through it, so the card these tests
+draw into cannot answer with a fake pointer: a frame here lands in a memfd this
+process owns, and the padding is the driver's freedom made visible -- this card
+always pads, so a target built from width x 4 would shear (D58)."))
+
+(defmethod drm:drm-claim-dumb ((device pixel-screen-device) width height bits-per-pixel)
+  (push (list :create-dumb width height bits-per-pixel) (recording-calls device))
+  (let* ((pitch (+ (* width (floor bits-per-pixel 8)) (pixel-padding device)))
+         (handle (incf (recording-handle device))))
+    (values handle pitch (* pitch height))))
+
+(defmethod drm:drm-map-dumb-memory ((device pixel-screen-device) handle size)
+  (push (list :map-dumb handle size) (recording-calls device))
+  (let ((fd (ffi:memfd-create "cl-wayland-vt-damage-test")))
+    (unwind-protect
+         (progn
+           (ffi:set-file-size fd size)
+           (let ((pointer (ffi:map-file fd size
+                                        :protection (logior ffi:+prot-read+
+                                                            ffi:+prot-write+))))
+             (setf (gethash handle (pixel-mappings device)) (list pointer size))
+             pointer))
+      (ffi:close-fd fd))))
+
+(defmethod drm:drm-unmap-dumb-memory ((device pixel-screen-device) buffer)
+  (push (list :unmap-dumb (drm:dumb-buffer-handle buffer)) (recording-calls device))
+  (let* ((handle (drm:dumb-buffer-handle buffer))
+         (entry (gethash handle (pixel-mappings device))))
+    (when entry
+      (remhash handle (pixel-mappings device))
+      (ffi:unmap-file (first entry) (second entry))))
+  (values))
+
+(defmethod drm:drm-read-events ((device pixel-screen-device) &key timeout-ms)
+  "Every flip retires at once, as a completion for the CRTC that was programmed."
+  (declare (ignore timeout-ms))
+  (incf (pixel-flips device))
+  (list (flip-event :sequence (pixel-flips device))))
+
+;;; The age arithmetic, without a card, a compositor or a frame.
+
+(defun make-damage-output ()
+  "A VT output with nothing behind it: the history functions read only its slots."
+  (make-instance 'vt:vt-output :session nil :path "nowhere"))
+
+(deftest a-screen-nobody-has-painted-is-painted-whole
+  (let ((output (make-damage-output)))
+    (ok (eq :full (vt:vt-buffer-repaint-region output 'buffer-a 1))
+        "a buffer the card has never been given has nothing to trust")))
+
+(deftest a-buffer-repaints-the-frames-it-missed
+  ;; Two buffers alternate, so a buffer drawn at frame 1 is used again at frame 3 and
+  ;; missed exactly frame 2 -- and only frame 2's change has to be painted into it.
+  (let* ((output (make-damage-output))
+         (damage (render:make-region)))
+    (render:region-add damage 10 10 5 5)
+    (setf (gethash 'buffer-a (vt::vt-output-buffer-frames output)) 1)
+    (vt:record-vt-frame-damage output 2 damage)
+    (let ((region (vt:vt-buffer-repaint-region output 'buffer-a 3)))
+      (ok (not (eq :full region)) "an age-2 buffer is repainted, not painted whole")
+      (ok (equal '(10 10 5 5) (render:region-bounds region))
+          (format nil "and the region is the change of the frame it missed: ~S"
+                  (render:region-bounds region))))
+    (ok (eq :full (vt:vt-buffer-repaint-region output 'buffer-a 4))
+        "a buffer three frames old is painted whole")))
+
+(deftest a-frame-that-changed-everything-makes-the-next-buffer-whole
+  (let ((output (make-damage-output)))
+    (setf (gethash 'buffer-a (vt::vt-output-buffer-frames output)) 1)
+    (vt:record-vt-frame-damage output 2 nil)     ; :full, recorded as NIL
+    (ok (eq :full (vt:vt-buffer-repaint-region output 'buffer-a 3))
+        "a missed wholesale repaint makes the buffer whole")))
+
+(deftest a-frame-nobody-recorded-makes-the-next-buffer-whole
+  (let ((output (make-damage-output)))
+    (setf (gethash 'buffer-a (vt::vt-output-buffer-frames output)) 1)
+    (ok (eq :full (vt:vt-buffer-repaint-region output 'buffer-a 3))
+        "an age-2 buffer whose missing frame has no entry is painted whole")))
+
+(deftest the-damage-history-keeps-two-frames-and-no-more
+  (let ((output (make-damage-output))
+        (damage (render:make-region)))
+    (render:region-add damage 0 0 100 80)
+    (dotimes (frame 5)
+      (vt:record-vt-frame-damage output (1+ frame) damage))
+    (ok (= 2 (length (vt:vt-output-damage-history output)))
+        "five frames in, the history holds the last two")
+    (ok (equal '(5 4) (mapcar #'car (vt:vt-output-damage-history output)))
+        "newest first")
+    (ok (= 2 (length (vt::vt-output-history-regions output)))
+        "and the pair of regions is reused, so recording a frame allocates nothing")
+    (ok (eq (nth (mod 5 2) (vt::vt-output-history-regions output))
+            (cdr (first (vt:vt-output-damage-history output))))
+        "frame 5 uses region (5 mod 2) of the pair, not a fresh one")))
+
+;;; The frame, through the compositor's seam, into real memory.
+
+(defvar *frame-directory-counter* 0)
+
+(defun make-frame-directory ()
+  (let ((path (format nil "/tmp/cl-wayland-vt-damage-~D-~D/"
+                      (get-universal-time) (incf *frame-directory-counter*))))
+    (ensure-directories-exist path)
+    (ffi:chmod-path (string-right-trim "/" path) #o700)
+    path))
+
+(defmacro with-vt-frames ((output compositor &key (width 200) (height 150)) &body body)
+  "A seat-enabled VT output on padded real memory, and a compositor wired to it.
+
+The out-of-body unwind order is the real one (D59): the compositor first, because it
+holds no card of its own, then the output, which gives the screen and the seat's
+descriptor back."
+  (let ((directory (gensym "DIRECTORY"))
+        (session (gensym "SESSION")))
+    `(let ((,directory (make-frame-directory))
+           (srv:*log-level* :warn))
+       (unwind-protect
+            (let* ((,session (make-seat :card-class 'pixel-screen-device))
+                   (,output (vt:open-vt-output ,session :path "/dev/dri/card0"))
+                   (,compositor (cf:make-headless-compositor
+                                 :width ,width :height ,height
+                                 :display-name "vt-damage-0"
+                                 :runtime-dir ,directory)))
+              (unwind-protect
+                   (progn
+                     (multiple-value-bind (preparer presenter)
+                         (vt:make-vt-frame-hooks ,output)
+                       (setf (headless:compositor-frame-preparer ,compositor) preparer
+                             (headless:compositor-frame-presenter ,compositor)
+                             presenter))
+                     (locally ,@body))
+                (srv:close-display (cf:compositor-display ,compositor))
+                (vt:close-vt-output ,output)))
+         (ignore-errors (uiop:delete-directory-tree (pathname ,directory)
+                                                    :validate t))))))
+
+(defun next-buffer (output)
+  (drm:drm-scanout-next-buffer (vt:vt-output-scanout output)))
+
+(deftest the-first-two-frames-paint-both-buffers-whole-and-the-third-does-not
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (cf:render-frame compositor)
+    (ok (= 0 (cf:compositor-partial-frame-count compositor))
+        "the first frame has nothing to trust, so it paints everything")
+    (cf:render-frame compositor)
+    (ok (= 0 (cf:compositor-partial-frame-count compositor))
+        "and so does the second, because the other buffer has never been painted")
+    (cf:inject-pointer-motion compositor 50 40)
+    (cf:render-frame compositor)
+    (ok (= 1 (cf:compositor-partial-frame-count compositor))
+        "the third frame repaints only what changed since that buffer was drawn")
+    (let ((bounds (cf:output-damage-bounds compositor)))
+      (ok (consp bounds)
+          (format nil "the damage is a box, not the whole output: ~S" bounds))
+      (when (consp bounds)
+        (destructuring-bind (x y w h) bounds
+          (ok (and (< (+ x w) 200) (< (+ y h) 150))
+              (format nil "and the box is the pointer's, not the screen's: ~S"
+                      bounds)))))
+    (ok (= 3 (drm:drm-scanout-frames (vt:vt-output-scanout output)))
+        "all three frames were presented")))
+
+(defun count-colour (buffer x y width height colour)
+  "How many pixels in the box hold COLOUR -- a claim the pixels make, not the code."
+  (loop for py from y below (+ y height)
+        sum (loop for px from x below (+ x width)
+                  count (= colour (drm:dumb-buffer-pixel buffer px py)))))
+
+(deftest a-damaged-frame-leaves-the-pixels-it-did-not-damage-alone
+  ;; The claim a full repaint would hide: the buffer this frame draws into is not
+  ;; repainted everywhere, so a pixel far from the change keeps whatever it held.
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (cf:inject-pointer-motion compositor 20 20)
+    (cf:render-frame compositor)                ; buffer 0, whole
+    (cf:render-frame compositor)                ; buffer 1, whole
+    (let ((buffer (next-buffer output)))
+      ;; Frame 3 draws into buffer 0.  Paint it with a sentinel first: whatever the
+      ;; frame does not damage must still be the sentinel afterwards.
+      (render:fill-target (vt:vt-output-frame-target output buffer) #xFF5A5A5A)
+      (cf:inject-pointer-motion compositor 150 110)
+      (cf:render-frame compositor)
+      (ok (= #xFF5A5A5A (drm:dumb-buffer-pixel buffer 10 140))
+          "a pixel nobody damaged still holds what it held")
+      (ok (plusp (count-colour buffer 150 110 16 16 #xFFFFFFFF))
+          "the pixels the pointer moved to are painted")
+      (ok (zerop (count-colour buffer 20 20 16 16 #xFF5A5A5A))
+          "the box the pointer left is repainted, not left to itself")
+      (ok (zerop (count-colour buffer 20 20 16 16 #xFFFFFFFF))
+          "and no arrow is left behind there"))))
+
+(deftest a-frame-with-nothing-to-show-does-not-flip
+  ;; A flip costs a vblank's wait and paints no pixels, so a frame whose damage is
+  ;; empty presents nothing -- but it is still a frame in the history, or the next
+  ;; buffer would be repainted whole for no reason (D50's arithmetic, D61's input).
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (cf:render-frame compositor)
+    (cf:render-frame compositor)
+    (let ((flips (drm:drm-scanout-frames (vt:vt-output-scanout output))))
+      (cf:render-frame compositor)
+      (ok (= flips (drm:drm-scanout-frames (vt:vt-output-scanout output)))
+          "an unchanged frame is drawn, not flipped")
+      (ok (= 3 (vt:vt-output-frame-sequence output))
+          "but it took a frame number, so the history knows it happened"))))
+
+(deftest a-vt-switch-forgets-every-buffer
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (cf:inject-pointer-motion compositor 20 20)
+    (cf:render-frame compositor)
+    (cf:render-frame compositor)
+    (ok (plusp (hash-table-count (vt::vt-output-buffer-frames output)))
+        "two frames in, both buffers are known")
+    (setf (fake-pending (vt:vt-output-session output)) '(:disable :enable))
+    (session:dispatch-session (vt:vt-output-session output))
+    (ok (zerop (hash-table-count (vt::vt-output-buffer-frames output)))
+        "a disable destroys the buffers, so nothing is claimed about them")
+    (ok (null (vt:vt-output-damage-history output))
+        "and the history goes with them")
+    (session:dispatch-session (vt:vt-output-session output))
+    (ok (zerop (vt:vt-output-frame-sequence output))
+        "the sequence starts again with the new scanout")))

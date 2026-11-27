@@ -501,8 +501,13 @@ to another compositor). It has since **run on real hardware** (D60): clause 25 a
 19 with the VT switch, `3840x2160` on `HDMI-A-1`, master refused and the mode set anyway, a flip
 the kernel retired, the CRTC restored, descriptors flat; and `cl-tinywl --drm` ran a desktop on
 the console with real input, `Alt+Esc`, and `Ctrl+Alt+F1`/`F2` out to the session compositor and
-back. That is exit-gate items 1 and 2. What remains of phase 4: hotplug (no code yet),
-suspend/resume (no hooks yet), and the 8-hour soak.
+back. That is exit-gate items 1 and 2. **4d-4** then made the full repaint go away: each scanout
+buffer keeps its own damage history, so a frame repaints what changed since *that* buffer was last
+shown, and a frame with nothing to show does not flip at all (D61). The compositor now reports the
+frame's change separately from a buffer's own minimum damage, which is the distinction the whole
+thing turns on -- recording the merged damage would make every frame full after each buffer's
+first paint, and a scanout alternates its buffers by construction. What remains of phase 4:
+hotplug (no code yet), suspend/resume (no hooks yet), and the 8-hour soak.
 
 ### Phase 5 — GPU acceleration, only where it earns its place (5-8 weeks)
 

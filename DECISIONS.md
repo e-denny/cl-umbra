@@ -3042,3 +3042,82 @@ fully), no triple buffering, no hardware cursor, and the 8-hour soak has not bee
 The lesson: **a VT is the only place where the difference between "the kernel said yes"
 and "the library said maybe" costs a console run to find -- so measure the ioctl, not
 the helper that wraps it.**
+
+---
+
+## D61 — A buffer's age is the screen's change, not what that buffer was made to repaint
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** per-buffer damage history for the VT output (4d-3's deliberate full repaint)
+
+D59 §6 said the VT preparer answers `:full` every frame, and it said why: the buffer this frame
+draws into holds the frame before last, so a region computed against the last frame is not damage
+to *this* buffer. The nested backend already had the arithmetic for that (D50) -- a frame number
+per buffer and two entries of damage history -- so the slice looked like a port. It was not,
+because the two backends differ in exactly the place that decides whether the arithmetic ever pays
+off: a nested slot is taken from a free list and given back on release, so the parent's release
+often hands the same slot back and a frame can be one frame behind; `DRM-SCANOUT-NEXT-BUFFER` is
+`FRAMES mod the count`, so a scanout alternates its buffers by construction. Ported verbatim, the
+history would have recorded the first paint of each buffer as "everything changed", which makes
+every buffer that missed it whole, which makes the next frame's paint whole -- recorded as
+"everything changed" again, forever, on every frame. A correct full repaint that never improves.
+
+**Decision.**
+
+1. **The compositor now reports the frame's *change* separately.** `cf.backend.headless` keeps
+   `compositor-frame-change`: the difference between this frame's draw list (plus the clients'
+   reported damage) and the last one, computed *before* a backend's `required` region is merged
+   in. It is `:full` or a region the compositor reuses, and it is the same number
+   `frame-damage` was already computing -- it is just no longer overwritten by the merge. Two
+   facts that look alike are now named apart: what changed on the screen is a property of the
+   frame, and what a buffer must repaint because it is whole is a property of that buffer.
+2. **The VT output records the change, and computes each buffer's obligation from the history.**
+   `vt-buffer-repaint-region` is D50's arithmetic unchanged -- a buffer nobody has painted is
+   `:full`, a buffer more than two frames behind is `:full`, a missed `:full` frame makes it
+   `:full`, otherwise it owes the union of the change of the frames it missed -- and
+   `record-vt-frame-damage` keeps the last two changes in a reused pair of regions. The only
+   thing that is new is the *input*: the presenter hands the history
+   `compositor-frame-change`, never the merged damage it was given.
+3. **A frame with nothing to show is not flipped, but it is still a frame.** An empty merged
+   region means nothing changed since this buffer was last shown, so the buffer already holds
+   what the screen shows; a DRM flip would be a vblank's wait for no pixels. It still consumes a
+   sequence number and still records its change (an empty one), because the history has to be
+   able to say "that frame painted nothing" (D50 §3, §4).
+4. **A disable forgets every buffer.** The scanout's buffers are destroyed when the screen goes
+   back, so their frame numbers would name memory that no longer exists; a re-enable gets fresh
+   buffers, and a fresh buffer is one nobody has painted. The history and the sequence go with
+   them, which is why a VT switch costs two full frames and then returns to damage.
+5. **The nested backend is left alone.** Its recording is unchanged, and on our own parent it
+   does get partial frames -- a probe of a real nested session showed 6 inner frames, 4 of them
+   partial, with the second slot never used (its frame was `NIL`): the parent releases the slot it
+   was shown, so the same free slot is taken again and the buffer is one frame old. That is a
+   property of the free list, not of the arithmetic, and it is not a contract -- a parent that
+   alternated buffers would make the nested path full every frame in exactly the same way. Fixing
+   that is the same one-line change as this entry's decision 2, and it belongs to a slice that can
+   re-run the nested gate; this one does not touch a path it did not measure.
+
+**Evidence.** `tests/unit/drm-modeset.lisp` grows by 9 tests (suite 55), the whole suite goes from
+442 to **451 tests in eighteen suites** (`./scripts/run-tests.sh`, `PASSED`), `./scripts/gate.sh`
+stays **23 passed, 0 failed, 2 skipped**, and `./scripts/tinywl-parity.sh` still passes 53
+headless and 62 nested checks with descriptors `4 -> 4`. The arithmetic is pinned the way D50's is
+(a buffer nobody has seen, one that missed one frame -- the region is that frame's change -- one
+that missed a `:full` frame, one whose missing frame was never recorded, and a history that keeps
+two entries and reuses their regions). The claim itself is pinned at the pixels, and that is the
+test that matters: a `pixel-screen-device` answers `drm-claim-dumb` with real memfd memory and a
+**padded** pitch (16 bytes per row), every flip retires, and a frame is drawn through the
+compositor's own preparer/presenter. With a 200x150 output and a 16x16 arrow, frames 1 and 2 are
+full (0 partial frames), the pointer moves (0,0) -> (50,40), and frame 3 is partial with a damage
+box of **(0 0 66 56)** -- 3696 of 30000 pixels -- for 3 flips. Before frame 3 the buffer it draws
+into is filled with `#xFF5A5A5A`; afterwards (10,140) still holds the sentinel, the box the pointer
+left holds no sentinel and no arrow, and the box it moved to does. One defect was found by that
+test and fixed here rather than after a commit: the preparer's two values came back through
+`prog1`, which keeps only the first, so every "paint this buffer whole" became "nothing to
+repaint" and the second frame drew nothing at all. What this does not do: the hardware half has
+not been re-run for this slice (the VT path was verified on `card1` in D60 with full repaints, and
+a partial repaint is only safe because the two buffers alternate and each flip waits for the
+kernel); no triple buffering (a third buffer could be three frames old, which the history would
+answer with a full repaint rather than with a longer story); no damage gathering across an
+in-flight flip; the nested backend unchanged, as above. The lesson: **buffer age asks what
+changed on the screen, not what a buffer was made to repaint -- the two answers differ on exactly
+one frame, and that frame decides whether incremental rendering ever starts.**

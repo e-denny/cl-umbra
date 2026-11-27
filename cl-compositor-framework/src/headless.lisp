@@ -72,6 +72,12 @@ SLOT-VALUE shows a different one."))
    ;; makes the damage accounting honest).
    (frame-history-p :initform nil :accessor compositor-frame-history-p)
    (damage-region :initform nil :accessor compositor-damage-region)
+   ;; What the last frame changed on the screen -- its difference from the frame
+   ;; before -- before any backend's own buffer staleness is merged in: :FULL, or a
+   ;; region this compositor reuses, so a backend that records it must copy it
+   ;; before the next frame (D61).
+   (frame-change :initform :full :accessor compositor-frame-change)
+   (frame-change-region :initform nil :accessor compositor-frame-change-region)
    ;; How many frames repainted less than the whole output, and the bounding box of
    ;; the last frame's damage (:full or (X Y WIDTH HEIGHT)): evidence a gate can
    ;; read instead of inferring it from timing.
@@ -1210,25 +1216,43 @@ Two answers are merged here.  The *difference* between this frame's draw list an
 the last one, plus the damage clients reported since (SCENE-DAMAGE-BETWEEN), says
 what changed; REQUIRED -- what a backend with its own buffers says those buffers
 can still be trusted to hold -- is the floor under it (D50).  REQUIRED is :FULL,
-a region, or NIL for a target that keeps its pixels (headless)."
+a region, or NIL for a target that keeps its pixels (headless).
+
+The change is kept on the compositor (COMPOSITOR-FRAME-CHANGE) *before* REQUIRED is
+merged into it, because the two are different facts: what changed on the screen is a
+property of the frame, and what a buffer has to repaint because it is whole is a
+property of that buffer.  A backend that keeps per-buffer damage history records the
+former; recording the latter would make every following frame full after a buffer's
+first paint (D61)."
   (let ((previous (compositor-last-items compositor)))
     (cond
-      ((eq required :full) :full)
-      ((not (compositor-frame-history-p compositor)) :full)
+      ((not (compositor-frame-history-p compositor))
+       (setf (compositor-frame-change compositor) :full)
+       :full)
       (t
-       (let ((damage (or (compositor-damage-region compositor)
+       (let ((change (or (compositor-frame-change-region compositor)
+                         (setf (compositor-frame-change-region compositor)
+                               (render:make-region))))
+             (damage (or (compositor-damage-region compositor)
                          (setf (compositor-damage-region compositor)
                                (render:make-region)))))
-         (render:region-clear damage)
+         (render:region-clear change)
          (cond
-           ((eq (scene:scene-damage-between previous items damage) :full) :full)
+           ((eq (scene:scene-damage-between previous items change) :full)
+            (setf (compositor-frame-change compositor) :full)
+            :full)
            (t
-            (when required
-              (render:region-union damage damage required))
-            (render:region-intersect-rect
-             damage damage 0 0 (compositor-device-width compositor)
-             (compositor-device-height compositor))
-            damage)))))))
+            (setf (compositor-frame-change compositor) change)
+            (cond
+              ((eq required :full) :full)
+              (t
+               (render:region-copy damage change)
+               (when required
+                 (render:region-union damage damage required))
+               (render:region-intersect-rect
+                damage damage 0 0 (compositor-device-width compositor)
+                (compositor-device-height compositor))
+               damage)))))))))
 
 (defun render-frame (compositor)
   "Draw the scene, present the frame, and fire the callbacks; returns the target.
