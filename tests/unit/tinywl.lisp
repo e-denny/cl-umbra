@@ -392,3 +392,22 @@ connection would make this a gate rather than a test."
         (srv:close-display (cf:compositor-display seam))
         (ignore-errors (uiop:delete-directory-tree (pathname directory)
                                                    :validate t))))))
+
+;;; ---------------------------------------------------------------------------
+;;; The command line a VT session is asked for with
+;;; ---------------------------------------------------------------------------
+
+(deftest the-command-line-can-ask-for-a-vt
+  ;; --drm is the mode; the card and the connector are names, because taking a
+  ;; particular screen is a person's decision and not the default (4d-3).
+  (let ((options (tinywl::parse-arguments
+                  '("--drm" "--card" "/dev/dri/card9" "--connector" "Virtual-1"))))
+    (ok (eq :drm (getf options :mode)) "the mode is the VT")
+    (ok (string= "/dev/dri/card9" (getf options :card)) "with the card that was named")
+    (ok (string= "Virtual-1" (getf options :connector)) "and the connector that was named"))
+  (let ((options (tinywl::parse-arguments '("--drm"))))
+    (ok (eq :drm (getf options :mode)) "a VT session with nothing else named")
+    (ok (null (getf options :card)) "leaves the card to START's default")
+    (ok (null (getf options :connector)) "and the connector to the card's first connected one"))
+  (ok (signals (tinywl::parse-arguments '("--drm" "--card")) 'error)
+      "a card option with no value is an error a person can read"))

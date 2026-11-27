@@ -61,7 +61,7 @@ The scripts go through `wayland.test.runner`, which names the eighteen suites in
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 428 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 440 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -618,7 +618,46 @@ Phase 4's fourth slice starts with the keymap, and adds the twenty-fourth:
     are the keymap's, the state tracks what is held, and `key-name-for-code` answers from the
     unshifted level and returns `NIL` for a code the layout has nothing for.
 
-All twenty-four clauses pass. Two details worth knowing: the protocol clause
+Phase 4's fifth slice is the VT, and it adds the twenty-fifth:
+
+25. **A card taken through a seat** (`scripts/drm-tinywl-gate.sh`,
+    `scripts/drm-tinywl-gate.lisp`). The join 4d-3 makes: `libseat` opens the card,
+    `cf.backend.vt` adopts the descriptor *without* opening the node, a scene with the
+    cursor in it is rendered into the scanout buffer and flipped, the kernel retires
+    the flip, and a disable restores the CRTC and hands the descriptor back. Two
+    things make it safe on a working machine, and both are skips rather than
+    failures: which card it may take is clause 22's two-setting decision (a virtual
+    driver, or `CL_DRM_MODESET_CARD` **and** `CL_DRM_MODESET_ALLOW=1`), and a seat
+    another compositor owns answers `ENOSYS` through libseat's no-op backend over
+    logind's `EBUSY` (D56 §4). The seat is checked **first**, because it is the part
+    only a VT can answer: on a machine whose session is somebody else's, the clause
+    skips with the errno's meaning in a sentence instead of looking at cards that
+    could never be opened. With the seat: the output comes up enabled, the seat
+    reports exactly one device open (it opened it, not this process), the descriptor
+    is master (`SET MASTER` is per-fd, not privileged -- the first opener of a free
+    card becomes master, D55), there are two buffers, the compositor's preparer and
+    presenter are the module's, one frame is drawn and presented, and the completion
+    is the kernel's own `flip-complete` event for this CRTC with a sequence number.
+    Closing the output restores the CRTC's framebuffer and mode, the descriptor count
+    is flat, and the seat is closed afterwards. `CL_DRM_SWITCH_VT=N` also switches to
+    VT N and back, which is the manual round trip of §11 performed by the probe; with
+    it unset the clause says that a VT switch is a person's decision and moves on.
+    Seven unit tests in `tests/unit/drm-modeset.lisp` drive the same enable/disable
+    machine with a recording seat and a recording card: a seat-enabled output opens
+    its card through the seat and programs the screen, a disable restores before it
+    gives the descriptor back, a VT switch disables and re-enables by itself with the
+    same connector and mode, a failed enable gives the descriptor back and leaves no
+    hook behind, a disabled output refuses to draw, closing twice is quiet, and a
+    closed output is not brought back by a later enable. `tests/unit/session.lisp` adds
+    the hook list -- more than one module wants the same enable, the order is the order
+    added, one failure does not stop the next, and a hook can be removed by the module
+    that added it -- and `tests/unit/drm.lisp` adds three for the descriptor: adopting a
+    seat's descriptor without opening a path, closing the adopted descriptor when the
+    adoption fails, and refusing something that is not a descriptor. `tests/unit/tinywl.lisp`
+    adds the command line: `--drm` with `--card` and `--connector` reaches `start` as
+    `:mode :drm` and the two names, and a card option with no value is an error.
+
+All twenty-five clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
 skipped rather than failed when there is no `WAYLAND_DISPLAY` socket, so the gate runs
@@ -834,7 +873,14 @@ Preconditions the automated clauses cannot arrange for themselves:
 - [ ] a free VT with a getty, for anything that owns the screen (4b's page flips take master;
       4c's seat reports `EBUSY` while a compositor holds the session)
 
-- [ ] TTY start, clean exit, no leaked fds (`ls /proc/<pid>/fd | wc -l`)
+- [ ] TTY start, clean exit, no leaked fds (`ls /proc/<pid>/fd | wc -l`):
+      `./scripts/tinywl.sh --drm` from the console, `Alt+Esc` to leave, then check that the
+      console text came back (clause 25 is the automated half of this, and it is the half that
+      can skip)
+- [ ] the same, killed with `SIGTERM` (`kill <pid>`): the screen is restored by the signal path,
+      which is D59 §7's other exit
+- [ ] `CL_DRM_SWITCH_VT=2 ./scripts/drm-tinywl-gate.sh` from the console: the probe switches
+      away, sees the seat disabled, switches back and sees the output enabled again
 - [ ] VT switch away and back ×20
 - [ ] unplug/replug output ×10, with windows on it
 - [ ] suspend/resume ×5

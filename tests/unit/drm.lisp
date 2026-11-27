@@ -370,6 +370,64 @@ unit test can create it."))
           "and the path is the one that was asked for"))))
 
 ;;; ---------------------------------------------------------------------------
+;;; A descriptor somebody else opened
+;;; ---------------------------------------------------------------------------
+;;
+;; Once a seat owns the session, a compositor never opens the card itself: libseat
+;; opens the node and hands over the descriptor (D56's TakeDevice route, which is
+;; what 4d-3 needs).  No card is involved in either test below -- one adopts a
+;; description a test supplies, the other adopts a descriptor that is not a card --
+;; because the claim being made is about the handover and not about the driver.
+
+(deftest a-seats-descriptor-becomes-a-device-without-a-path-being-opened
+  (let* ((fd (ffi:memfd-create "cl-wayland-adopt-test"))
+         (attributes (list :driver-name "fakedrm" :version-major 3 :version-minor 64
+                           :version-patchlevel 0 :master-p t
+                           :capabilities (list :dumb-buffer t :prime t)))
+         (device (drm:open-drm-device-from-fd fd :path "/dev/dri/card9"
+                                              :attributes attributes)))
+    (ok (= fd (drm:drm-device-fd device))
+        "the descriptor is the one handed over, not a second open of the same node")
+    (ok (drm:drm-device-open-p device) "and the device it became is open")
+    (ok (string= "/dev/dri/card9" (drm:drm-device-path device))
+        "the path is what the seat called it, kept for messages")
+    (ok (string= "fakedrm" (drm:drm-device-driver-name device)) "the driver's name")
+    (ok (string= "3.64.0" (drm:drm-device-version device)) "and the version")
+    (ok (drm:drm-device-master-p device)
+        "master is a slot, so a seat-held card can say it owns the display")
+    (ok (equal (list :dumb-buffer t :prime t) (drm:drm-device-capabilities device))
+        "with the capabilities a compositor checks before drawing")
+    (drm:close-drm-device device)
+    (ok (not (ffi:fd-open-p fd))
+        "and closing the device closes the descriptor it adopted -- the seat handed
+over ownership, not a loan")))
+
+(deftest adopting-a-descriptor-that-is-not-a-card-closes-it
+  (let ((fd (ffi:memfd-create "cl-wayland-adopt-bad")))
+    (ok (ffi:fd-open-p fd) "the memfd is open to begin with")
+    (handler-case
+        (progn
+          (drm:open-drm-device-from-fd fd)
+          (ok nil "a memfd is not a card, so adoption must not answer"))
+      (drm:drm-error (condition)
+        (ok (eq 'drm::drm-get-version (drm:drm-error-operation condition))
+            "the version ioctl is what refused it")
+        (ok (not (ffi:fd-open-p fd))
+            "and the descriptor is closed rather than left to the seat to discover")))))
+
+(deftest a-descriptor-that-is-not-a-descriptor-is-refused
+  (dolist (bad (list -1 nil 1.5 "3"))
+    (handler-case
+        (progn
+          (drm:open-drm-device-from-fd bad)
+          (ok nil (format nil "~S is not a descriptor, so this must not answer" bad)))
+      (drm:drm-error (condition)
+        (ok (eq 'drm::open-from-fd (drm:drm-error-operation condition))
+            (format nil "~S is refused before any ioctl is attempted" bad))
+        (ok (= ffi:+ebadf+ (drm:drm-error-errno condition))
+            (format nil "~S is EBADF, because that is what the kernel would say" bad))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; The kernel's view: sysfs
 ;;; ---------------------------------------------------------------------------
 

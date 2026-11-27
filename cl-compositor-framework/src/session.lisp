@@ -133,8 +133,8 @@ promises they will stay open.")
    ;; devices after a VT switch needs the names, not just the fds: the ids and the
    ;; fds from before the switch are gone.
    (devices :initform (make-hash-table) :reader session-devices)
-   (on-enabled :initarg :on-enabled :initform nil :reader session-on-enabled)
-   (on-disabled :initarg :on-disabled :initform nil :reader session-on-disabled)
+   (on-enabled :initarg :on-enabled :initform '() :accessor session-on-enabled)
+   (on-disabled :initarg :on-disabled :initform '() :accessor session-on-disabled)
    (enables :initform 0 :accessor session-enable-count)
    (disables :initform 0 :accessor session-disable-count)
    (dispatches :initform 0 :accessor session-dispatch-count)
@@ -246,6 +246,52 @@ would lose both facts."
     (handler-case (funcall hook session)
       (error (condition) (push condition (session-callback-errors session))))))
 
+(defun %call-hooks (hooks session)
+  "Call every hook in HOOKS, in the order they were added, recording failures.
+
+One hook that fails does not stop the next: a compositor whose output cannot come
+back should still get its input back, and the failures are all in
+SESSION-CALLBACK-ERRORS where they can be read after the switch."
+  (dolist (hook hooks)
+    (%call-hook hook session)))
+
+(defun add-session-enable-hook (session function)
+  "Add FUNCTION as an on-enabled hook; it runs after the ones already added.
+
+There is more than one thing that has to happen when a seat comes back -- a
+compositor's card is reprogrammed and its input devices are reopened -- and they
+are different modules' business, so the hook is a list rather than a slot.  A hook
+added while the seat is already enabled is not called here: the caller that adds it
+checks SESSION-ENABLED-P and does the work itself, because it is the caller that
+knows whether the work has been done."
+  (check-type function function)
+  (setf (session-on-enabled session)
+        (append (session-on-enabled session) (list function)))
+  session)
+
+(defun add-session-disable-hook (session function)
+  "Add FUNCTION as an on-disabled hook; it runs after the ones already added."
+  (check-type function function)
+  (setf (session-on-disabled session)
+        (append (session-on-disabled session) (list function)))
+  session)
+
+(defun remove-session-enable-hook (session function)
+  "Remove FUNCTION from the on-enabled hooks; returns T when it was there.
+
+Only the module that added a hook removes it.  The reason to have this at all is
+that the module's destructor cannot be the compositor's: the compositor keeps the
+session and throws away the output."
+  (let ((hooks (session-on-enabled session)))
+    (setf (session-on-enabled session) (remove function hooks))
+    (not (eq hooks (session-on-enabled session)))))
+
+(defun remove-session-disable-hook (session function)
+  "Remove FUNCTION from the on-disabled hooks; returns T when it was there."
+  (let ((hooks (session-on-disabled session)))
+    (setf (session-on-disabled session) (remove function hooks))
+    (not (eq hooks (session-on-disabled session)))))
+
 (defun note-seat-enabled (session)
   "The seat became usable: state :enabled, then the hook (which opens devices).
 
@@ -255,7 +301,7 @@ enabled, or OPEN-SESSION-DEVICE would refuse it."
     (return-from note-seat-enabled nil))
   (incf (session-enable-count session))
   (setf (session-state session) :enabled)
-  (%call-hook (session-on-enabled session) session)
+  (%call-hooks (session-on-enabled session) session)
   t)
 
 (defun note-seat-disabled (session)
@@ -271,7 +317,7 @@ close after the provider revoked it is a close that reports EBADF."
   (close-all-session-devices session)
   (handler-case (%acknowledge-disable session)
     (error (condition) (push condition (session-callback-errors session))))
-  (%call-hook (session-on-disabled session) session)
+  (%call-hooks (session-on-disabled session) session)
   t)
 
 (defun close-all-session-devices (session)
@@ -298,7 +344,10 @@ does and the first thing a close does."
 ON-ENABLED is called whenever the seat becomes usable -- during this call for an
 already-active session, and again after every VT switch back -- and ON-DISABLED
 when it goes away.  Both take the session and both are called with the state
-already updated, so a hook can ask SESSION-ENABLED-P and get the truth.
+already updated, so a hook can ask SESSION-ENABLED-P and get the truth.  Further
+hooks are added with ADD-SESSION-ENABLE-HOOK and ADD-SESSION-DISABLE-HOOK; a module
+that owns devices the seat hands out registers its own rather than wrapping this
+one, and the last-registered hook runs last.
 
 CLASS is the class to instantiate: 'SESSION in production, a subclass in a test
 that replaces the eight calls (the same seam cf.backend.drm offers a recording
@@ -311,8 +360,8 @@ dispatches would otherwise be told nothing.  0 (the default) never waits."
   (let* ((id (incf *next-session-id*))
          (session (apply #'make-instance class
                          :id id :name name
-                         :on-enabled on-enabled
-                         :on-disabled on-disabled
+                         :on-enabled (if on-enabled (list on-enabled) '())
+                         :on-disabled (if on-disabled (list on-disabled) '())
                          initargs)))
     ;; Registered before the open call: see *SESSIONS*.
     (setf (gethash id *sessions*) session)

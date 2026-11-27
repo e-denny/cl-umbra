@@ -156,6 +156,34 @@ behaves for a session that is already active."
                "the error is recorded, not swallowed"))
       (session:close-session session))))
 
+(deftest more-than-one-module-can-want-the-same-enable
+  ;; A compositor's card and its input devices come back at the same moment and are
+  ;; different modules' business, so the hook is a list: the first one added runs
+  ;; first, and one that fails does not stop the next.
+  (let* ((seen '())
+         (session (make-fake :pending '(:enable)))
+         (card-hook (lambda (s) (declare (ignore s)) (push :card seen)))
+         (bad-hook (lambda (s) (declare (ignore s)) (error "no card for you"))))
+    (unwind-protect
+         (progn
+           (session:add-session-enable-hook session card-hook)
+           (session:add-session-enable-hook session bad-hook)
+           (session:add-session-enable-hook session
+                                            (lambda (s) (declare (ignore s))
+                                              (push :input seen)))
+           (setf (fake-pending session) '(:disable :enable))
+           (session:dispatch-session session)
+           (session:dispatch-session session)
+           (ok (equal '(:card :input) (reverse seen))
+               "both survivors ran, in the order they were added")
+           (ok (= 1 (length (session:session-callback-errors session)))
+               "and the failure is recorded rather than lost")
+           (ok (session:remove-session-enable-hook session card-hook)
+               "a hook can be removed by the module that added it")
+           (ok (not (session:remove-session-enable-hook session card-hook))
+               "and removing it twice says it was not there"))
+      (session:close-session session))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Devices
 ;;; ---------------------------------------------------------------------------

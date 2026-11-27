@@ -411,9 +411,14 @@ make the parity script meaningless."
 (defclass session ()
   ((mode :initarg :mode :reader session-mode)
    (compositor :initarg :compositor :reader session-compositor)
-   (nested :initarg :nested :initform nil :reader session-nested))
+   (nested :initarg :nested :initform nil :reader session-nested)
+   ;; The two things a VT session owns and the other two do not: the seat, and the
+   ;; card the seat hands out.  A compositor that keeps these alive is a compositor
+   ;; that gives the screen back on the way out, which is the whole of 4d-3.
+   (vt-output :initarg :vt-output :initform nil :reader session-vt-output)
+   (seat :initarg :seat :initform nil :reader session-seat))
   (:documentation
-   "A running tinywl: its compositor, and the nested backend when there is one."))
+   "A running tinywl: its compositor, and the backend behind it -- nested, or a VT."))
 
 (defmethod print-object ((session session) stream)
   (print-unreadable-object (session stream :type t)
@@ -423,13 +428,15 @@ make the parity script meaningless."
              (cf:compositor-display (session-compositor session))))))
 
 (defun start (&key (mode :headless)
-                   (width 1280) (height 800) (scale 1)
+                   width height (scale 1)
                    (background #xFF000000)
                    display-name
                    runtime-dir
                    parent-path
                    launch
-                   pump)
+                   pump
+                   (card "/dev/dri/card0") connector crtc-id
+                   (seat-name "seat0"))
   "Start tinywl and return its SESSION.
 
 :headless renders into memory and takes input only from CF:INJECT-*; :nested renders
@@ -448,7 +455,7 @@ layout size it asked for (D49)."
   (ecase mode
     (:headless
      (let ((tinywl (make-tinywl
-                    :width width :height height :scale scale
+                    :width (or width 1280) :height (or height 800) :scale scale
                     :background background
                     :display-name (or display-name "wayland-0")
                     :runtime-dir (or runtime-dir (uiop:getenv "XDG_RUNTIME_DIR")))))
@@ -462,7 +469,8 @@ layout size it asked for (D49)."
 WAYLAND_DISPLAY in the environment"))
                        (nested:start-nested
                         :parent-path parent
-                        :width width :height height :scale scale
+                        :width (or width 1280) :height (or height 800)
+                        :scale scale
                         :display-name (or display-name "tinywl-1")
                         :runtime-dir (or runtime-dir
                                          (uiop:getenv "XDG_RUNTIME_DIR"))
@@ -477,7 +485,97 @@ WAYLAND_DISPLAY in the environment"))
        (make-instance 'session
                       :mode :nested
                       :compositor (nested:nested-compositor backend)
-                      :nested backend)))))
+                      :nested backend)))
+    (:drm
+     (start-vt :width width :height height :scale scale :background background
+               :display-name display-name :runtime-dir runtime-dir
+               :launch launch :card card :connector connector :crtc-id crtc-id
+               :seat-name seat-name))))
+
+(defun start-vt (&key width height (scale 1) (background #xFF000000)
+                     display-name runtime-dir launch
+                     (card "/dev/dri/card0") connector crtc-id (seat-name "seat0"))
+  "Start tinywl on a VT: a seat, the card it hands out, and a compositor on it.
+
+This is 4d-3's join, and the order is the constraint: the seat comes first (the
+provider enables it inside the open call), the card comes from the seat, and only
+then is there a mode to build a compositor at.  A compositor's width and height are
+layout coordinates, so a card programmed at 1920x1080 with SCALE 2 is a 960x540
+compositor drawing on a 1920x1080 screen (D49).
+
+The compositor renders through the output's frame hooks (CF.BACKEND.VT): the
+preparer answers a target over the scanout buffer, the presenter flips it and waits
+for vblank.  A seat enable after a VT switch asks for a frame, because the screen
+came back blank and the compositor has to say what is on it again."
+  (let* ((seat (handler-case (seat:open-session :name seat-name)
+                 (seat:session-error (condition)
+                   ;; The one failure a person will hit first, and the one whose
+                   ;; errno means nothing on its own: libseat answers with the last
+                   ;; backend's errno, and ENOSYS here means "somebody else owns this
+                   ;; session" (D56 §4).
+                   (error "a VT session needs a seat this user may take, and this
+one was refused (~A): run tinywl --drm from a text console, not from inside a
+compositor that already owns the screen"
+                          condition))))
+         (output nil)
+         (tinywl nil))
+    (handler-case
+        (progn
+          (setf output (vt:open-vt-output seat :path card :connector connector
+                                                    :crtc-id crtc-id))
+          ;; A seat that opened but is not enabled yet is a seat with no card, and a
+          ;; compositor built from a zero-size output is a 1x1 screen.  Say so.
+          (unless (vt:vt-output-enabled-p output)
+            (error "the seat opened but is not enabled yet (state ~A): a VT session
+needs a seat that is usable now, which is what dispatch inside OPEN-SESSION is for"
+                   (seat:session-state-string seat)))
+          (let* ((device-width (vt:vt-output-width output))
+                 (device-height (vt:vt-output-height output))
+                 (layout-width (or width (max 1 (floor device-width scale))))
+                 (layout-height (or height (max 1 (floor device-height scale)))))
+            (setf tinywl
+                  (make-tinywl :width layout-width :height layout-height
+                               :scale scale :background background
+                               :display-name (or display-name "wayland-0")
+                               :runtime-dir (or runtime-dir
+                                                (uiop:getenv "XDG_RUNTIME_DIR"))))
+            (multiple-value-bind (preparer presenter) (vt:make-vt-frame-hooks output)
+              (setf (headless:compositor-frame-preparer tinywl) preparer
+                    (headless:compositor-frame-presenter tinywl) presenter))
+            ;; A VT switch back is a screen that must be redrawn, and the seat's
+            ;; hook is the only thing that knows it happened.
+            (seat:add-session-enable-hook
+             seat (lambda (session)
+                    (declare (ignore session))
+                    (cf:request-frame tinywl)))
+            (install-stop-signals tinywl)
+            (cf:request-frame tinywl))
+          (when launch (launch tinywl :command launch))
+          (make-instance 'session :mode :drm :compositor tinywl
+                                  :vt-output output :seat seat))
+      (error (condition)
+        ;; A half-started VT session holds the screen: give it back before the error
+        ;; reaches the person who typed the command.
+        (when output (ignore-errors (vt:close-vt-output output)))
+        (ignore-errors (seat:close-session seat))
+        (error condition)))))
+
+(defun install-stop-signals (tinywl)
+  "Stop cleanly on SIGINT, SIGTERM and SIGHUP, so the screen is always given back.
+
+The handler runs inside a reactor cycle (REACTOR:ADD-SIGNAL-HANDLER posts rather
+than acts in the signal), which is what makes it safe to do more than set a flag:
+the reactor stops, RUN returns, and the caller's UNWIND-PROTECT restores the CRTC
+and closes the seat.  A compositor killed outright cannot restore anything, which
+is why the interactive quit (Alt+Esc) and these three signals are the only ways out."
+  (reactor:add-signal-handler
+   (srv:display-reactor (cf:compositor-display tinywl))
+   (list ffi:+sigint+ ffi:+sigterm+ ffi:+sighup+)
+   :on-signal (lambda (message signal)
+                (declare (ignore message))
+                (srv:log-message :info "tinywl: signal ~D, giving the screen back"
+                                 signal)
+                (cf:stop-compositor tinywl))))
 
 (defun advance (session &key (timeout 0.01))
   "Advance SESSION one cycle and return it.
@@ -485,11 +583,18 @@ WAYLAND_DISPLAY in the environment"))
 One cycle is: the parent connection (nested only), then our own display.  A caller
 that owns a second loop -- a test, a gate, another compositor -- calls this in its
 own loop; `run' is the loop for a session on its own."
-  (let ((nested (session-nested session)))
-    (if nested
-        (nested:nested-dispatch nested :timeout timeout)
-        (srv:run-once (cf:compositor-display (session-compositor session))
-                      :timeout timeout)))
+  (let ((nested (session-nested session))
+        (seat (session-seat session)))
+    (cond
+      (nested (nested:nested-dispatch nested :timeout timeout))
+      (t
+       ;; The seat first: an enable or disable callback applies to this cycle's
+       ;; frame, and a display cycle that ran first would draw a frame for a screen
+       ;; the provider has already taken away.
+       (when seat
+         (seat:dispatch-session seat :timeout 0))
+       (srv:run-once (cf:compositor-display (session-compositor session))
+                     :timeout timeout))))
   session)
 
 (defun run (session &key (timeout 0.05))
@@ -512,7 +617,16 @@ headless session just closes its display, which is what tells the clients.  The
 second call does nothing: stopping a compositor twice must not be an error, because
 both a signal handler and the caller's UNWIND-PROTECT can reach this."
   (let ((nested (session-nested session))
-        (compositor (session-compositor session)))
+        (compositor (session-compositor session))
+        (vt-output (session-vt-output session))
+        (seat (session-seat session)))
+    ;; The screen goes back first, while the descriptor, the buffers and the
+    ;; CRTC's saved state are all still here.  Closing the display first would only
+    ;; work because nothing else fails; this order is the one that is true.
+    (when vt-output
+      (ignore-errors (vt:close-vt-output vt-output)))
+    (when seat
+      (ignore-errors (seat:close-session seat)))
     (cond
       (nested (nested:stop-nested nested))
       ((not (srv:display-closed-p (cf:compositor-display compositor)))

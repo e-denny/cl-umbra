@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Edgar Denny
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset drm-demo input xkb tinywl soak gate clean
+.PHONY: check test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset drm-tinywl drm-demo input xkb tinywl soak gate clean
 
-check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset input xkb tinywl
+check: test fuzz fuzz-client loads purity server c-probe frame xdg seat scene grab nested popup focus render switcher drm drm-modeset drm-tinywl input xkb tinywl
 
 test:
 	./scripts/run-tests.sh
@@ -92,6 +92,9 @@ drm:
 # vkms, or when the card belongs to another master.
 drm-modeset:
 	./scripts/drm-modeset-gate.sh
+
+drm-tinywl:
+	./scripts/drm-tinywl-gate.sh
 
 # The same path as an animation: 300 frames of double-buffered flipping.
 drm-demo:

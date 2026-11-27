@@ -22,6 +22,7 @@ scene graph, seat and focus policy, and the shell protocol state machines."
                (:file "src/png")
                (:file "src/drm")
                (:file "src/session")
+               (:file "src/vt")
                (:file "src/headless")
                (:file "src/libinput")
                (:file "src/switcher")

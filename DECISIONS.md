@@ -2891,3 +2891,83 @@ damage list yet (the render accepts damage; the compositor loop that computes it
 triple buffering, no hardware cursor at all. The lesson: **with no planes, "the cursor is in the
 scanout" is not a feature to add -- it is a consequence to verify, and the only thing that can go
 wrong is the pitch.**
+
+---
+
+## D59 — The card is the seat's, and the compositor only borrows the descriptor
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** tinywl on DRM with a VT handoff (phase 4, fourth slice, third part — 4d-3)
+
+The four slices before this one each proved a half of a sentence. The card can be described and
+taken from a free machine (D54); it can be programmed, flipped and given back (D55); a seat
+reports when a compositor may use the devices it hands out (D56); the keymap is the library's
+(D57); the frame is the scene with the cursor in it (D58). This slice joins them, and the join is
+only interesting on a machine where somebody else owns the screen: from a text console, `libseat`
+opens the card, hands over a descriptor, and takes it away again on the way out.
+
+**Decision.**
+
+1. **The compositor never opens the card; the seat does.** `open-drm-device-from-fd` adopts a
+   descriptor and probes it (version, capabilities, master) without ever naming a path, and
+   `cf.backend.vt` calls it on what `open-session-device` returned. The path is still recorded,
+   because messages need a name, but it is not opened: while a seat owns the session the
+   descriptor is the only handle that survives a VT switch, and the second opener is not the one
+   that keeps master (D55's `EACCES` was measured on a card the session compositor owned).
+
+2. **The seat closes what the seat opened.** Give a descriptor back with `close-session-device`,
+   and tell the DRM device its number is gone (`drm-device-fd` set to NIL) rather than closing it
+   a second time: after a disable the provider has already closed it, and a second `close(2)` on a
+   number the kernel has since reused closes somebody else's file. This is the one rule in the
+   slice that is not obvious, and it is why `close-vt-device` looks the way it does.
+
+3. **Enable and disable are callbacks, so the output registers itself.** `VT-OUTPUT` keeps the
+   card it was given, the connector, CRTC and mode it programmed, and the two hooks it added to
+   the session; a VT switch disables it (restore the CRTC, destroy the buffers, drop master, give
+   the descriptor back) and enables it again with the *same* screen rather than re-picking one
+   (D55's rule, applied to a switch). The compositor does nothing for a switch except ask for a
+   frame when the seat comes back, which is the one thing only the compositor knows how to do.
+
+4. **A session has more than one hook, so hooks are a list.** The card and the input devices come
+   back at the same moment and are different modules' business. `add-session-enable-hook` appends;
+   the hooks run in the order they were added; each is called under its own error handler, so a
+   card that cannot come back does not stop the keyboard. `open-session`'s original
+   `:on-enabled`/`:on-disabled` still work and are simply the first entry in each list.
+
+5. **The frame loop waits for the flip.** `drm-scanout-present` polls the DRM fd and reads the
+   completion before it returns, so the presenter is the clock: one frame per vblank, drawn into
+   the buffer that is not being scanned out. There is no reactor source on the DRM fd yet, because
+   there is nothing to do between the queue and the completion that a compositor of this size
+   needs to do; waiting is 16 ms of a cycle that has nothing else in it, and a second source would
+   be a second place for the same event to be handled.
+
+6. **The preparer answers `:full`, because the two buffers are two frames.** The buffer this frame
+   draws into holds the frame before last, so damage computed against the last frame is not damage
+   to *this* buffer. The nested backend keeps a per-buffer damage history (D50); this slice does
+   not, and says so rather than pretending a partial repaint is correct. A full repaint per frame
+   is right, and costs a full redraw.
+
+7. **The screen goes back on every way out.** `Alt+Esc` stops the reactor; `SIGINT`/`SIGTERM`/
+   `SIGHUP` are posted into a reactor cycle by `reactor:add-signal-handler` and do the same thing,
+   so the caller's `UNWIND-PROTECT` restores the CRTC and closes the seat. A compositor killed
+   with `SIGKILL` cannot restore anything, and `docs/testing.md` §11 says so.
+
+**Evidence.** `scripts/drm-tinywl-gate.sh` (clause 25): the seat is checked **first**, and on this
+machine the clause skips with `libseat answered ENOSYS: no backend took the seat (seatd is not
+running, and logind will not hand over a session another compositor owns)` -- the informative half
+of the skip, and the one a person can act on. With a seat it asserts the enabled output, exactly
+one device open, the seat's descriptor being master, two buffers, one frame drawn through the
+compositor's own preparer/presenter, the kernel's own `flip-complete` for that CRTC, the pitch,
+the CRTC's framebuffer and mode restored, the descriptor count flat, and (with
+`CL_DRM_SWITCH_VT=N`) a disable and the enable that follows it. `tests/unit/drm-modeset.lisp` (7 tests) drives the whole machine with a recording seat whose descriptors are real memfds and a recording card, and
+`tests/unit/session.lisp` (+1), `tests/unit/drm.lisp` (+3) and `tests/unit/tinywl.lisp` (+1)
+cover the hook list, the descriptor adoption and the `--drm`/`--card`/`--connector` command line;
+the suite goes from 428 to **440 tests in eighteen suites**, and
+`./scripts/gate.sh` from 23 passed / 1 skipped to **23 passed, 0 failed, 2 skipped, 0 not built**.
+What this does not do: no per-buffer damage history, no reactor source for flip events, no
+triple buffering, no hardware cursor, no output hotplug, no multi-head; and the hardware half --
+the live run on a VT -- has **not been performed**, because it needs a text console and a vkms
+card that this session cannot arrange without taking the screen from the person using it. The
+lesson: **a descriptor is the only thing that survives a VT switch, so the module that owns one
+must also own the close -- everything else about a session is a callback.**

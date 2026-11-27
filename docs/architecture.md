@@ -124,8 +124,15 @@ compiled from the session's rules and serialized for clients, names and keycodes
 keymap (keysyms indexed rather than names, so case and shifted keysyms work), modifier masks read
 from it and checked against the binding constants at load, and an `xkb_state` behind the
 modifiers a client is told about, so Caps Lock is the compatibility rules' business rather than a
-special case. What is left in phase 4 is the rest of 4d: tinywl on DRM, a cursor in the scanout
-buffer, and the five exit-gate items (TTY session, VT round trip, hotplug, soak, suspend). Tinywl, `cl-umbra` and a nested window on a foreign compositor are still their plan.
+special case. The scanout frame followed (D58): the scene, cursor last, drawn into the card's own
+buffer at the driver's pitch, because this design has no cursor plane. **4d-3** closed the build
+(D59): `cf.backend.vt` takes the card the way a VT requires -- `libseat` opens it, the compositor
+adopts the descriptor without opening the path, and every disable gives the screen and the
+descriptor back while every enable reprograms the screen it remembered -- and `cl-tinywl --drm`
+is a compositor on a VT with that output behind its frame hooks. What is left in phase 4 is the
+exit gate itself: the five items that need a person at a text console (TTY session, VT round
+trip, hotplug, soak, suspend). `cl-umbra` and a nested window on a foreign compositor are still
+their plan.
 
 ## 2. Packages
 

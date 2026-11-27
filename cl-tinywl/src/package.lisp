@@ -11,7 +11,11 @@
                     (#:grab #:cf.grab)
                     (#:kb #:cf.keybindings)
                     (#:input #:cf.input)
-                    (#:nested #:cf.backend.nested))
+                    (#:nested #:cf.backend.nested)
+                    (#:headless #:cf.backend.headless)
+                    (#:vt #:cf.backend.vt)
+                    (#:seat #:cf.session)
+                    (#:ffi #:wayland.ffi))
   (:documentation
    "tinywl, ported: the smallest compositor that proves the framework.
 
@@ -35,11 +39,13 @@ compositor, and how a session starts and stops.")
    #:stop-clients
    #:*terminal-command*
    #:*clients*
-   ;; a session: headless, or nested inside another compositor
+   ;; a session: headless, nested inside another compositor, or on a VT
    #:session
    #:session-mode
    #:session-compositor
    #:session-nested
+   #:session-vt-output
+   #:session-seat
    #:start
    #:advance
    #:run

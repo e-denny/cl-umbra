@@ -61,6 +61,9 @@
 (defconstant +eaddrinuse+ 98)
 (defconstant +econnaborted+ 103)
 (defconstant +enotsup+ 95)
+;; ENOSYS is what libseat's no-op backend answers when no provider took the seat,
+;; which is how "this session belongs to another compositor" reaches a caller (D56).
+(defconstant +enosys+ 38)
 ;; EBUSY is how a card says somebody else is driving it, which is a different
 ;; answer from "not allowed" and from "not there".
 (defconstant +ebusy+ 16)
@@ -877,6 +880,7 @@ passed."
 (defconstant +sig-ign+ 1
   "SIG_IGN as a handler pointer.")
 
+(defconstant +sighup+ 1)
 (defconstant +sigint+ 2)
 (defconstant +sigusr1+ 10)
 (defconstant +sigpipe+ 13)

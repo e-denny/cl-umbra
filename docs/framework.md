@@ -19,10 +19,11 @@ decomposition is the part worth copying.
 | `cf.backend` | `wlr_backend` + autocreate | 2 | one interface over headless, nested, DRM; outputs and input device events |
 | `cf.backend.headless` | `wlr_backend_headless` | 2 | fake output(s), frame timer, deterministic pixels |
 | `cf.backend.nested` | `wlr_backend_wayland` | 3 | our compositor as a client of a parent compositor |
-| `cf.backend.drm` | `wlr_backend_drm` (dumb path) | 4 | the card, connectors, encoders, CRTCs, mode choice, dumb buffers (D54), and the screen: master, SETCRTC, page flips and restore (D55); the seat is `cf.session` (D56), the cursor in the scanout and the VT handover are 4d |
+| `cf.backend.drm` | `wlr_backend_drm` (dumb path) | 4 | the card, connectors, encoders, CRTCs, mode choice, dumb buffers (D54), and the screen: master, SETCRTC, page flips and restore (D55); the cursor is in the scanout (D58); adopting a descriptor somebody else opened is here too (D59) |
+| `cf.backend.vt` | `wlr_backend_session` + the DRM half of `BACKEND_DRM` | 4 | the card a seat hands out: a `vt-output` that enables itself from the seat's callbacks, programs the screen on every enable and gives it back on every disable, plus the two frame hooks a compositor renders through (D59) |
 | `cf.backend.libinput` | `wlr_backend_libinput` | 4 | device enumeration and hotplug (udev), one flat event stream decoded into seat calls, pointer accumulation and clamping, key naming (D56) |
 | `cf.backend.multi` | `wlr_backend_multi` | 4 | several backends in one session (DRM + nested for debugging) |
-| `cf.session` | `wlr_session` (libseat) | 4 | seat availability, device open and close, acknowledging a disable, switching VT (D56); the VT callbacks are exercised in 4d, when a compositor runs on one |
+| `cf.session` | `wlr_session` (libseat) | 4 | seat availability, device open and close, acknowledging a disable, switching VT (D56), and a hook *list* so more than one module can want the same enable (D59) |
 | `cf.render` | `wlr_renderer` | 2 | renderer protocol, format tables, `init-wl-display` |
 | `cf.render.pixman` | `wlr_renderer_pixman` | 2 | CPU reference renderer |
 | `cf.render.gles2` | `wlr_renderer_gles2` | 5 | GPU renderer, EGL/GBM, shaders |
@@ -201,6 +202,54 @@ if an earlier one failed; presenting always waits; and restoring names the conne
 because `SETCRTC` with a mode and no connectors is `EINVAL`. Which cards a *program* is willing to
 take is that program's policy: the gate and the demo take a virtual one (`vkms`) unless a person
 names a card and sets `CL_DRM_MODESET_ALLOW=1`.
+
+### The VT: a card a seat hands out
+
+On a VT the compositor never opens `/dev/dri/cardN`. `libseat` opens it, hands over a
+descriptor, and revokes it when the VT goes away, so the descriptor is the only handle that
+outlives a switch -- and the seat is the only thing entitled to close it. `cf.backend.vt` is
+that join, and the whole of a compositor's VT story is holding one object.
+
+```lisp
+(let* ((session (cf.session:open-session :name "seat0"))
+       (output (cf.backend.vt:open-vt-output session :path "/dev/dri/card0")))
+  ;; the seat was already enabled, so the output is lit: this is where a compositor
+  ;; learns its size, from the mode the card was programmed with
+  (let* ((width (cf.backend.vt:vt-output-width output))
+         (height (cf.backend.vt:vt-output-height output))
+         (compositor (make-my-compositor :width width :height height)))
+    (multiple-value-bind (preparer presenter) (cf.backend.vt:make-vt-frame-hooks output)
+      (setf (cf.backend.headless:compositor-frame-preparer compositor) preparer
+            (cf.backend.headless:compositor-frame-presenter compositor) presenter))
+    (unwind-protect
+         (loop (cf.session:dispatch-session session :timeout 0)
+               (run-once (cf:compositor-display compositor)))
+      ;; the screen back, then the seat: restoring needs the descriptor
+      (cf.backend.vt:close-vt-output output)
+      (cf.session:close-session session))))
+```
+
+Four things are worth knowing about it.
+
+* **Enable and disable are callbacks, and the output registers itself.** `open-vt-output` adds
+  an enable hook and a disable hook to the session, enables straight away when the seat is
+  already enabled, and from then on survives every switch without the compositor touching it: a
+  disable restores the CRTC, destroys the buffers, drops master and gives the descriptor back; an
+  enable opens a descriptor, adopts it with `open-drm-device-from-fd` (no path is opened), and
+  programs the *same* connector, CRTC and mode it programmed last time.
+* **The seat closes what the seat opened.** Giving a descriptor back is
+  `close-session-device`, and the DRM device is told its number is gone rather than closing it a
+  second time: after a disable the provider already closed it, and a second `close(2)` on a
+  reused number would close somebody else's file.
+* **The frame hooks are the compositor seam.** The preparer answers a target over the buffer the
+  next flip will show, at the driver's pitch (D58); the presenter flips and waits for the
+  kernel's completion. Drawing and presenting stay separate, and one frame is one vblank.
+* **The screen goes back on the way out.** `Alt+Esc` stops the reactor; `SIGINT`, `SIGTERM` and
+  `SIGHUP` are posted into a reactor cycle and do the same. A `SIGKILL` cannot restore anything.
+
+The gate's clause 25 asserts exactly this on a card it is allowed to take, and skips with a
+sentence when the seat is somebody else's -- which, on a machine with a compositor running, it
+always is.
 
 ### The seat and the devices
 

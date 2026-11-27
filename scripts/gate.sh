@@ -427,6 +427,25 @@ else
   fail 'input' 'a device was not opened, or the decode chain did not reach the seat' "$log_dir/input.log"
 fi
 
+# 25. The VT: a card taken through a seat ------------------------------------
+#
+# The join 4d-3 makes: libseat hands a descriptor over, the compositor adopts it
+# without opening the node, a scene is rendered into the scanout and flipped, and
+# a disable gives the screen and the descriptor back.  Which card is the same
+# two-setting decision clause 22 makes; a seat another compositor owns is ENOSYS
+# from libseat's no-op backend over logind's EBUSY, and is a skip.
+printf '\nphase 4 gate: a card taken through a seat\n\n'
+
+drm_tinywl_status=0
+gb "$log_dir/drm-tinywl.log" "$repo_root/scripts/drm-tinywl-gate.sh" || drm_tinywl_status=$?
+if [ "$drm_tinywl_status" -eq 0 ]; then
+  pass 'vt' "$(grep -a '^drm-tinywl-gate: ' "$log_dir/drm-tinywl.log" | tail -n 1 | sed 's/^drm-tinywl-gate: //')"
+elif [ "$drm_tinywl_status" -eq 77 ]; then
+  skip 'vt' "$(grep -a '^drm-tinywl-gate: skip' "$log_dir/drm-tinywl.log" | tail -n 1 | sed 's/^drm-tinywl-gate: skip //')"
+else
+  fail 'vt' 'the seat did not hand over a card, a frame was not retired, or the screen was not restored' "$log_dir/drm-tinywl.log"
+fi
+
 # Purity (D1) ---------------------------------------------------------------
 if gb "$log_dir/purity.log" "$repo_root/scripts/purity-check.sh"; then
   pass 'purity' 'no libwayland or libwlroots in the image'
@@ -446,7 +465,7 @@ elif [ "$todo" -gt 0 ]; then
   rm -rf "$log_dir"
   exit 2
 else
-  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack, the switcher, the card, the screen, the input and the keymap)\n\n'
+  printf '  gate: PASSED (phase 0, 1, 2a, 2b, 3a, 3b, 3c, 3d, 3e, tinywl parity, popups, the focus stack, the switcher, the card, the screen, the input, the keymap and the VT)\n\n'
   rm -rf "$log_dir"
   exit 0
 fi

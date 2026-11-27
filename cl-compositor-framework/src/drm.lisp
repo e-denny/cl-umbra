@@ -558,27 +558,60 @@ if the version ioctl fails, so a failed open never leaves a descriptor behind."
                 (ffi:open-path path :direction direction)
               (ffi:io-error (condition)
                 (drm-failed 'open :errno (ffi:io-error-errno condition) :path path)))))
-    (handler-case
-        (let ((version (%drm-get-version fd)))
-          (when (cffi:null-pointer-p version)
-            (drm-failed 'drm-get-version :path path))
-          (unwind-protect
-               (let ((capabilities
-                       (list :dumb-buffer (plusp (capability fd +cap-dumb-buffer+))
-                             :prime (plusp (capability fd +cap-prime+)))))
-                 (make-instance 'drm-device
-                                :path path
-                                :fd fd
-                                :driver-name (version-string version 'name 'name-length)
-                                :version-major (cffi:foreign-slot-value version '(:struct drm-version) 'major)
-                                :version-minor (cffi:foreign-slot-value version '(:struct drm-version) 'minor)
-                                :version-patchlevel (cffi:foreign-slot-value version '(:struct drm-version) 'patchlevel)
-                                :master-p (not (zerop (%drm-is-master fd)))
-                                :capabilities capabilities))
-            (%drm-free-version version)))
-      (error (condition)
-        (ffi:close-fd fd)
-        (error condition)))))
+    (adopt-drm-device fd path)))
+
+(defun open-drm-device-from-fd (fd &key (path "seat") attributes)
+  "Adopt an already-open DRM descriptor and read what it says about itself.
+
+This is how a compositor gets a card that a seat holds: libseat opens the node on
+its behalf and hands over the descriptor, and the compositor does not open the
+node itself -- while a seat owns the session the descriptor is the only handle
+that survives a VT switch, and opening the path again asks for a second,
+unentitled view of the same card (D56, the TakeDevice route).  FD is taken over:
+CLOSE-DRM-DEVICE closes it, and a caller closes it itself only if this signals.
+
+PATH is what the descriptor refers to, for messages; the default says this
+process did not open it by name.  ATTRIBUTES is the kernel's answer, and NIL
+means ask the kernel.  A test supplies it to adopt a descriptor with no card
+behind it, the same way a recording device stands in for the kernel's other
+calls: what is left to prove here is the handover, and a handover is counted in
+descriptors, not in driver strings."
+  (unless (and (integerp fd) (not (minusp fd)))
+    (drm-failed 'open-from-fd :errno ffi:+ebadf+ :path path))
+  (adopt-drm-device fd path :attributes attributes))
+
+(defun adopt-drm-device (fd path &key attributes)
+  "Build a DRM-DEVICE over an open FD, closing FD if anything goes wrong.
+
+The close is the whole reason this is one function: a caller that adopts a
+seat's descriptor and then fails to describe it would otherwise leak a
+descriptor the seat still believes is open, and the seat closes what it thinks
+it owns."
+  (handler-case
+      (apply #'make-instance 'drm-device
+             (append (list :path path :fd fd)
+                     (or attributes (drm-describe-fd fd path))))
+    (error (condition)
+      (ffi:close-fd fd)
+      (error condition))))
+
+(defun drm-describe-fd (fd path)
+  "The kernel's description of FD, as the initargs a DRM-DEVICE is built from.
+
+PATH is used only by the error a driver that is not a card produces: a caller
+that supplied ATTRIBUTES itself has already said what the descriptor is."
+  (let ((version (%drm-get-version fd)))
+    (when (cffi:null-pointer-p version)
+      (drm-failed 'drm-get-version :path path))
+    (unwind-protect
+         (list :driver-name (version-string version 'name 'name-length)
+               :version-major (cffi:foreign-slot-value version '(:struct drm-version) 'major)
+               :version-minor (cffi:foreign-slot-value version '(:struct drm-version) 'minor)
+               :version-patchlevel (cffi:foreign-slot-value version '(:struct drm-version) 'patchlevel)
+               :master-p (not (zerop (%drm-is-master fd)))
+               :capabilities (list :dumb-buffer (plusp (capability fd +cap-dumb-buffer+))
+                                   :prime (plusp (capability fd +cap-prime+))))
+      (%drm-free-version version))))
 
 (defun version-string (version slot length-slot)
   "One of drmVersion's strings, bounded by the length the kernel reported."

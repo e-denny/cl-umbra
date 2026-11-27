@@ -490,8 +490,15 @@ constants, and an `xkb_state` behind what the seat reports. Clause 24 runs the p
 layouts (`us`, `de`) so that "code 21 types a different letter" is measured rather than assumed
 (90 checks). The frame followed as D58: the scanout buffer is a pixman target at the driver's pitch and the
 scene -- cursor last -- is drawn into it, with the padded-pitch and damage claims pinned by unit
-tests over a memfd. What remains of 4d: the session-driven loop on DRM (open the card through
-libseat, render and flip, and hand the VT over on disable_seat), then the five exit-gate items.
+tests over a memfd. **4d-3** landed as D59 and closes 4d's build: `cf.backend.vt` opens the
+card *through* libseat (`open-drm-device-from-fd` adopts a descriptor without opening the path),
+programs the screen, gives it back on every `disable_seat` and takes it again on every enable with
+the connector and mode it remembered, and offers the two frame hooks a compositor renders
+through. `cl-tinywl` gained `--drm`, `--card` and `--connector`, a seat dispatch in its cycle,
+SIGINT/SIGTERM/SIGHUP restore, and clause 25 checks the whole join on a card it may take (7 new
+unit tests against a recording seat and card; the clause skips on a machine whose session belongs
+to another compositor). What remains of phase 4 is the exit gate itself: five items that need a
+person at a text console, listed above.
 
 ### Phase 5 — GPU acceleration, only where it earns its place (5-8 weeks)
 

@@ -98,6 +98,7 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:+eacces+
    #:+eexist+
    #:+enotsup+
+   #:+enosys+
    #:+eaddrinuse+
    #:+ebusy+
    ;; descriptors
@@ -156,6 +157,7 @@ MSG_CMSG_CLOEXEC is a silent descriptor leak.")
    #:raise-signal
    #:ignore-sigpipe
    ;; signal numbers
+   #:+sighup+
    #:+sigint+
    #:+sigusr1+
    #:+sigpipe+
@@ -219,6 +221,7 @@ two ends.")
 (defpackage #:wayland.reactor
   (:use #:cl)
   (:import-from #:wayland.ffi
+                #:+sighup+
                 #:+sigint+
                 #:+sigusr1+
                 #:+sigpipe+
@@ -269,6 +272,7 @@ Wayland client is.")
    #:read-signal
    #:timer-interval
    #:timer-function
+   #:+sighup+
    #:+sigint+
    #:+sigterm+
    #:+sigusr1+

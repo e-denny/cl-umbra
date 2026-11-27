@@ -343,6 +343,7 @@ project keeps rather than works around.")
    ;; the device
    #:drm-device
    #:open-drm-device
+   #:open-drm-device-from-fd
    #:close-drm-device
    #:drm-device-open-p
    #:drm-device-path
@@ -566,6 +567,10 @@ real seat, so a test can stand a recording session in their place.")
    #:session-on-disabled
    ;; what a compositor does with it
    #:open-session
+   #:add-session-enable-hook
+   #:add-session-disable-hook
+   #:remove-session-enable-hook
+   #:remove-session-disable-hook
    #:close-session
    #:dispatch-session
    #:open-session-device
@@ -584,6 +589,52 @@ real seat, so a test can stand a recording session in their place.")
    #:%dispatch
    #:%switch-session
    #:%seat-fd))
+
+(defpackage #:cf.backend.vt
+  (:use #:cl)
+  (:local-nicknames (#:ffi #:wayland.ffi)
+                    (#:drm #:cf.backend.drm)
+                    (#:session #:cf.session)
+                    (#:render #:cf.render.pixman)
+                    (#:scene #:cf.scene))
+  (:documentation
+   "The card a seat hands out -- the VT backend (docs/framework.md §2, 4d-3).
+
+On a VT the compositor never opens /dev/dri itself: libseat opens the card on its
+behalf, hands over a descriptor, and revokes it when the VT goes away (D56's
+TakeDevice route).  VT-OUTPUT is the thing that survives that: it remembers which
+card, connector and mode it programmed, opens the descriptor through the session,
+takes the screen with DRM-OPEN-SCANOUT, and gives both back on a disable -- so a
+compositor's whole VT story is registering this object and doing nothing else.
+
+It does not own the reactor and does not draw: the frame loop and the renderer are
+the compositor's (D58's DRM-SCANOUT-RENDER is what draws into the buffer).")
+  (:export
+   ;; the output
+   #:vt-output
+   #:open-vt-output
+   #:close-vt-output
+   #:enable-vt-output
+   #:disable-vt-output
+   #:vt-output-enabled-p
+   #:vt-output-session
+   #:vt-output-path
+   #:vt-output-device
+   #:vt-output-scanout
+   #:vt-output-connector-name
+   #:vt-output-crtc-id
+   #:vt-output-mode
+   #:vt-output-width
+   #:vt-output-height
+   #:vt-output-enable-count
+   #:vt-output-disable-count
+   ;; drawing, one frame at a time
+   #:vt-output-frame-target
+   #:make-vt-frame-hooks
+   #:render-vt-output
+   #:present-vt-output
+   ;; the seam a test replaces: a descriptor into a card
+   #:open-vt-device))
 
 (defpackage #:cf.backend.libinput
   (:use #:cl)
@@ -795,6 +846,15 @@ clock.  Nothing here renders: the inner compositor draws into a mapping this pac
 owns, and the presentation step is attach + damage + commit.")
   (:export
    #:nested-backend
+   ;; the card a seat hands out
+   #:vt-output
+   #:open-vt-output
+   #:close-vt-output
+   #:vt-output-width
+   #:vt-output-height
+   #:vt-output-scanout
+   #:vt-output-device
+   #:make-vt-frame-hooks
    #:start-nested
    #:stop-nested
    #:run-nested
@@ -976,6 +1036,15 @@ that, so a compositor chooses it by binding START-SWITCHER.")
   (:import-from #:cf.backend.libinput
                 #:start-input
                 #:stop-input)
+  (:import-from #:cf.backend.vt
+                #:vt-output
+                #:open-vt-output
+                #:close-vt-output
+                #:vt-output-width
+                #:vt-output-height
+                #:vt-output-scanout
+                #:vt-output-device
+                #:make-vt-frame-hooks)
   (:documentation
    "The compositor framework: everything wlroots provides, in Lisp.
 
@@ -1067,6 +1136,15 @@ docs/framework.md §1 follow.")
    #:switcher-index
    #:switcher-selected
    ;; the nested backend
+   ;; the card a seat hands out
+   #:vt-output
+   #:open-vt-output
+   #:close-vt-output
+   #:vt-output-width
+   #:vt-output-height
+   #:vt-output-scanout
+   #:vt-output-device
+   #:make-vt-frame-hooks
    #:start-nested
    #:stop-nested
    #:run-nested

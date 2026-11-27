@@ -304,7 +304,9 @@ explicitly authorized step (it maps a window on the user's desktop).
 `cf.session`, `cf.backend.drm`
 - [x] libseat: `open_seat`, `open_device`, `close_device`, `disable_seat` acknowledgement,
       enable/disable state machine; seatd and logind both compiled in (D56)
-- [ ] switch callbacks exercised live: VT away/back from a compositor that owns one (4d)
+- [x] switch callbacks: a card opened through the seat, given back on disable and taken again
+      on enable with the screen it remembered (D59)
+- [ ] switch callbacks exercised live: VT away/back from a compositor that owns one (exit gate)
 - [ ] fallback direct VT path (`VT_GETSTATE`/`VT_ACTIVATE`, `KDGKBMODE`)
 - [x] resources/connectors/encoders/CRTCs; preferred mode; each CRTC's current scanout (D54)
 - [x] `SETCRTC`, `SET MASTER`, and the saved state put back on close (D55)
@@ -314,7 +316,8 @@ explicitly authorized step (it maps a window on the user's desktop).
 - [x] `PAGE_FLIP` + `read()` of the kernel's completion event; monotonic sequences and
       timestamps checked (D55)
 - [ ] frame callbacks with the kernel's real timestamps
-- [ ] VT switch away/back; teardown and restore
+- [x] VT teardown and restore on every way out (`Alt+Esc`, SIGINT/SIGTERM/SIGHUP) (D59)
+- [ ] VT switch away/back observed live (exit gate)
 - [ ] hotplug add/remove; output re-layout (4d; the libinput udev context is implemented)
 - [ ] suspend/resume hooks
 
@@ -325,7 +328,7 @@ explicitly authorized step (it maps a window on the user's desktop).
 - [x] xkb keymap compile, state, mods, keysyms, repeat (D57)
 - [x] keymap memfd to clients: the rules-compiled map, parsed back and by a real client (D57)
 - [ ] device-specific keymaps (one layout per seat today)
-- [ ] software cursor in the scanout buffer
+- [x] software cursor in the scanout buffer (D58)
 
 **Gate:** the PLAN §5 phase 4 list — TTY session, VT switch, hotplug, 8-hour soak, resume.
 

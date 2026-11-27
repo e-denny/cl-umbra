@@ -16,6 +16,9 @@
 
   --headless            render into memory; input must be injected (a test backend)
   --nested              run as a window inside the compositor in WAYLAND_DISPLAY
+  --drm                 take a VT: a seat, the card it hands out, and that screen
+  --card PATH           the card to take with --drm (default /dev/dri/card0)
+  --connector NAME      which output of it to program (default: the first connected)
   --parent PATH         the parent's socket (implies --nested)
   --size WxH            output size in layout pixels (default 1280x800)
   --scale N             device pixels per layout pixel (default 1); 2 draws at
@@ -27,10 +30,13 @@
   --runtime-dir DIR     where the socket goes (default XDG_RUNTIME_DIR)
   --help                this text
 
-With neither --headless nor --nested, tinywl nests when WAYLAND_DISPLAY names a
-live compositor and runs headless otherwise.  Press Alt+Esc to quit, Alt+F1 to send
-the bottom window to the front, Alt+Shift+Return to start a terminal, Alt+left-drag
-to move a window and Alt+right-drag to resize it from the edge under the pointer.
+With none of --headless, --nested or --drm, tinywl nests when WAYLAND_DISPLAY
+names a live compositor and runs headless otherwise.  --drm needs a seat it may
+take, so run it from a text console and not from inside a compositor that already
+owns the screen; it gives the screen back on Alt+Esc and on SIGINT, SIGTERM or
+SIGHUP.  Press Alt+Esc to quit, Alt+F1 to send the bottom window to the front,
+Alt+Shift+Return to start a terminal, Alt+left-drag to move a window and
+Alt+right-drag to resize it from the edge under the pointer.
 ")
 
 (defun parse-size (text)
@@ -63,6 +69,13 @@ is the one interface that must not need a library to read."
                (cond
                  ((string= argument "--headless") (setf mode :headless))
                  ((string= argument "--nested") (setf mode :nested))
+                 ((string= argument "--drm") (setf mode :drm))
+                 ((string= argument "--card")
+                  (setf options (list* :card (value) options))
+                  (skip))
+                 ((string= argument "--connector")
+                  (setf options (list* :connector (value) options))
+                  (skip))
                  ((string= argument "--parent") (setf parent (value) mode :nested) (skip))
                  ((string= argument "--size")
                   (multiple-value-bind (width height) (parse-size (value))

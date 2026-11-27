@@ -26,9 +26,11 @@
 (defpackage #:wayland.test.drm-modeset
   (:use #:cl #:rove)
   (:local-nicknames (#:drm #:cf.backend.drm)
+                    (#:session #:cf.session)
+                    (#:vt #:cf.backend.vt)
                     (#:ffi #:wayland.ffi))
   (:documentation "Tests for the DRM screen path: modes written back, events
-parsed, and a scanout's order (D55)."))
+parsed, a scanout's order (D55), and the screen a seat hands out (4d-3)."))
 
 (in-package #:wayland.test.drm-modeset)
 
@@ -643,3 +645,194 @@ header, which is how an unknown event looks."
   (let ((device (new-screen-device)))
     (drm:drm-refresh-master device)
     (ok (not (drm:drm-device-master-p device)))))
+
+;;; ---------------------------------------------------------------------------
+;;; The screen a seat hands out (4d-3)
+;;; ---------------------------------------------------------------------------
+;;
+;; The same recording card, now opened through a seat instead of by path.  This is
+;; the join the first four slices of phase 4 each proved one half of: a seat
+;; callback opens the card *through* the seat, the screen is programmed, and a
+;; disable puts the screen back before the descriptor goes back.  The descriptor is
+;; a real memfd, so "given back" is a real close(2) and not a number compared.
+
+(defclass fake-session (session:session)
+  ((calls :initform '() :accessor fake-calls)
+   (pending :initform '() :accessor fake-pending)
+   (next-id :initform 0 :accessor fake-next-id)
+   (open-fds :initform (make-hash-table) :accessor fake-open-fds)
+   (opened-fds :initform '() :accessor fake-opened-fds)
+   (card-error :initform nil :accessor fake-card-error))
+  (:documentation
+   "A seat whose provider is the test: no logind, no seatd, and descriptors that
+are real files, so closing them is observable."))
+
+(defmethod session:%open-seat ((session fake-session))
+  (push :open-seat (fake-calls session))
+  (cffi:null-pointer))
+
+(defmethod session:%close-seat ((session fake-session))
+  (push :close-seat (fake-calls session))
+  t)
+
+(defmethod session:%acknowledge-disable ((session fake-session))
+  (push :acknowledge (fake-calls session))
+  t)
+
+(defmethod session:%open-device ((session fake-session) path)
+  (push (list :open-device path) (fake-calls session))
+  (let ((fd (ffi:memfd-create "cl-wayland-vt-test"))
+        (id (incf (fake-next-id session))))
+    (setf (gethash id (fake-open-fds session)) fd)
+    (push fd (fake-opened-fds session))
+    (values fd id)))
+
+(defmethod session:%close-device ((session fake-session) id)
+  (push (list :close-device id) (fake-calls session))
+  (let ((fd (gethash id (fake-open-fds session))))
+    (when fd
+      (remhash id (fake-open-fds session))
+      (ffi:close-fd fd)))
+  t)
+
+(defmethod session:%dispatch ((session fake-session) timeout)
+  (declare (ignore timeout))
+  (push :dispatch (fake-calls session))
+  (let ((event (pop (fake-pending session))))
+    (case event
+      (:enable (session:note-seat-enabled session) 1)
+      (:disable (session:note-seat-disabled session) 1)
+      (t 0))))
+
+(defmethod session:%switch-session ((session fake-session) vt)
+  (push (list :switch vt) (fake-calls session))
+  t)
+
+(defmethod session:%seat-fd ((session fake-session)) -1)
+
+(defun make-seat (&key (enabled t))
+  "A seat that is already enabled, the way logind hands one over."
+  (let ((session (session:open-session :class 'fake-session :name "seat0")))
+    (when enabled
+      (session:note-seat-enabled session))
+    session))
+
+(defun seat-calls (session)
+  "What the provider was asked, oldest first."
+  (reverse (fake-calls session)))
+
+(defmethod vt:open-vt-device ((output vt:vt-output) (session fake-session) path)
+  "A recording card in place of the kernel's: the descriptor is real, the card is not."
+  (multiple-value-bind (fd id) (session:open-session-device session path)
+    (values (make-instance 'recording-screen-device
+                           :path path :fd fd :driver-name "vkms"
+                           :inventory (make-inventory)
+                           :master-error (fake-card-error session))
+            id)))
+
+(deftest a-seat-enabled-output-opens-its-card-through-the-seat
+  (let* ((session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0"))
+         (device (vt:vt-output-device output)))
+    (ok (eq :enabled (session:session-state session)) "the seat is enabled")
+    (ok (vt:vt-output-enabled-p output)
+        "and the output came up with it, with no switch and no manual enable")
+    (ok (equal (list :open-device "/dev/dri/card0")
+               (find-if #'consp (fake-calls session)))
+        "the card was asked for by the path the seat knows, before anything was drawn")
+    (ok (eq :take-master (first (call-kinds device)))
+        "master first, which is what KMS requires and what EBUSY answers")
+    (ok (eq :set-crtc (car (last (call-kinds device))))
+        "and the CRTC programmed with the first frame")
+    (ok (= 1024 (vt:vt-output-width output)) "the size a scene is given")
+    (ok (= 768 (vt:vt-output-height output)))
+    (ok (string= "Virtual-1" (vt:vt-output-connector-name output))
+        "the screen is remembered, so a switch back reprograms the same one")
+    (ok (= 1 (vt:vt-output-enable-count output)) "one enable, recorded as evidence")
+    (ok (= 1 (session:session-open-device-count session))
+        "and the seat knows exactly one device is open")))
+
+(deftest a-disable-restores-the-screen-before-giving-the-card-back
+  (let* ((session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0"))
+         (device (vt:vt-output-device output))
+         (fd (drm:drm-device-fd device)))
+    (vt:disable-vt-output output)
+    (ok (not (vt:vt-output-enabled-p output)) "the output is off")
+    (let ((kinds (call-kinds device)))
+      (ok (< (position :set-crtc kinds) (position :drop-master kinds))
+          "the CRTC's saved state goes back before master is dropped")
+      (ok (eq :drop-master (car (last kinds))) "and dropping master is the last call"))
+    (ok (eq :close-device (first (first (fake-calls session))))
+        "the descriptor goes back to the seat after the screen does")
+    (ok (not (ffi:fd-open-p fd))
+        "the seat closes what the seat opened, so the descriptor is gone")
+    (ok (not (drm:drm-device-open-p device)) "and the device no longer claims it")
+    (ok (zerop (session:session-open-device-count session))
+        "with nothing left open in the seat's bookkeeping")
+    (ok (= 1 (vt:vt-output-disable-count output)))))
+
+(deftest a-vt-switch-takes-the-screen-away-and-brings-it-back
+  (let* ((session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0"))
+         (device (vt:vt-output-device output)))
+    (setf (fake-pending session) '(:disable :enable))
+    (session:dispatch-session session)
+    (ok (not (vt:vt-output-enabled-p output))
+        "the disable callback gave the screen back, without the compositor asking")
+    (ok (= 1 (vt:vt-output-disable-count output)))
+    (session:dispatch-session session)
+    (ok (vt:vt-output-enabled-p output) "and the enable callback took it again")
+    (ok (= 2 (vt:vt-output-enable-count output)) "twice enabled, once disabled")
+    (let* ((before (find-call device :set-crtc))
+           (now (vt:vt-output-device output))
+           (after (find-call now :set-crtc)))
+      (ok (not (eq device now))
+          "a new card handle, because the seat handed out a new descriptor")
+      (ok (eq :take-master (first (call-kinds now)))
+          "master taken again, because dropping it gave it away")
+      (ok (equal (sixth before) (sixth after))
+          "the same connector both times, because it was remembered")
+      (ok (string= (seventh before) (seventh after))
+          "and the same mode, not whatever the card prefers now"))))
+
+(deftest an-enable-that-cannot-take-the-card-gives-the-descriptor-back
+  (let ((session (make-seat)))
+    (setf (fake-card-error session) t)
+    (ok (signals (vt:open-vt-output session :path "/dev/dri/card0") 'drm:drm-error)
+        "EBUSY is signalled, not swallowed into a half-taken screen")
+    (ok (zerop (session:session-open-device-count session))
+        "the seat has no device open")
+    (ok (null (session:session-on-enabled session))
+        "and no hook was left behind for a later switch to call")
+    (ok (null (session:session-on-disabled session)))
+    (ok (every (lambda (fd) (not (ffi:fd-open-p fd))) (fake-opened-fds session))
+        "every descriptor the seat handed out is closed")))
+
+(deftest a-disabled-output-has-nothing-to-draw-into
+  (let* ((session (make-seat))
+         (output (make-instance 'vt:vt-output :session session :path "nowhere")))
+    (ok (signals (vt:render-vt-output output nil) 'error)
+        "drawing without a card is an error, not a write into memory nobody scans")
+    (ok (signals (vt:present-vt-output output) 'error)
+        "and there is nothing to flip to")))
+
+(deftest closing-an-output-twice-is-quiet
+  (let* ((session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0")))
+    (ok (vt:close-vt-output output) "the first close")
+    (ok (null (session:session-on-enabled session)) "the enable hook is gone")
+    (ok (null (session:session-on-disabled session)) "and the disable hook with it")
+    (ok (vt:close-vt-output output) "the second close is the same as the first")
+    (ok (not (vt:vt-output-enabled-p output)))))
+
+(deftest a-closed-output-is-not-brought-back-by-a-later-enable
+  (let* ((session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0")))
+    (vt:close-vt-output output)
+    (setf (fake-pending session) '(:disable :enable))
+    (session:dispatch-session session)
+    (session:dispatch-session session)
+    (ok (= 1 (vt:vt-output-enable-count output))
+        "a compositor that closed its output is not overruled by the seat")
+    (ok (not (vt:vt-output-enabled-p output)))))
