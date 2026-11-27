@@ -226,6 +226,51 @@ that will draw frames."
                                (= #xFF204060 (cf.backend.drm:dumb-buffer-pixel one 0 0)))
                           "buffer 1: a second mapping, painted and read back")
 
+                 ;; --- a scene, cursor included, into the scanout (D58) -------------
+                 ;;
+                 ;; The compositor's frame is not a painted rectangle: it is the scene,
+                 ;; and with no cursor plane in this design the pointer is the last
+                 ;; thing the scene draws into this same mapping.  Two claims: the
+                 ;; cursor's pixels are in the buffer at the scene's position, and the
+                 ;; driver's pitch padding was not written.
+                 (let* ((zero (cf.backend.drm:drm-scanout-buffer scanout 0))
+                        (scene (cf.scene:make-scene width height :scale 1))
+                        (pitch (cf.backend.drm:dumb-buffer-pitch zero))
+                        (x (min 200 (- width 20)))
+                        (y (min 120 (- height 20))))
+                   (setf (cf.scene:scene-cursor-visible-p scene) t)
+                   (cf.scene:set-node-position (cf.scene:scene-cursor scene) x y)
+                   (cf.backend.drm:drm-scanout-render scanout scene zero :background #xFF101820)
+                   (let ((painted 0)
+                         (padding-written 0))
+                     (loop for py from y below (min height (+ y 16))
+                           do (loop for px from x below (min width (+ x 16))
+                                    unless (= #xFF101820
+                                              (cf.backend.drm:dumb-buffer-pixel zero px py))
+                                      do (incf painted)))
+                     (when (> pitch (* width 4))
+                       (loop for py below (min height 64)
+                             do (loop for byte from (* width 4) below pitch
+                                      when (/= 0 (cffi:mem-aref (cf.backend.drm:dumb-buffer-mapping zero)
+                                                                :unsigned-char
+                                                                (+ (* py pitch) byte)))
+                                        do (incf padding-written))))
+                     (check (plusp painted)
+                            "the scene's cursor is in the scanout at (~D,~D): ~D pixel(s)"
+                            x y painted)
+                     (check (zerop padding-written)
+                            "the driver's pitch padding (~D bytes per row) was not written"
+                            (- pitch (* width 4))))
+
+                   ;; Present the scene's buffer, so the frame the kernel scanned out is
+                   ;; the one with the cursor in it.
+                   (let ((event (cf.backend.drm:drm-scanout-present scanout zero :timeout-ms 2000)))
+                     (check (plusp (getf event :sequence))
+                            "the scene's frame was retired: sequence ~D"
+                            (getf event :sequence))
+                     (check (= crtc-id (getf event :crtc-id))
+                            "and it was our CRTC that retired it")))
+
                  ;; --- flip, and wait for the kernel to say so ----------------------
                  (let ((start (wayland.ffi:monotonic-seconds)))
                    (dotimes (index 3)

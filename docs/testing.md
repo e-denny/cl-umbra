@@ -57,11 +57,11 @@ ASDF. Assertions are Rove's own: `(ok FORM "description")` for a predicate, and
 `(ok (signals FORM 'condition-type))` for an expected error; a failure prints the test name,
 the assertion, its source location and the arguments' values.
 
-The scripts go through `wayland.test.runner`, which names the seventeen suites instead of letting
+The scripts go through `wayland.test.runner`, which names the eighteen suites instead of letting
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 413 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 428 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -533,6 +533,10 @@ Phase 4's second half adds the twenty-second:
     vkms's own framebuffer 55 at load, two buffers at pitch 4096 (framebuffers 57 and 58),
     sequences 83407/83408/83409 retired 16.6 ms apart, restore to framebuffer 55, and 300
     frames in the demo at a mean 16.65 ms (60.1 Hz) with 300 contiguous sequence numbers.
+    With D58 the clause also renders a **scene** -- cursor included -- into the scanout
+    buffer at the driver's pitch, checks the pointer's pixels are in the buffer and the padding
+    was not written, and presents that frame; the hardware-free half of the same claim (a padded
+    memfd instead of a dumb buffer) is the `wayland.test.drm-frame` suite, six tests.
     Four answers are **SKIP** and not failure: no `vkms`, no connected connector, `EACCES` on
     `SET MASTER` (it is a privileged ioctl, so the clause wants root), and `EBUSY` because
     another master owns the card. The last one is not hypothetical: on this machine, loading

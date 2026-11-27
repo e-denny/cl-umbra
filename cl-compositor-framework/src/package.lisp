@@ -319,7 +319,9 @@ a debugging artefact and a test fixture, not a compression benchmark.")
 
 (defpackage #:cf.backend.drm
   (:use #:cl)
-  (:local-nicknames (#:ffi #:wayland.ffi))
+  (:local-nicknames (#:ffi #:wayland.ffi)
+                    (#:render #:cf.render.pixman)
+                    (#:scene #:cf.scene))
   (:documentation
    "The DRM backend, first half (docs/framework.md §2, PLAN.md phase 4).
 
@@ -493,6 +495,8 @@ project keeps rather than works around.")
    #:drm-scanout-next-buffer
    #:drm-scanout-present
    #:drm-scanout-present-next
+   #:drm-scanout-target
+   #:drm-scanout-render
    ;; the kernel-call protocol
    #:drm-program-crtc
    #:drm-queue-page-flip

@@ -10,8 +10,9 @@ compositor framework, and a tinywl port — as the six systems below.
 phase 3e, phase 3f, phase 3g, phase 3i and phase 3's exit gate — `cl-tinywl` — passing, plus
 the first three slices of phase 4 (the DRM card, its connectors and a dumb buffer, D54; the
 screen: master, a mode, page flips and the restore, D55; and the seat plus libinput's devices
-and decode path, D56), and the keymap of the fourth (libxkbcommon, D57).**
-`./scripts/gate.sh` checks twenty-four clauses. Phase 0: the unit suite (422 tests, seventeen suites), every vendored protocol compiling,
+and decode path, D56), and the keymap of the fourth (libxkbcommon, D57), plus its frame: the scene -- cursor included --
+rendered into the scanout at the driver's pitch (D58).**
+`./scripts/gate.sh` checks twenty-four clauses. Phase 0: the unit suite (428 tests, eighteen suites), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections

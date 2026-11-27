@@ -2840,3 +2840,54 @@ keymap (a client applies the map itself), no `input-method`, no LED state, and t
 still one per seat rather than one per keyboard. The lesson: **a layout is a fact about the
 session, so anything this project says about a key has to be a question to the keymap -- the
 moment it is a table here, it is wrong in another country.**
+
+---
+
+## D58 — There is no cursor plane, so the cursor is part of the frame
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** the frame in the scanout (phase 4, fourth slice, second part)
+
+The plan says "a software cursor in the scanout buffer". In a design with no planes, that is
+not a feature with a switch: it is a statement about where the pointer is drawn.
+
+**Decision.**
+
+1. **The frame the CRTC scans out is the scene, and the cursor is the last thing in it.** The
+   scanout's buffer mapping becomes a pixman target at the *driver's pitch*, and
+   `scene-render-items` draws into it exactly as it draws into an in-memory target -- the pointer
+   last, at the output's scale, with the client's image or the built-in arrow (D40, D41). No
+   second renderer, no cursor plane, no hardware cursor API: `drm-scanout-render` is three lines
+   and a docstring whose content is "the target is the buffer".
+
+2. **The pitch is the driver's, and that is the whole risk.** A dumb buffer is allowed to pad its
+   rows; this monitor's card does not (3840 * 4 = 15360 exactly), so a driver that does would find
+   a shear or a cross-row write that no test on this machine could have seen. The unit tests
+   therefore build their own padded buffer over a memfd -- 16 bytes of padding per row -- and
+   assert that the picture is identical to the packed one, that the padding is untouched, and that
+   damage confines the repaint.
+
+3. **A damaged frame paints no background, and only its damage.** The background fill happens on
+   a full repaint; with damage, the buffer's previous contents are the truth for everything else,
+   or buffer age means nothing (D50).
+
+4. **Drawing and presenting stay separate.** `drm-scanout-render` never flips; `drm-scanout-present`
+   flips and waits for the kernel's completion. That is what lets a test read the pixels back from
+   the mapping before they reach a display, and what will let a compositor draw the next frame
+   while the last is scanned out (4d-3's loop).
+
+**Evidence.** Six unit tests in `tests/unit/drm-frame.lisp` (the `wayland.test.drm-frame` suite)
+over a memfd with a padded pitch, taking the suite from 422 to **428 tests in eighteen suites**:
+the packed and padded buffers agree at all 2,560 pixels; ~59 pixels under the pointer's 16x16 box
+are painted while a pixel away from it is still the background; at scale 2 the box is 32x32; the
+padding at the end of every row is untouched while the first visible byte was written (so the
+check is not vacuous); and a damaged frame writes nothing outside its 8x8 rectangle. Clause 22 now
+also renders a scene with the cursor into the scanout on a virtual card, reads the pixels back and
+presents that frame -- measured as a **skip** on this machine, because vkms is not loaded, which is
+the honest report: the DRM half of this slice has not yet run on a real driver. What this does not
+do: no cursor plane (deliberately), no damage-based partial repaint driven by the scene's own
+damage list yet (the render accepts damage; the compositor loop that computes it is 4d-3), no
+triple buffering, no hardware cursor at all. The lesson: **with no planes, "the cursor is in the
+scanout" is not a feature to add -- it is a consequence to verify, and the only thing that can go
+wrong is the pitch.**

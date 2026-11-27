@@ -1436,6 +1436,59 @@ Idempotent: a second call does nothing."
   (values))
 
 ;;; ---------------------------------------------------------------------------
+;;; The cursor is in the frame: rendering into the scanout (D58)
+;;; ---------------------------------------------------------------------------
+;;
+;; There is no cursor plane here and no overlay plane: the pointer is drawn into the
+;; same mapping the CRTC scans out of, as the last thing the scene draws.  Two facts
+;; make that a function of its own rather than a line in a compositor.
+;;
+;;   1. The buffer's pitch is the driver's, not the width's.  A dumb buffer at
+;;      3840x2160 on this monitor has pitch 15360 (= width * 4), but the kernel is
+;;      allowed to pad it, and every write goes through the target's stride.  A
+;;      picture drawn as if stride were width * 4 is a sheared picture, and a clip
+;;      that ignores the padding writes into a row it does not own -- D55's fill-rect
+;;      bug in a different coat.
+;;   2. The scene already draws the cursor last, at the output's scale, with the
+;;      client's image or the built-in arrow (D40, D41).  So "the cursor in the
+;;      scanout" is not a second renderer: it is the same scene render, given a
+;;      target over the scanout buffer instead of an in-memory one.  This is the
+;;      function that says so, and the only place that knows both halves.
+
+(defun drm-scanout-target (buffer)
+  "A pixman target over BUFFER's mapping, at the driver's pitch.
+
+The mapping stays ours: the target borrows it, and DESTROY-TARGET frees only the
+pixman image.  That is the contract MAKE-TARGET-OVER-POINTER states, and it is why
+this can be done per frame without copying 33 MB."
+  (render:make-target-over-pointer (dumb-buffer-mapping buffer)
+                                   (dumb-buffer-width buffer)
+                                   (dumb-buffer-height buffer)
+                                   :stride (dumb-buffer-pitch buffer)))
+
+(defun drm-scanout-render (scanout scene buffer &key damage (background #xFF000000))
+  "Draw SCENE into BUFFER (one of SCANOUT's) and return the surfaces to release.
+
+DAMAGE is a region in device pixels, or NIL for the whole buffer.  The background is
+painted only on a full repaint: a damaged frame must leave the rest of the buffer as
+it was, or the buffer's age stops meaning anything (D50).  The cursor is drawn by the
+scene, last, into this mapping -- a software cursor in the scanout, because this
+design has no hardware cursor plane.
+
+Nothing is presented here.  DRM-SCANOUT-PRESENT is what flips and waits for the
+kernel's vblank: drawing and presenting are separate so a compositor can draw the
+next frame while the last is being scanned out, and so a test can read the pixels
+back from the mapping before they ever reach a display."
+  (declare (ignore scanout))
+  (let ((target (drm-scanout-target buffer)))
+    (unwind-protect
+         (progn
+           (unless damage
+             (render:fill-target target background))
+           (scene:scene-render-items scene target :damage damage))
+      (render:destroy-target target))))
+
+;;; ---------------------------------------------------------------------------
 ;;; The kernel calls
 ;;; ---------------------------------------------------------------------------
 

@@ -43,6 +43,7 @@
     wayland.test.render
     wayland.test.drm
     wayland.test.drm-modeset
+    wayland.test.drm-frame
     wayland.test.session
     wayland.test.libinput
     wayland.test.switcher

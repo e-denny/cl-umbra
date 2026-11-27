@@ -488,8 +488,10 @@ compiled from the session's rules (`XKB_DEFAULT_LAYOUT` and friends) and seriali
 names and codes answered by the map, masks read from it and checked against the binding
 constants, and an `xkb_state` behind what the seat reports. Clause 24 runs the probe in two
 layouts (`us`, `de`) so that "code 21 types a different letter" is measured rather than assumed
-(90 checks). What remains of 4d: tinywl on DRM with a software cursor in the scanout buffer, and
-then the five exit-gate items above.
+(90 checks). The frame followed as D58: the scanout buffer is a pixman target at the driver's pitch and the
+scene -- cursor last -- is drawn into it, with the padded-pitch and damage claims pinned by unit
+tests over a memfd. What remains of 4d: the session-driven loop on DRM (open the card through
+libseat, render and flip, and hand the VT over on disable_seat), then the five exit-gate items.
 
 ### Phase 5 — GPU acceleration, only where it earns its place (5-8 weeks)
 

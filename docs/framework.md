@@ -191,6 +191,10 @@ The screen half in three calls:
     (cf.backend.drm:drm-close-scanout scanout)))
 ```
 
+The frame the CRTC scans out is the scene, drawn by `drm-scanout-render` into the buffer's
+mapping at the driver's pitch, with the cursor last: there is no cursor plane in this design, so
+the pointer is part of the frame (D58).
+
 What gives it its manners: `EBUSY` from `SET MASTER` means another client owns the card and is
 where the story ends, not a problem to work around; `DRM-CLOSE-SCANOUT` attempts every step even
 if an earlier one failed; presenting always waits; and restoring names the connectors again,

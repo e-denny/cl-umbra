@@ -59,6 +59,7 @@
                              (:file "render")
                              (:file "drm")
                              (:file "drm-modeset")
+                             (:file "drm-frame")
                              (:file "session")
                              (:file "libinput")
                              (:file "switcher")
