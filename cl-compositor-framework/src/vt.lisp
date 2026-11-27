@@ -39,6 +39,14 @@
    (connector-name :initarg :connector :initform nil :accessor vt-output-connector-name)
    (crtc-id :initarg :crtc-id :initform nil :accessor vt-output-crtc-id)
    (mode :initarg :mode :initform nil :accessor vt-output-mode)
+   ;; Whether the connector was named by a person or chosen by the card, because the
+   ;; two deserve different answers when a cable moves: a named connector is waited
+   ;; for, an automatic one follows whatever is connected now (D62).
+   (connector-explicit-p :initarg :connector-explicit-p :initform nil
+                         :reader vt-output-connector-explicit-p)
+   ;; What the card said about that connector when the screen was last programmed, so
+   ;; a poll can tell whether the cable moved without keeping a whole inventory (D62).
+   (connector-key :initform nil :accessor vt-output-connector-key)
    (buffer-count :initarg :buffer-count :initform 2 :reader vt-output-buffer-count)
    ;; What is held while the seat is enabled.
    (device :initarg :device :initform nil :accessor vt-output-device)
@@ -71,7 +79,10 @@
    (enable-hook :initform nil :accessor vt-output-enable-hook)
    (disable-hook :initform nil :accessor vt-output-disable-hook)
    (enables :initform 0 :accessor vt-output-enable-count)
-   (disables :initform 0 :accessor vt-output-disable-count))
+   (disables :initform 0 :accessor vt-output-disable-count)
+   ;; Evidence for the same reason the two above are: how many times a cable changing
+   ;; made this output act.  A poll that finds nothing does not count (D62).
+   (hotplugs :initform 0 :accessor vt-output-hotplug-count))
   (:documentation
    "One screen, on a card the seat opens, that comes back by itself.
 
@@ -85,6 +96,29 @@ not a subclass of anything and why closing it removes its hooks."))
 
 (defun vt-output-enabled-p (output)
   (and (vt-output-scanout output) t))
+
+(defun vt-output-screen-p (output)
+  "True when OUTPUT has a screen on it now.
+
+The same question ENABLED-P answers, said the other way round because the hotplug
+path has a state ENABLED-P cannot name on its own: a card still held with no screen
+on it, which is a cable that was pulled (D62)."
+  (and (vt-output-scanout output) t))
+
+(defun vt-output-current-connector (output inventory)
+  "The connector OUTPUT should be showing on, given what INVENTORY says now.
+
+An explicitly named connector is waited for: if it is gone this is NIL, and the
+screen stays given back until it returns.  One chosen automatically follows the card
+-- the remembered connector while it is still connected, and otherwise the first
+connected one, which is what OPEN-VT-OUTPUT would choose today (D62)."
+  (let* ((name (vt-output-connector-name output))
+         (remembered (and name (drm:drm-inventory-connector inventory name))))
+    (cond
+      ((vt-output-connector-explicit-p output)
+       (and remembered (drm:drm-connector-connected-p remembered) remembered))
+      ((and remembered (drm:drm-connector-connected-p remembered)) remembered)
+      (t (first (drm:drm-inventory-connected-connectors inventory))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; A descriptor into a card
@@ -136,7 +170,35 @@ the slot is cleared by hand rather than by CLOSE-DRM-DEVICE."
 ;;; Enable and disable: the two things a VT switch does to a compositor
 ;;; ---------------------------------------------------------------------------
 
-(defun enable-vt-output (output)
+(defun revalidate-vt-screen (output device)
+  "Forget a remembered connector or mode this card no longer offers.
+
+A cable pulled and put back can be the same monitor in the same socket, a different
+monitor in it, or the same monitor in another port.  A remembered mode is kept only
+while the connector still lists it, so a new monitor is programmed with its own
+preferred mode instead of one it does not have; an automatic connector that is gone
+is forgotten altogether, because the card, not the person, chose it (D62)."
+  (let* ((inventory (drm:drm-inventory device))
+         (name (vt-output-connector-name output))
+         (connector (and name (drm:drm-inventory-connector inventory name))))
+    (cond
+      ((null connector)
+       (unless (vt-output-connector-explicit-p output)
+         (setf (vt-output-connector-name output) nil
+               (vt-output-crtc-id output) nil
+               (vt-output-mode output) nil)))
+      ((not (drm:drm-connector-connected-p connector))
+       ;; The name stays: whether to wait or move on is PUMP-VT-HOTPLUG's decision.
+       nil)
+      (t
+       (let ((mode (vt-output-mode output)))
+         (when (and mode
+                    (not (find (drm:drm-mode-name mode)
+                               (drm:drm-connector-modes connector)
+                               :key #'drm:drm-mode-name :test #'string=)))
+           (setf (vt-output-mode output) nil)))))))
+
+(defun enable-vt-output (output &key quiet-p)
   "Take the card through the seat and program the screen.  Idempotent.
 
 Doing this twice is not an error -- an enable callback that arrives after the
@@ -145,7 +207,10 @@ being wrong -- so an enabled output returns itself.
 
 A failure anywhere after the descriptor arrived puts the descriptor back and
 re-signals: the screen is not half taken, and the seat is not asked to close what
-the compositor still holds."
+the compositor still holds.  QUIET-P is for the two callers that are not a person's
+command -- the seat's enable hook, and a poll that found the cable back -- where "no
+connector this output may program" is a state to stay in, not an error to raise
+(D62)."
   (when (vt-output-enabled-p output)
     (return-from enable-vt-output output))
   (let ((session (vt-output-session output)))
@@ -160,22 +225,37 @@ the compositor still holds."
             (open-vt-device output session (vt-output-path output)))
       (setf (vt-output-device output) device
             (vt-output-device-id output) id)
+      ;; A poll that found no cable, or a seat enable after a switch during which the
+      ;; cable was pulled: stay screenless with the descriptor held, which is the state
+      ;; PUMP-VT-HOTPLUG leaves the output in and the state it can ask its way out of.
+      (when (and quiet-p
+                 (null (vt-output-current-connector
+                        output (drm:drm-inventory device))))
+        (return-from enable-vt-output output))
       (handler-case
-          (let ((scanout (drm:drm-open-scanout
-                          device
-                          :connector (vt-output-connector-name output)
-                          :crtc-id (vt-output-crtc-id output)
-                          :mode (vt-output-mode output)
-                          :buffer-count (vt-output-buffer-count output))))
-            (setf (vt-output-scanout output) scanout
-                  (vt-output-connector-name output)
-                  (drm:drm-connector-name (drm:drm-scanout-connector scanout))
-                  (vt-output-crtc-id output) (drm:drm-scanout-crtc-id scanout)
-                  (vt-output-mode output) (drm:drm-scanout-mode scanout)
-                  (vt-output-width output) (drm:drm-scanout-width scanout)
-                  (vt-output-height output) (drm:drm-scanout-height scanout))
-            (incf (vt-output-enable-count output))
-            output)
+          (progn
+            (revalidate-vt-screen output device)
+            (let ((scanout (drm:drm-open-scanout
+                            device
+                            :connector (vt-output-connector-name output)
+                            :crtc-id (vt-output-crtc-id output)
+                            :mode (vt-output-mode output)
+                            :buffer-count (vt-output-buffer-count output))))
+              (setf (vt-output-scanout output) scanout
+                    (vt-output-connector-name output)
+                    (drm:drm-connector-name (drm:drm-scanout-connector scanout))
+                    (vt-output-crtc-id output) (drm:drm-scanout-crtc-id scanout)
+                    (vt-output-mode output) (drm:drm-scanout-mode scanout)
+                    (vt-output-width output) (drm:drm-scanout-width scanout)
+                    (vt-output-height output) (drm:drm-scanout-height scanout)
+                    ;; What the cable looked like when this screen was programmed: the
+                    ;; poll's next answer is compared against it, not against the card's
+                    ;; opinion at some later moment (D62).
+                    (vt-output-connector-key output)
+                    (drm:drm-connector-hotplug-key
+                     (drm:drm-scanout-connector scanout)))
+              (incf (vt-output-enable-count output))
+              output))
         (error (condition)
           (close-vt-device output)
           (error condition))))))
@@ -212,6 +292,98 @@ two are one function and why the device is closed even if the restore signalled.
   (values))
 
 ;;; ---------------------------------------------------------------------------
+;;; Hotplug (D62)
+;;; ---------------------------------------------------------------------------
+
+(defun blank-vt-output (output)
+  "Give the screen back and keep the card: a cable was pulled, a VT was not left.
+
+DISABLE-VT-OUTPUT closes the descriptor because a VT switch revokes it anyway.  Here
+the descriptor is the only way to ask whether the cable came back, and reopening it
+through the seat once a second would be a logind round trip per poll; so the scanout
+goes back (CRTC restored, buffers destroyed), the frame history goes with the buffers
+(D61 decision 4), and the descriptor stays."
+  (let ((scanout (vt-output-scanout output)))
+    (when scanout
+      (setf (vt-output-scanout output) nil)
+      (discard-frame-targets output)
+      (forget-vt-frame-history output)
+      (drm:drm-close-scanout scanout))
+    (values)))
+
+(defun adopt-vt-connector (output connector)
+  "Remember CONNECTOR as the screen's socket, unless it already is.
+
+A connector that is not the one remembered is a different socket (the automatic
+choice moved), so the CRTC and the mode remembered against the old one no longer
+apply and are forgotten with it."
+  (let ((name (drm:drm-connector-name connector)))
+    (unless (and (vt-output-connector-name output)
+                 (string= name (vt-output-connector-name output)))
+      (setf (vt-output-connector-name output) name
+            (vt-output-crtc-id output) nil
+            (vt-output-mode output) nil))))
+
+(defun pump-vt-hotplug (output)
+  "Ask the card what is plugged in, and put the screen right if it changed.
+
+Returns one of
+
+  :UNCHANGED     nothing about this output's connector changed -- the usual answer,
+                 and the one a cable that is still out keeps giving
+  :UNPLUGGED     the connector went away, so the screen was given back and the card kept
+  :REPLUGGED     a screen is back: this output has one again
+  :REPROGRAMMED  the connector stayed but what it offers changed, and the screen was
+                 programmed again -- a different monitor on the same cable is this
+  :FAILED        there was a screen to take and the card refused it; the state is left
+                 for the next poll, which asks again
+  :NO-CARD       no descriptor this poll may use (the seat is disabled, or a cable is
+                 out and the card is held waiting for it)
+
+The caller owns the clock: this is one question, not a loop (D59).  The comparison is
+against what the card said when the screen was last programmed, so an unchanged
+answer touches nothing but a read of the connector list."
+  (labels ((attempt-enable ()
+             ;; QUIET-P: "no cable" is a state to wait in, not an error; anything else
+             ;; the card refuses is reported as :FAILED, and the descriptor is closed by
+             ;; ENABLE-VT-OUTPUT's own error path, so the next poll starts over.
+             (handler-case
+                 (progn (enable-vt-output output :quiet-p t)
+                        (and (vt-output-screen-p output) t))
+               (error () nil))))
+    (if (null (vt-output-device output))
+        ;; No descriptor: either the seat is disabled (a VT switch; its enable hook
+        ;; will take the screen back), or a previous attempt failed and left nothing
+        ;; open.  Retrying here is what makes a refused modeset recoverable.
+        (if (and (session:session-enabled-p (vt-output-session output))
+                 (attempt-enable))
+            :replugged
+            :no-card)
+        (let* ((inventory (drm:drm-inventory (vt-output-device output)))
+               (connector (vt-output-current-connector output inventory))
+               (key (and connector (drm:drm-connector-hotplug-key connector)))
+               (remembered (vt-output-connector-key output))
+               (screen (vt-output-screen-p output)))
+          (cond
+            ((equal key remembered) :unchanged)
+            ((null connector)
+             (setf (vt-output-connector-key output) nil)
+             (if screen
+                 (progn (incf (vt-output-hotplug-count output))
+                        (blank-vt-output output)
+                        :unplugged)
+                 :no-card))
+            ((null screen)
+             (incf (vt-output-hotplug-count output))
+             (adopt-vt-connector output connector)
+             (if (attempt-enable) :replugged :failed))
+            (t
+             (incf (vt-output-hotplug-count output))
+             (adopt-vt-connector output connector)
+             (blank-vt-output output)
+             (if (attempt-enable) :reprogrammed :failed)))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; The object a compositor holds
 ;;; ---------------------------------------------------------------------------
 
@@ -239,11 +411,14 @@ and let this function open the card."
                                :session session :path path
                                :connector connector :crtc-id crtc-id :mode mode
                                :buffer-count buffer-count
+                               :connector-explicit-p (and connector t)
                                :device device :device-id device-id)))
     (setf (vt-output-enable-hook output)
+          ;; QUIET: a VT switch back into a session whose cable is out is a screen to
+          ;; wait for, not an error to raise inside the seat's hook (D62).
           (lambda (session)
             (declare (ignore session))
-            (enable-vt-output output))
+            (enable-vt-output output :quiet-p t))
           (vt-output-disable-hook output)
           (lambda (session)
             (declare (ignore session))

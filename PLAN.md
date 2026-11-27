@@ -509,8 +509,14 @@ thing turns on -- recording the merged damage would make every frame full after 
 first paint, and a scanout alternates its buffers by construction. **Measured on `card1`**
 (2026-11-27) with `scripts/damage-probe.sh`: 30 checks, 0 failed, a steady-state frame repainting
 896 of 8,294,400 pixels, and an idle frame repainting exactly the change it owed and not more.
-What remains of phase 4:
-hotplug (no code yet), suspend/resume (no hooks yet), and the 8-hour soak.
+Hotplug followed
+(D62): the cable is a question the VT backend asks once a second -- `drm-hotplug-key` reduces an
+enumeration to a value two polls compare, `pump-vt-hotplug` gives the screen back and keeps the
+seat's descriptor when it changes, and programs the connector again when the cable returns, with
+the new monitor's own mode if it is a different one. Eight tests cover it and the
+cable walk is done (2026-11-27: several pull/replace cycles, the desktop back with its windows
+each time), so exit-gate item 3 is walked; what is left of phase 4 is suspend/resume (item 5, no
+hooks yet) and the 8-hour soak (item 4).
 
 ### Phase 5 — GPU acceleration, only where it earns its place (5-8 weeks)
 

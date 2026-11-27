@@ -323,7 +323,10 @@ explicitly authorized step (it maps a window on the user's desktop).
 - [x] VT teardown and restore on every way out (`Alt+Esc`, SIGINT/SIGTERM/SIGHUP) (D59)
 - [x] VT switch away/back observed live: 19 checks with `CL_DRM_SWITCH_VT=1`, then by hand
       with the compositor's own keys (D60)
-- [ ] hotplug add/remove; output re-layout (4d; the libinput udev context is implemented)
+- [x] hotplug: a pulled cable gives the screen back and keeps the card, a returned one is
+      reprogrammed with its own mode (D62, polled -- no udev). Walked 2026-11-27 on `card1`:
+      several pull/replace cycles, the desktop back with its windows each time
+- [ ] multi-output: a second connector as its own output; output re-layout
 - [ ] suspend/resume hooks
 
 `cf.backend.libinput`, `cf.input` (xkbcommon)

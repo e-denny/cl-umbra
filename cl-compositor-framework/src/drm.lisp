@@ -502,6 +502,39 @@ slice has to put back when it gives the screen back."
   (remove-if-not #'drm-connector-connected-p (drm-inventory-connectors inventory)))
 
 ;;; ---------------------------------------------------------------------------
+;;; Hotplug: the same question asked twice
+;;;
+;;; The kernel's hotplug is a udev change event, and this project has no udev
+;;; dependency (D4 names the libraries it uses, and udev is not one).  What a card
+;;; *is* willing to answer at any time, without master, is GETRESOURCES and
+;;; GETCONNECTOR -- so "did a cable move?" is asked, not delivered (D62).  The
+;;; answer is reduced to a value two calls compare with EQUAL.
+
+(defun drm-mode-key (mode)
+  "The part of MODE that changes what a screen looks like."
+  (list (drm-mode-name mode)
+        (drm-mode-hdisplay mode)
+        (drm-mode-vdisplay mode)
+        (drm-mode-refresh-milli-hz mode)))
+
+(defun drm-connector-hotplug-key (connector)
+  "What CONNECTOR says about its cable, as a value two polls can compare.
+
+The name and the id say which socket it is, the status says whether anything is
+plugged into it, and the modes are the monitor's own claim about itself -- so a
+different monitor on the same cable is a different key even when the connector
+never reports a disconnect."
+  (list (drm-connector-name connector)
+        (drm-connector-id connector)
+        (drm-connector-status connector)
+        (sort (mapcar #'drm-mode-key (drm-connector-modes connector)) #'string< :key #'car)))
+
+(defun drm-inventory-hotplug-key (inventory)
+  "Every connector in INVENTORY, sorted by name."
+  (sort (mapcar #'drm-connector-hotplug-key (drm-inventory-connectors inventory))
+        #'string< :key #'car))
+
+;;; ---------------------------------------------------------------------------
 ;;; The device
 ;;; ---------------------------------------------------------------------------
 
@@ -1554,6 +1587,13 @@ back from the mapping before they ever reach a display."
 
 (defmethod drm-inventory ((device drm-device))
   (read-inventory device))
+
+(defun drm-hotplug-key (device)
+  "What is plugged into DEVICE now, from a fresh enumeration.
+
+Read-only, and allowed without master, which is what makes it usable as a poll while
+a compositor is presenting on the card."
+  (drm-inventory-hotplug-key (drm-inventory device)))
 
 (defmethod drm-claim-dumb ((device drm-device) width height bits-per-pixel)
   (cffi:with-foreign-objects ((handle :uint32) (pitch :uint32) (size :uint64))

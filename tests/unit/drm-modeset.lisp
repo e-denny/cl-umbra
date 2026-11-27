@@ -1112,3 +1112,152 @@ descriptor back."
     (session:dispatch-session (vt:vt-output-session output))
     (ok (zerop (vt:vt-output-frame-sequence output))
         "the sequence starts again with the new scanout")))
+
+;;; ---------------------------------------------------------------------------
+;;; Hotplug: the cable as a question (D62)
+;;; ---------------------------------------------------------------------------
+
+(defun two-connectors (first second)
+  "An inventory with two connectors, FIRST before SECOND, on one CRTC and encoder."
+  (let ((inventory (make-inventory :connector first)))
+    (setf (drm::drm-inventory-connectors inventory) (list first second))
+    inventory))
+
+(deftest the-hotplug-key-changes-only-when-the-cable-moves
+  (let* ((device (new-screen-device))
+         (before (drm:drm-hotplug-key device)))
+    (ok (equal before (drm:drm-hotplug-key device))
+        "two reads of an untouched card compare equal")
+    (setf (recording-inventory device)
+          (make-inventory :connector (make-connector :modes '() :status :disconnected)))
+    (ok (not (equal before (drm:drm-hotplug-key device)))
+        "a connector's status is part of the key")
+    (let* ((smaller (make-mode :name "1280x720" :clock 74250
+                               :width 1280 :height 720 :htotal 1650 :vtotal 750))
+           (one (drm:drm-hotplug-key device)))
+      (setf (recording-inventory device)
+            (make-inventory :connector (make-connector :modes (list smaller))))
+      (ok (not (equal one (drm:drm-hotplug-key device)))
+          "and so are the modes on offer, so another monitor on the same cable is not a no-op"))))
+
+(deftest an-unchanged-card-is-a-no-op
+  (let* ((session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0"))
+         (device (vt:vt-output-device output))
+         (kinds (call-kinds device)))
+    (ok (eq :unchanged (vt:pump-vt-hotplug output)))
+    (ok (eq :unchanged (vt:pump-vt-hotplug output)) "twice is still a no-op")
+    (ok (equal kinds (call-kinds device))
+        "and nothing was asked of the kernel beyond the enumeration")
+    (ok (zerop (vt:vt-output-hotplug-count output)) "nothing counted")))
+
+(deftest an-unplugged-cable-gives-the-screen-back-and-keeps-the-card
+  (let* ((session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0"))
+         (device (vt:vt-output-device output)))
+    (setf (recording-inventory device)
+          (make-inventory :connector (make-connector :modes '() :status :disconnected)))
+    (ok (eq :unplugged (vt:pump-vt-hotplug output)) "the cable going is noticed")
+    (ok (not (vt:vt-output-screen-p output)) "the screen is given back")
+    (ok (vt:vt-output-device output)
+        "and the card is kept, because it is the only way to ask whether the cable came back")
+    (ok (= 1 (session:session-open-device-count session))
+        "the seat still counts exactly one device open")
+    (ok (= 1 (vt:vt-output-hotplug-count output)) "one cable change counted")
+    (ok (eq :unchanged (vt:pump-vt-hotplug output)) "still out is a no-op")
+    (ok (= 1 (vt:vt-output-hotplug-count output)) "not counted again")))
+
+(deftest a-returned-cable-brings-the-screen-back-with-a-fresh-history
+  (let* ((session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0"))
+         (device (vt:vt-output-device output)))
+    (setf (recording-inventory device)
+          (make-inventory :connector (make-connector :modes '() :status :disconnected)))
+    (vt:pump-vt-hotplug output)
+    (setf (recording-inventory device)
+          (make-inventory :connector (make-connector :modes (list (make-mode)))))
+    (ok (eq :replugged (vt:pump-vt-hotplug output)) "the cable coming back is noticed")
+    (ok (vt:vt-output-screen-p output) "and the screen comes back")
+    (ok (= 1024 (vt:vt-output-width output)) "at the mode the monitor offers")
+    (ok (= 2 (vt:vt-output-enable-count output)) "programmed a second time")
+    (ok (zerop (vt:vt-output-frame-sequence output))
+        "and the frame history went with the buffers"
+        )
+    (ok (zerop (vt:vt-output-disable-count output))
+        "a pulled cable is not a disable: the output gave the screen back, not the card")))
+
+(deftest a-different-monitor-on-the-same-cable-is-a-new-mode
+  (let* ((session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0"))
+         (device (vt:vt-output-device output))
+         (smaller (make-mode :name "1280x720" :clock 74250
+                             :width 1280 :height 720 :htotal 1650 :vtotal 750)))
+    (setf (recording-inventory device)
+          (make-inventory :connector (make-connector :modes (list smaller))))
+    (ok (eq :reprogrammed (vt:pump-vt-hotplug output))
+        "the connector stayed connected, but what it offers changed")
+    (ok (= 1280 (vt:vt-output-width output)) "the new monitor's mode is programmed")
+    (ok (= 720 (vt:vt-output-height output)))
+    (ok (string= "1280x720" (drm:drm-mode-name (vt:vt-output-mode output)))
+        "and the remembered mode is the new one")
+    (ok (eq :set-crtc (car (last (call-kinds device)))) "by a modeset, last")))
+
+(deftest an-automatic-connector-follows-the-card
+  ;; Opened with no connector named, so the card chose; when that socket goes and
+  ;; another is connected, the output goes where the picture is (D62).
+  (let* ((hdmi (make-connector :name "Virtual-1" :id 7 :modes (list (make-mode))))
+         (display-port (make-connector :name "DP-1" :id 8 :modes
+                                       (list (make-mode :name "1280x720" :clock 74250
+                                                        :width 1280 :height 720
+                                                        :htotal 1650 :vtotal 750))))
+         (session (make-seat))
+         (output nil)
+         (device nil))
+    (unwind-protect
+         (progn
+           (setf output (vt:open-vt-output session :path "/dev/dri/card0"))
+           (setf device (vt:vt-output-device output))
+           (ok (string= "Virtual-1" (vt:vt-output-connector-name output))
+               "the card chose the first connected connector")
+           (setf (recording-inventory device)
+                 (two-connectors (make-connector :name "Virtual-1" :id 7 :status :disconnected
+                                                 :modes '())
+                                 display-port))
+           (ok (eq :reprogrammed (vt:pump-vt-hotplug output))
+               "the other socket is connected, so the screen moves to it")
+           (ok (string= "DP-1" (vt:vt-output-connector-name output)))
+           (ok (= 1280 (vt:vt-output-width output)) "at its own mode"))
+      (when output (ignore-errors (vt:close-vt-output output))))))
+
+(deftest a-named-connector-is-waited-for
+  ;; Named explicitly, so the compositor was asked for that socket and no other; when
+  ;; it goes, the screen stays off until it returns, even if something else is plugged
+  ;; in (D62).
+  (let* ((hdmi (make-connector :name "Virtual-1" :id 7 :modes (list (make-mode))))
+         (display-port (make-connector :name "DP-1" :id 8 :modes (list (make-mode))))
+         (session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0" :connector "Virtual-1"))
+         (device (vt:vt-output-device output)))
+    (unwind-protect
+         (progn
+           (setf (recording-inventory device)
+                 (two-connectors (make-connector :name "Virtual-1" :id 7
+                                                 :status :disconnected :modes '())
+                                 display-port))
+           (ok (eq :unplugged (vt:pump-vt-hotplug output))
+               "the named connector going is the screen going")
+           (ok (not (vt:vt-output-screen-p output)))
+           (ok (string= "Virtual-1" (vt:vt-output-connector-name output))
+               "and the socket is remembered, not replaced by the other one")
+           (setf (recording-inventory device)
+                 (two-connectors hdmi display-port))
+           (ok (eq :replugged (vt:pump-vt-hotplug output))
+               "so the screen comes back when that cable does"))
+      (ignore-errors (vt:close-vt-output output)))))
+
+(deftest a-disabled-seat-has-no-card-to-ask
+  (let* ((session (make-seat))
+         (output (vt:open-vt-output session :path "/dev/dri/card0")))
+    (session:note-seat-disabled session)
+    (ok (eq :no-card (vt:pump-vt-hotplug output))
+        "a VT switch closes the card, so there is nothing to poll until the seat comes back")))

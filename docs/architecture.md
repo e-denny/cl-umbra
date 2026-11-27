@@ -134,7 +134,9 @@ is a compositor on a VT with that output behind its frame hooks. The console run
 was retired by the kernel, the CRTC was restored, and the compositor took the screen back after a
 VT switch -- so master is best effort and the CRTC is the judge, and the VT keys are the
 compositor's because libinput holds the keyboard. Of phase 4's exit gate, items 1 (TTY session) and
-2 (VT round trip) are walked; hotplug, suspend/resume and the 8-hour soak remain. `cl-umbra` and a nested window on a foreign compositor are still
+2 (VT round trip) are walked; hotplug is walked (D62: the cable is polled, an unplug gives
+the screen back while keeping the card, and a replug programs it again -- several cycles on
+2026-11-27), and suspend/resume and the 8-hour soak remain. `cl-umbra` and a nested window on a foreign compositor are still
 their plan.
 
 ## 2. Packages

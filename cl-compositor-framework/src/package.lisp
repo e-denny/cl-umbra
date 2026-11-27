@@ -409,6 +409,9 @@ project keeps rather than works around.")
    #:drm-connector-encoders
    #:drm-connector-preferred-mode
    #:drm-connector-type-name
+   #:drm-connector-hotplug-key
+   #:drm-inventory-hotplug-key
+   #:drm-hotplug-key
    #:drm-pick-mode
    #:drm-encoder
    #:drm-encoder-id
@@ -812,17 +815,24 @@ the compositor's (D58's DRM-SCANOUT-RENDER is what draws into the buffer).")
    #:enable-vt-output
    #:disable-vt-output
    #:vt-output-enabled-p
+   #:vt-output-screen-p
    #:vt-output-session
    #:vt-output-path
    #:vt-output-device
    #:vt-output-scanout
    #:vt-output-connector-name
+   #:vt-output-connector-explicit-p
+   #:vt-output-connector-key
    #:vt-output-crtc-id
    #:vt-output-mode
    #:vt-output-width
    #:vt-output-height
    #:vt-output-enable-count
    #:vt-output-disable-count
+   #:vt-output-hotplug-count
+   ;; hotplug, as a question rather than an event (D62)
+   #:pump-vt-hotplug
+   #:blank-vt-output
    ;; drawing, one frame at a time
    #:vt-output-frame-target
    #:make-vt-frame-hooks

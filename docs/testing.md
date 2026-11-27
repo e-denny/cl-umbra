@@ -61,7 +61,7 @@ The scripts go through `wayland.test.runner`, which names the eighteen suites in
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 451 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 459 tests ran.
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a
@@ -687,6 +687,17 @@ Phase 4's fifth slice is the VT, and it adds the twenty-fifth:
     flip but took a frame number, a sentinel that survived at (10,2150), and the CRTC's
     framebuffer, mode and descriptor count (`14 -> 14`) put back.
 
+    Eight more tests in the same suite are hotplug (D62): the key two polls compare changes for
+    a connector's status and for the monitor's modes and not otherwise, an unchanged card makes
+    no further kernel call and counts nothing, a pulled cable gives the screen back and keeps the
+    seat's descriptor open (one device, not none), a cable that stays out is not counted twice,
+    the cable coming back programs the screen again with an empty frame history and is not a
+    disable, a different monitor on the same connector is reprogrammed with its own mode, an
+    automatic connector follows the card to another socket, and a connector named on the command
+    line is waited for instead. What only a cable can answer is the §11 item, and it was
+    **walked 2026-11-27**: several pull/replace cycles in one session, the desktop back each time
+    with its windows, `cl-tinywl --drm` logging one line per transition.
+
 All twenty-five clauses pass. Two details worth knowing: the protocol clause
 compiles all 69 files into throwaway packages without loading them (duplicate interface
 versions across the corpus make loading unsafe, compiling is local), and the demo clause is
@@ -924,7 +935,13 @@ Preconditions the automated clauses cannot arrange for themselves:
       did not work at first -- libinput grabs the keyboard, so the compositor has to bind
       the sequence: D60)
 - [ ] VT switch away and back ×20
-- [ ] unplug/replug output ×10, with windows on it
+- [x] unplug/replug output, with windows on it (D62). **Walked 2026-11-27**: the cable was
+      pulled and replaced several times during one `cl-tinywl --drm` session and the desktop came
+      back up each time, windows intact. The screen is given back when the cable goes (the CRTC's
+      saved state comes back, so the console text shows through) while the card and the desktop
+      stay alive; the return programs the connector again and resizes the compositor. The log
+      lines (`tinywl: ... was unplugged`, `tinywl: ... is on again at WxH`) were not captured for
+      this walk -- a later soak should keep them
 - [ ] suspend/resume ×5
 - [ ] lid close/open (if laptop)
 - [ ] 8-hour soak with an animating client

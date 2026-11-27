@@ -3140,3 +3140,86 @@ history would answer with a full repaint rather than with a longer story); no da
 across an in-flight flip; the nested backend unchanged, as above. The lesson: **buffer age asks what
 changed on the screen, not what a buffer was made to repaint -- the two answers differ on exactly
 one frame, and that frame decides whether incremental rendering ever starts.**
+
+## D62 — The cable is asked about, not announced
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** output hotplug for the VT output (phase 4 exit gate, item 3)
+
+The kernel reports a cable change as a udev change event on the DRM device, and this project
+does not link udev: D4's list of C libraries is libseat, libinput, libxkbcommon, libdrm and
+libpixman, and the whole point of the list is that a compositor's dependencies are the ones
+that do work it cannot do itself. So hotplug had to be something else. What a card *is*
+willing to answer at any time, without master, is `GETRESOURCES` and `GETCONNECTOR` -- so
+"did a cable move?" becomes a question, asked once a second, whose answer is compared with the
+answer the card gave when the screen was last programmed.
+
+**Decision.**
+
+1. **Hotplug is a poll, and the poll is the backend's, not the compositor's.** `drm-hotplug-key`
+   reduces an enumeration to a value two calls compare with `EQUAL`: per connector its name, id,
+   status and a sorted signature of the modes it offers. The name and id say which socket it is,
+   the status says whether anything is plugged in, and the modes are the monitor's own claim
+   about itself -- so a different monitor on the same cable and the same connector never reports a
+   disconnect but is still a different key. `pump-vt-hotplug` takes the key and answers one of
+   `:unchanged`, `:unplugged`, `:replugged`, `:reprogrammed`, `:failed`, `:no-card`. It is one
+   question, not a loop: the compositor owns the clock (D59), and `cl-tinywl --drm` runs `advance`
+   with a one-second deadline.
+2. **A cable that goes gives the screen back and keeps the descriptor.** Disabling the output
+   (`disable-vt-output`) closes the seat's descriptor, because a VT switch revokes it anyway.
+   Here the descriptor is the only channel through which the question can be asked again, and
+   reopening it through logind every second would be a provider round trip per poll. So
+   `blank-vt-output` closes the *scanout* -- CRTC restored, buffers destroyed, frame history
+   forgotten (D61 decision 4) -- and leaves the device open. The output is then in a state that
+   has a name for the first time: `vt-output-screen-p` false while `vt-output-device` is not.
+   Nothing else in the compositor changes: `render-frame` already answers NIL when the preparer
+   has no target (the nested backend has the same state while its parent has not released a
+   buffer), so a desktop with no screen keeps running and draws nothing.
+3. **A connector named by a person is waited for; one the card chose follows the card.**
+   `open-vt-output`'s `:connector` argument is remembered as explicit or automatic. If an
+   explicit connector goes, the screen stays off until *that* socket returns, even if something
+   else is plugged in -- the compositor was asked for that screen. If the card chose, the output
+   follows the first connected connector, which is what `open-vt-output` would choose today, so
+   an unplug that moves the picture to another port keeps a picture.
+4. **A returning cable is revalidated, then reprogrammed.** A remembered mode is kept only while
+   the connector still offers it, so the same monitor returns to the same mode and a different
+   monitor gets its own preferred one. A connector that is no longer the remembered one forgets
+   the CRTC and mode with it. Programming again is `blank` then `enable`, in that order, because
+   `disable` would close the descriptor: the CRTC's saved state goes back before the new mode is
+   set, and the buffer history starts empty, so the first frame after a cable change is full.
+5. **A refusal is retried, not fatal, and a cable that is still out is not an event.** A failed
+   re-enable leaves the state for the next poll and answers `:failed`; `enable-vt-output` grows a
+   `:quiet-p` used by the seat's enable hook and by the poll, so "no connector this output may
+   program" is a state to sit in rather than an error raised inside a hook during a VT switch. A
+   fetch that finds nothing changed makes no kernel call beyond the enumeration and increments no
+   counter -- which matters for the eight-hour soak, where this runs 28,800 times.
+6. **One output, one screen; the rest is a later decision.** A second connector appearing while
+   this one is still connected changes no key this output cares about, so it is ignored: multi-head
+   is not this slice (D54's inventory already carries what it needs).
+
+**Evidence.** `tests/unit/drm-modeset.lisp` grows by 8 tests (suite 63), the whole suite goes from
+451 to **459 tests in eighteen suites** (`./scripts/run-tests.sh`, `PASSED`), `./scripts/gate.sh`
+stays **23 passed, 0 failed, 2 skipped**, `./scripts/tinywl-parity.sh` still passes 53 headless
+and 62 nested checks with descriptors `4 -> 4`, and `./scripts/check-loads.sh` still reports
+`purity: no libwayland or libwlroots in the image`. The tests drive the whole state machine on a
+recording card whose inventory can be swapped between polls: the key changes for a status and for
+a mode list and not otherwise; an unchanged card makes no call and counts nothing; a pulled cable
+gives the screen back, keeps the card open (the seat still counts one device), and is not counted
+twice while it stays out; the cable coming back programs the screen a second time with an empty
+frame history and does not count as a disable; a different monitor on the same connector is
+`:reprogrammed` at 1280x720 rather than at the 1024x768 it no longer offers; an automatic
+connector moves to the other socket, and a named one waits for its own. What the tests cannot do
+is pull a cable. That half was **walked on 2026-11-27**: the cable was pulled and replaced
+several times during one `cl-tinywl --drm` session on `card1`, and the desktop came back each
+time with its windows intact -- the console text appeared while it was out, which is the CRTC's
+saved state coming back, and the mode and compositor returned on the way in. The log lines were
+not captured for that walk; `cl-tinywl --drm` writes one `:info` line per transition, so a soak
+or a repeat walk can keep them.
+What this does not do: no udev, so a poll that is not being pumped detects nothing (a compositor
+that stops calling `advance` stops noticing); no multi-head, no MST, no link-training or DSC
+failure handling; no hotplug while the seat is disabled, because the descriptor is closed and
+there is nothing to ask until the VT comes back; the nested backend is untouched. The lesson:
+**a compositor that owns the screen owns the cable too, and the kernel will answer a question it
+cannot deliver -- the poll is not a workaround for udev, it is the same two ioctls udev's
+consumer would make.**

@@ -450,7 +450,10 @@ make the parity script meaningless."
    ;; that gives the screen back on the way out, which is the whole of 4d-3.
    (vt-output :initarg :vt-output :initform nil :reader session-vt-output)
    (seat :initarg :seat :initform nil :reader session-seat)
-   (input :initarg :input :initform nil :reader session-input))
+   (input :initarg :input :initform nil :reader session-input)
+   ;; When this session next asks the card about its cables, in INTERNAL-TIME units.
+   ;; Zero means "at the first opportunity" (D62).
+   (next-hotplug-poll :initform 0 :accessor session-next-hotplug-poll))
   (:documentation
    "A running tinywl: its compositor, and the backend behind it -- nested, or a VT."))
 
@@ -634,6 +637,57 @@ is why the interactive quit (Alt+Esc) and these three signals are the only ways 
                                  signal)
                 (cf:stop-compositor tinywl))))
 
+(defparameter +hotplug-interval+ 1
+  "Seconds between asks of the card about its cables (D62).
+
+A poll and not an event: the kernel reports a cable change through udev, and this
+project has no udev dependency (D4 names the libraries it uses, and udev is not one).
+What the card answers without master is GETRESOURCES plus one GETCONNECTOR per
+connector, and that -- once a second, per output -- is what hotplug detection costs
+here.")
+
+(defun pump-hotplug (session)
+  "When the clock says so, ask the card about its cable and repair the screen (D62).
+
+A compositor on a VT is the only thing that can notice a pulled cable: the seat knows
+about VT switches and about nothing else on the other side of HDMI.  So this is where
+the screen is given back with the card kept, where a returning cable is programmed
+and the compositor resized to its new mode, and where the frame that shows either is
+asked for -- before the display cycle, so it is this cycle's frame."
+  (let ((output (session-vt-output session)))
+    (when (and output
+               (>= (get-internal-real-time) (session-next-hotplug-poll session)))
+      (setf (session-next-hotplug-poll session)
+            (+ (get-internal-real-time)
+               (round (* +hotplug-interval+ internal-time-units-per-second))))
+      (handler-case
+          (case (vt:pump-vt-hotplug output)
+            (:unplugged
+             (srv:log-message :info
+                              "tinywl: ~A was unplugged; the screen is given back and the card kept"
+                              (or (vt:vt-output-connector-name output) "the connector"))
+             (cf:request-frame (session-compositor session)))
+            ((:replugged :reprogrammed)
+             (let* ((compositor (session-compositor session))
+                    (scale (cf:compositor-scale compositor))
+                    (width (max 1 (floor (vt:vt-output-width output) scale)))
+                    (height (max 1 (floor (vt:vt-output-height output) scale))))
+               (cf:resize-compositor compositor width height)
+               (cf:request-frame compositor)
+               (srv:log-message :info
+                                "tinywl: ~A is on again at ~Dx~D (~Dx~D layout, scale ~D)"
+                                (or (vt:vt-output-connector-name output) "the connector")
+                                (vt:vt-output-width output) (vt:vt-output-height output)
+                                width height scale)))
+            (:failed
+             (srv:log-message :warn
+                              "tinywl: the card refused the screen after a cable change; ~
+the next poll asks again"))
+            (otherwise nil))
+        (error (condition)
+          (srv:log-message :warn "tinywl: asking the card about its cable failed: ~A"
+                           condition))))))
+
 (defun advance (session &key (timeout 0.01))
   "Advance SESSION one cycle and return it.
 
@@ -650,6 +704,9 @@ own loop; `run' is the loop for a session on its own."
        ;; the provider has already taken away.
        (when seat
          (seat:dispatch-session seat :timeout 0))
+       ;; Then the cable, for the same reason: a screen given back or programmed by a
+       ;; hotplug is this cycle's frame, not the next one (D62).
+       (pump-hotplug session)
        (srv:run-once (cf:compositor-display (session-compositor session))
                      :timeout timeout))))
   session)

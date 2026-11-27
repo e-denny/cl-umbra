@@ -241,6 +241,17 @@ Four things are worth knowing about it.
   disable restores the CRTC, destroys the buffers, drops master and gives the descriptor back; an
   enable opens a descriptor, adopts it with `open-drm-device-from-fd` (no path is opened), and
   programs the *same* connector, CRTC and mode it programmed last time.
+* **The cable is asked about, not announced.** Nothing about a cable reaches a Lisp process
+  without udev, which this project does not link (D4, D62), so `pump-vt-hotplug` asks: an
+  enumeration -- `GETRESOURCES` and one `GETCONNECTOR` per connector, allowed without master -- is
+  reduced to a key per connector and compared with what the card said when the screen was last
+  programmed. A cable that goes gives the screen back and *keeps the descriptor*, because that
+  descriptor is the only way to ask whether it came back; `render-frame` already answers NIL with
+  no target, so the desktop keeps running and draws nothing. The cable returning programs the
+  connector again -- with the new monitor's own mode, if it is a different one -- and the
+  compositor is resized to it. A connector named on the command line is waited for; one the card
+  chose follows whatever is connected now. `cl-tinywl --drm` pumps this once a second from its own
+  loop, because the compositor owns the clock (D59).
 * **The seat closes what the seat opened.** Giving a descriptor back is
   `close-session-device`, and the DRM device is told its number is gone rather than closing it a
   second time: after a disable the provider already closed it, and a second `close(2)` on a
