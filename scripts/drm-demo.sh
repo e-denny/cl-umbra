@@ -12,6 +12,13 @@
 #   scripts/drm-demo.sh --card /dev/dri/card0 # a real card: set
 #                                             # CL_DRM_MODESET_ALLOW=1 too
 #
+#   CL_DRM_DEMO_TEAR=1 scripts/drm-demo.sh  the tear test: two flat greys painted once
+#                                           and flipped at vblank with nothing drawn in
+#                                           between, so a horizontal edge between them
+#                                           is a tear.  (The normal animation's sweep is
+#                                           a 1 Hz sawtooth: a bar at the left edge once
+#                                           a second is the animation, not a fault.)
+#
 # By default it will only take a virtual card (vkms), because taking a real one
 # takes the screen somebody is looking at.  Run it inside a text console, or with
 # vkms loaded (`sudo modprobe vkms'), and nothing visible is disturbed.

@@ -964,13 +964,18 @@ Preconditions the automated clauses cannot arrange for themselves:
       vblank and a band of lines lighter than their neighbours is our buffer bookkeeping, and
       the `ud` field says whether the flip we waited for was ours; a `wait` near zero is the
       kernel answering without a vblank, which no compositor bookkeeping can fix
-- [ ] the scanout without a compositor in the way (D67): `CL_DRM_MODESET_ALLOW=1
-      ./scripts/drm-demo.sh --card /dev/dri/card1 --frames 600` from the console, watching the
-      full-height band that sweeps once a second. The demo draws into the buffer the display is
-      not reading, flips and waits, with no scene, no client and no cursor -- so a band that
-      misaligns across a horizontal line is a tear in the dumb-buffer scanout path itself, and
-      a clean run moves the hover flicker back into what the compositor paints (`draw` against
-      `gap` in the frame log)
+- [ ] the scanout without a compositor in the way (D67), as a **tear test**:
+      `CL_DRM_MODESET_ALLOW=1 CL_DRM_DEMO_TEAR=1 ./scripts/drm-demo.sh --card /dev/dri/card1
+      --frames 600` from the console. Two flat greys (`#5A5A5A` and `#A5A5A5`) are painted once
+      into the two buffers and only flipped, so nothing but the scanout can put a feature on the
+      glass: a horizontal edge between the greys is a tear in the dumb-buffer flip path itself,
+      and a uniform field that only changes shade moves the hover flicker back into what the
+      compositor paints (`draw` against `gap` in the frame log). Flat fields, not halves: a
+      vertical boundary is ambiguous (a tear in it shows as a step, and two mirror pictures put
+      the boundary at the same x in both, inverting every flip -- which reads as a flashing line
+      down the middle and is the design). The animated demo is **not** this test:
+      its band sweeps once a second with a sawtooth, so a full-height bar at the left edge once
+      a second is the animation and not a fault
 - [ ] VT switch away and back ×20
 - [x] unplug/replug output, with windows on it (D62). **Walked 2026-11-27**: the cable was
       pulled and replaced several times during one `cl-tinywl --drm` session and the desktop came

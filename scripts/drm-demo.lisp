@@ -106,6 +106,20 @@ and not a default."
   ;; A progress bar along the bottom, so a run that stops early looks stopped.
   (cf.render.pixman:fill-rect target 8 (- height 12) (- width 16) 4 #xFF2A2A35))
 
+(defun draw-tear-frame (target frame width height)
+  "One of two flat pictures, for a tear test; FRAME is 0 or 1.
+
+Two flat greys and nothing else, because every other picture has a feature that a
+person can mistake for a seam.  A vertical boundary can only move horizontally, so a
+tear shows up in it as a step; a *flat* field has no feature at all, so the only thing
+that can appear on the screen is an edge between the two greys -- which is a tear, or
+a scanout that switched at a vblank.  Greys rather than black and white because a
+60 Hz alternation of white and black is a strobe, and this test asks somebody to look
+at it for ten seconds."
+  (declare (ignore width height))
+  (cf.render.pixman:fill-target target (if (zerop frame) #xFF5A5A5A #xFFA5A5A5))
+  target)
+
 (defun target-for (buffer)
   (cf.render.pixman:make-target-over-pointer
    (cf.backend.drm:dumb-buffer-mapping buffer)
@@ -134,6 +148,8 @@ and not a default."
   (let* ((path (demo-card))
          (frames (max 1 (environment-integer "CL_DRM_DEMO_FRAMES" 300)))
          (requested (split-mode (uiop:getenv "CL_DRM_DEMO_MODE")))
+         (tear-p (member (uiop:getenv "CL_DRM_DEMO_TEAR") '("1" "yes" "true")
+                         :test #'string-equal))
          (connector-name (uiop:getenv "CL_DRM_DEMO_CONNECTOR"))
          (device nil)
          (scanout nil)
@@ -180,15 +196,26 @@ and not a default."
              (setf targets (map 'list #'target-for (cf.backend.drm:drm-scanout-buffers scanout)))
              (let ((width (cf.backend.drm:drm-scanout-width scanout))
                    (height (cf.backend.drm:drm-scanout-height scanout)))
-               ;; Paint the frame the CRTC is already scanning before the loop, so
-               ;; the first flip has something new to show.
-               (draw-frame (first targets) 0 width height)
+               ;; Two buffers, two pictures, painted once: the tear test then only
+               ;; flips, so nothing but the scanout can put a seam on the glass.
+               (when tear-p
+                 (draw-tear-frame (first targets) 0 width height)
+                 (draw-tear-frame (second targets) 1 width height)
+                 (format t "~&drm-demo: tear test: two flat greys, ~D flips.  ~
+A horizontal edge between the greys is a tear; a uniform field that only changes
+shade is a scanout that switches at a vblank.~%" frames))
                (loop for frame below frames
-                     for buffer-index = (mod frame (length targets))
-                     for buffer = (cf.backend.drm:drm-scanout-buffer scanout buffer-index)
+                     ;; The buffer the display is NOT reading (D65).  Not FRAME mod
+                     ;; the count: at open the CRTC is programmed with buffer 0, so a
+                     ;; count from zero draws the first frame into the buffer being
+                     ;; scanned -- a tear on the first frame of every run.
+                     for buffer = (cf.backend.drm:drm-scanout-next-buffer scanout)
+                     for buffer-index = (position buffer
+                                                  (cf.backend.drm:drm-scanout-buffers scanout))
                      for started = (wayland.ffi:monotonic-seconds)
                      do (progn
-                          (draw-frame (nth buffer-index targets) frame width height)
+                          (unless tear-p
+                            (draw-frame (nth buffer-index targets) frame width height))
                           (let ((event (cf.backend.drm:drm-scanout-present scanout buffer)))
                             (push (- (wayland.ffi:monotonic-seconds) started) intervals)
                             (push (getf event :sequence) sequences))
