@@ -731,24 +731,30 @@ would tear."
                    (third box) (fourth box)))))
 
 (defun format-vt-frame-line (&key frame sequence buffer front-before front-after
-                                  damage change required flip kernel-sequence
-                                  user-data expected-user-data wait-ms gap-ms)
+                                  damage change required client flip kernel-sequence
+                                  user-data expected-user-data draw-ms wait-ms gap-ms)
   "One frame as one line; pure, so its shape is a test.
 
 FLIP is false for a frame that painted nothing and was not presented.  The two
 user-data numbers are the diagnostic: equal means the completion was this flip's,
-and a smaller one means the wait was satisfied by a flip that came before it."
+and a smaller one means the wait was satisfied by a flip that came before it.
+
+CLIENT is what the clients said they painted, which is not CHG: CHG also holds what
+the compositor inferred from a node moving or a buffer being swapped, and a client
+that damages nothing is an empty CLIENT and a whole window of CHG if it swapped
+buffers."
   (concatenate
    'string
-   (format nil "vt-frame f=~D seq=~D buf=~D front=~D->~D dmg=~A chg=~A req=~A"
+   (format nil "vt-frame f=~D seq=~D buf=~D front=~D->~D dmg=~A chg=~A cli=~A req=~A"
            frame sequence buffer front-before front-after
            (format-vt-frame-box damage) (format-vt-frame-box change)
-           (format-vt-frame-box required))
+           (format-vt-frame-box client) (format-vt-frame-box required))
    (if (null flip)
        " flip=none"
-       (format nil " flip=ud=~@[~D~]/~@[~D~] kseq=~@[~D~] wait=~,1Fms gap=~,1Fms"
+       (format nil " flip=ud=~@[~D~]/~@[~D~] kseq=~@[~D~] draw=~,1Fms wait=~,1Fms ~
+gap=~,1Fms"
                user-data expected-user-data kernel-sequence
-               (or wait-ms 0.0) (or gap-ms -1.0)))))
+               (or draw-ms 0.0) (or wait-ms 0.0) (or gap-ms -1.0)))))
 
 (defun write-vt-frame-line (stream line)
   "Write LINE and flush it: a log read while the compositor runs must be current."
@@ -841,6 +847,8 @@ paints no pixels (D50)."
                                     :full
                                     (render:region-bounds damage))
                         :change change-box
+                        :client (headless:compositor-client-damage compositor)
+                        :draw-ms (headless:compositor-draw-ms compositor)
                         :required (vt-output-current-required output)
                         :flip present-p
                         :kernel-sequence (and event (getf event :sequence))

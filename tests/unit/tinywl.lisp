@@ -574,3 +574,42 @@ connection would make this a gate rather than a test."
       (tinywl:close-frame-log session)
       (ok (open-stream-p *error-output*)
           "the error stream belongs to the process, not to the session"))))
+
+;;; ---------------------------------------------------------------------------
+;;; What a launched client is told (D66)
+;;; ---------------------------------------------------------------------------
+;;
+;; A socket name is a name *inside a directory*, and this compositor can be asked for
+;; a private directory (--runtime-dir: the tests, the probes, a nested session).  A
+;; child handed the session's XDG_RUNTIME_DIR looks for our socket where it is not and
+;; answers `cannot open display' -- which reads like a broken client and is a broken
+;; launcher.  It cost an hour of a flicker investigation to find, so it is pinned.
+
+(deftest a-launched-client-is-told-our-socket-and-our-runtime-directory
+  (let* ((directory (make-test-directory))
+         (result (format nil "~A/child-env.txt" directory)))
+    (unwind-protect
+         (let ((session (tinywl:start :mode :headless :width 200 :height 150
+                                      :display-name "launch-env-0"
+                                      :runtime-dir directory
+                                      :launch (list "/bin/sh" "-c"
+                                                    (format nil
+                                                            "printf '%s|%s' \"$WAYLAND_DISPLAY\" \"$XDG_RUNTIME_DIR\" > ~A"
+                                                            result)))))
+           (unwind-protect
+                (progn
+                  ;; The child writes the file and exits; the file is the evidence.
+                  (loop repeat 200
+                        until (uiop:file-exists-p result)
+                        do (tinywl:advance session :timeout 0.01))
+                  (ok (uiop:file-exists-p result) "the client was started")
+                  (let ((seen (and (uiop:file-exists-p result)
+                                   (string-trim '(#\Newline #\Space)
+                                                (uiop:read-file-string result)))))
+                    (ok (equal "launch-env-0" (first (uiop:split-string seen :separator "|")))
+                        (format nil "it was told our socket name (~S)" seen))
+                    (ok (equal (string-right-trim "/" (namestring (pathname directory)))
+                               (string-right-trim "/" (second (uiop:split-string seen :separator "|"))))
+                        (format nil "and our own runtime directory (~S)" seen))))
+             (tinywl:stop session)))
+      (ignore-errors (uiop:delete-directory-tree (pathname directory) :validate t)))))

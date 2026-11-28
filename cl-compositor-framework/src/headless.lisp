@@ -78,6 +78,17 @@ SLOT-VALUE shows a different one."))
    ;; before the next frame (D61).
    (frame-change :initform :full :accessor compositor-frame-change)
    (frame-change-region :initform nil :accessor compositor-frame-change-region)
+   ;; What the *clients* said they repainted this frame, with none of the compositor's
+   ;; own geometry inference: the number that tells "the client repainted a band"
+   ;; from "the client swapped buffers and we inferred the whole window" (D66).  :full
+   ;; is only ever the compositor's answer, never a client's, so a client that damages
+   ;; nothing is an empty box and not a guess.
+   (client-damage :initform nil :accessor compositor-client-damage)
+   (client-damage-region :initform nil :accessor compositor-client-damage-region)
+   ;; How long the last frame's pixels took to draw, in milliseconds: the number that
+   ;; tells a backend painting too much from a client repainting too often.  The flip
+   ;; wait is the backend's own, so it is measured there and not here (D66).
+   (draw-ms :initform 0.0 :accessor compositor-draw-ms)
    ;; How many frames repainted less than the whole output, and the bounding box of
    ;; the last frame's damage (:full or (X Y WIDTH HEIGHT)): evidence a gate can
    ;; read instead of inferring it from timing.
@@ -1235,6 +1246,19 @@ repaints everything, and the frame after that goes back to damage (D48)."
   (mark-dirty compositor)
   compositor)
 
+(defun client-reported-damage (items into)
+  "Union into INTO the damage ITEMS carry: what the clients said they painted.
+
+ITEMS is a draw list (SCENE-DRAW-LIST), and this is the *only* honest answer to "what
+did the clients repaint" -- the compositor's change region also contains rectangles it
+inferred from a node moving or a buffer being swapped, and a backend that mistakes
+those for paint has to repaint pixels nobody touched (D66)."
+  (render:region-clear into)
+  (dolist (item items)
+    (dolist (rect (scene:draw-item-damage item))
+      (render:region-add-box into rect)))
+  into)
+
 (defun frame-damage (compositor items required)
   "The device region this frame has to repaint, or :FULL.
 
@@ -1251,6 +1275,15 @@ property of that buffer.  A backend that keeps per-buffer damage history records
 former; recording the latter would make every following frame full after a buffer's
 first paint (D61)."
   (let ((previous (compositor-last-items compositor)))
+    ;; Recorded first, for every path below: the clients' own damage is a fact about
+    ;; this frame whatever the compositor then has to repaint because of it.
+    (setf (compositor-client-damage compositor)
+          (render:region-bounds
+           (client-reported-damage
+            items
+            (or (compositor-client-damage-region compositor)
+                (setf (compositor-client-damage-region compositor)
+                      (render:make-region))))))
     (cond
       ((not (compositor-frame-history-p compositor))
        (setf (compositor-frame-change compositor) :full)
@@ -1333,18 +1366,21 @@ because those are answers to clients, not to pixels (D48)."
              (full (eq damage :full))
              (empty (and (not full) (render:region-empty-p damage)))
              (drawn '()))
-        (unless empty
-          (when (not full)
-            (render:target-set-clip target damage))
-          (render:fill-target target (compositor-background compositor))
-          (render:target-clear-clip target))
-        ;; Even an empty frame walks the items: no pixel is touched, but every
-        ;; mapped surface comes back in DRAWN, so its buffer is released and its
-        ;; frame callback fires.  A client that asks for a frame without damaging
-        ;; anything is waiting for exactly that, and a nested backend needs it to
-        ;; give back the parent buffer it was holding (D25, D48).
-        (setf drawn (scene:scene-render-items scene target :items items
-                                                    :damage (unless full damage)))
+        (let ((draw-start (ffi:monotonic-seconds)))
+          (unless empty
+            (when (not full)
+              (render:target-set-clip target damage))
+            (render:fill-target target (compositor-background compositor))
+            (render:target-clear-clip target))
+          ;; Even an empty frame walks the items: no pixel is touched, but every
+          ;; mapped surface comes back in DRAWN, so its buffer is released and its
+          ;; frame callback fires.  A client that asks for a frame without damaging
+          ;; anything is waiting for exactly that, and a nested backend needs it to
+          ;; give back the parent buffer it was holding (D25, D48).
+          (setf drawn (scene:scene-render-items scene target :items items
+                                                      :damage (unless full damage)))
+          (setf (compositor-draw-ms compositor)
+                (* 1000 (- (ffi:monotonic-seconds) draw-start))))
         ;; The pixels are in the target now, so this is the first moment at which
         ;; presenting them is truthful.  Presenting first was a real bug, not a
         ;; style choice: see this function's docstring.  An empty frame is still

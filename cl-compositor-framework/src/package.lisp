@@ -189,6 +189,8 @@ nothing about seats, toplevels or focus.")
    #:draw-item-y
    #:draw-item-width
    #:draw-item-height
+   ;; the content damage a client reported for this frame's item, in device pixels
+   #:draw-item-damage
    ;; nodes
    #:scene-node
    #:node-parent
@@ -697,6 +699,7 @@ tests drive; the context and the event pointers are the C half.")
                     (#:grab #:cf.grab)
                     (#:kb #:cf.keybindings)
                     (#:srv #:wayland.server)
+                    (#:ffi #:wayland.ffi)
                     (#:reactor #:wayland.reactor))
   (:import-from #:wayland
                 #:wl-surface.enter
@@ -727,6 +730,8 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:invalidate-output
    #:output-damage-bounds
    #:compositor-frame-change
+   #:compositor-client-damage
+   #:compositor-draw-ms
    #:compositor-partial-frame-count
    #:frame-pixel-device
    #:frame-octets
@@ -970,6 +975,8 @@ that, so a compositor chooses it by binding START-SWITCHER.")
                 #:invalidate-output
                 #:output-damage-bounds
                 #:compositor-frame-change
+                #:compositor-client-damage
+                #:compositor-draw-ms
                 #:compositor-partial-frame-count
                 #:frame-pixel-device
                 #:frame-octets
@@ -1103,6 +1110,8 @@ docs/framework.md §1 follow.")
    #:invalidate-output
    #:output-damage-bounds
    #:compositor-frame-change
+   #:compositor-client-damage
+   #:compositor-draw-ms
    #:compositor-partial-frame-count
    #:frame-pixel-device
    #:frame-octets

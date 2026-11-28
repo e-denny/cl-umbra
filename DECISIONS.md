@@ -3553,3 +3553,75 @@ The lesson: **an instrument that names the candidate causes is worth more than a
 that names one.** Every field in that line exists because a different bug would leave a
 different fingerprint, and the log was designed before the flicker was explained rather
 than after.
+
+## D67 — The log answered its question, and the answer is where the pixels go
+
+**Date:** 2026-11-28
+**Status:** accepted
+**Slice:** the frame log's second and third fields, the launcher's environment, and what the first hover run proved
+
+D66 shipped the log and said which field would settle what. The first run came from a real
+hover on the VT: 396 frames, 25.1 s of flip time, and a report that the flicker comes with
+"some lines briefly showing lighter than others -- like maybe a tear". Four invariants were
+computed over that file, and all four are clean: every flip's completion carried the user-data
+of the flip that was queued (396/396), every flip went to the buffer that was drawn (396/396),
+the merged damage always contained the frame's change (396/396), and every buffer owed at least
+the change of the frame it had missed (394/394). Waits ran 6.8 ms (p5) to 17.7 ms (max) around
+a 14.6 ms median, which is what a flip retired at a vblank looks like when it is queued at
+arbitrary moments. So the arithmetic, the buffer choice and the wait are not the defect.
+
+**Decision.**
+
+1. **Two more fields, because two more questions were unanswerable.** `cli` is the damage the
+   *clients* reported, with none of the compositor's own inference, and `draw` is how long the
+   frame's pixels took in milliseconds. The first separates "the client repainted a band" from
+   "the client swapped buffers and we inferred the window"; the second separates a backend
+   painting too much from a client repainting too often. Both are recorded on the compositor
+   (a backend cannot know them) and only formatted by the VT backend.
+2. **The launcher hands a client its own runtime directory.** `launch` set `WAYLAND_DISPLAY`
+   and left `XDG_RUNTIME_DIR` alone, so a session started with `--runtime-dir` gave its
+   children a socket *name* to look for in somebody else's directory: the client answered
+   "cannot open display" and the failure read as a broken client. The socket's own directory is
+   the one to export. This is not a flicker finding; it is what stopped the probe that was
+   measuring the flicker, and it would stop any user of `--runtime-dir` who asked for a client.
+3. **The pointer is pinned where only a VT can break it.** The nested path never composites the
+   arrow -- the parent does -- so "the arrow survives a band repainted under it, on both
+   buffers" is a test only the VT path can fail. It passes, which retires the cursor as a
+   candidate.
+4. **The remaining question is stated as a question, with the experiment named.** Nothing in
+   this project's software can see what the display controller puts on the screen. The VT path
+   is the only one where a dumb buffer is scanned out, the only one where our pixels reach the
+   display without another compositor's copy, the only one that flips and waits, and (with the
+   nested path) the only one that draws the pointer -- so "nested is clean" bounds the suspect
+   to the scanout and says nothing about whether the arithmetic in front of it is right.
+   `scripts/drm-demo.sh` runs that scanout with no compositor, no client and no cursor, and
+   animates a full-height sweeping band: a band that misaligns across a horizontal line is the
+   tear, and a clean run moves the question back into what we paint, where `draw` against `gap`
+   decides it.
+
+**Evidence.** 396 frames from the first hover run on `card1`: four invariants at 396/396,
+396/396, 396/396 and 394/394; `wait` p5 6.8, median 14.6, p95 16.6, max 17.7 ms; `gap` median
+16.7 ms (60 Hz) with 345 of 395 gaps at or under 20 ms; 254 band changes (median 957 px of
+change) and 130 whole-window changes, 124 of them over a megapixel. A headless Emacs over the
+same code, 2188 frames, showed the client's own answer: one shm buffer for the whole run
+(format 0, ARGB8888, stride 3188 -- it never swaps), a 44x34 band for a tool-bar hover and
+`26 125 745 711` for a text-area one, so the whole-window repaints in the VT log are the
+client's damage and the buffer-identity term damages nothing for Emacs at all. The suite goes
+from 492 to **495 tests in nineteen suites** (`./scripts/run-tests.sh`, PASSED): two in
+`wayland.test.drm-modeset` for the arrow under a band, one in `wayland.test.tinywl` for the
+launched client's environment (it prints `WAYLAND_DISPLAY|XDG_RUNTIME_DIR` and the test reads
+it). `./scripts/gate.sh` stays 23 passed, 0 failed, 2 skipped; `./scripts/tinywl-parity.sh`
+passes 53 headless and 62 nested checks with descriptors `4 -> 4`; `./scripts/check-loads.sh`
+is still pure.
+
+What this does not do: it does not explain the flicker. It shows that the compositor's
+bookkeeping, buffer choice, flip targeting and cursor compositing are not it, and it leaves one
+measurement unrun -- `scripts/drm-demo.sh` on the real card, which needs the console. The log
+still cannot see the screen; a driver that retires a flip event before the display has stopped
+reading the old buffer would look exactly like this from inside. The 8-hour soak is still
+outstanding, and so is the small-window run that would separate cost from composition.
+
+The lesson: a log that was designed before the explanation was known turned "there is a bug
+somewhere in the VT path" into three excluded candidates and one named experiment -- and the
+field that would have been easiest to leave out (`cli`, the clients' own answer) is the one that
+showed the whole-window repaints were never ours to begin with.

@@ -325,22 +325,32 @@ special variable, and the running image is this compositor's control surface (D1
 (defun launch (tinywl &key (command *terminal-command*))
   "Start COMMAND as a client of THIS compositor's own display.
 
-The child inherits our environment with one thing changed: WAYLAND_DISPLAY is our
+The child inherits our environment with two things changed: WAYLAND_DISPLAY is our
 socket, because in a nested session the environment names the parent and a client
-started against the parent would appear outside the window it was asked for.  The
-exec goes through /bin/sh so HOME, PATH, TERM and the locale survive -- passing
-:environment to RUN-PROGRAM would replace all of it, and a terminal with no HOME is
-a terminal that cannot read its own config."
+started against the parent would appear outside the window it was asked for; and
+XDG_RUNTIME_DIR is that socket's own directory, because a socket name is a name
+inside a directory and this compositor can be asked for a private one (--runtime-dir,
+as the tests and probes do).  A child given the session's runtime directory looks for
+`tinywl-1' where it does not exist and answers `cannot open display', which reads like
+a broken client and is a broken launcher.  The exec goes through /bin/sh so HOME, PATH,
+TERM and the locale survive -- passing :environment to RUN-PROGRAM would replace all of
+it, and a terminal with no HOME is a terminal that cannot read its own config."
   (let* ((display (cf:compositor-display tinywl))
          (socket (srv:display-socket-path display))
-         (name (pathname-name (pathname socket)))
+         (path (pathname socket))
+         (name (pathname-name path))
+         (runtime-dir (namestring (uiop:pathname-directory-pathname path)))
          (process
            (handler-case
                (sb-ext:run-program
                 "/bin/sh"
                 (append (list "-c"
-                              "WAYLAND_DISPLAY=$1; export WAYLAND_DISPLAY; shift; exec \"$@\""
-                              "tinywl-launch" name)
+                              (concatenate
+                               'string
+                               "WAYLAND_DISPLAY=$1; export WAYLAND_DISPLAY;"
+                               " XDG_RUNTIME_DIR=$2; export XDG_RUNTIME_DIR;"
+                               " shift 2; exec \"$@\"")
+                              "tinywl-launch" name runtime-dir)
                         command)
                 ;; The child's diagnostics come back to whoever is watching this
                 ;; compositor: a launcher that swallows "cannot connect" is a

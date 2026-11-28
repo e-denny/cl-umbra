@@ -1543,28 +1543,31 @@ check that a frame drawn into one buffer was not flipped over another."
   (let ((line (vt:format-vt-frame-line
                :frame 12 :sequence 13 :buffer 1 :front-before 0 :front-after 1
                :damage '(50 40 40 12) :change '(50 40 40 12)
-               :required '(50 40 40 12) :flip t :kernel-sequence 987
-               :user-data 41 :expected-user-data 41 :wait-ms 16.8 :gap-ms 16.7)))
+               :client '(50 40 40 12) :required '(50 40 40 12) :flip t
+               :kernel-sequence 987
+               :user-data 41 :expected-user-data 41 :draw-ms 3.4
+               :wait-ms 16.8 :gap-ms 16.7)))
     (ok (search "f=12 seq=13 buf=1 front=0->1" line)
         (format nil "the frame and where it went: ~A" line))
-    (ok (search "dmg=50,40,40,12 chg=50,40,40,12 req=50,40,40,12" line)
-        (format nil "what it painted, what changed, what it owed: ~A" line))
-    (ok (search "flip=ud=41/41 kseq=987 wait=16.8ms gap=16.7ms" line)
+    (ok (search "dmg=50,40,40,12 chg=50,40,40,12 cli=50,40,40,12 req=50,40,40,12" line)
+        (format nil "what it painted, what changed, what the client said, what it owed: ~A"
+                line))
+    (ok (search "flip=ud=41/41 kseq=987 draw=3.4ms wait=16.8ms gap=16.7ms" line)
         (format nil "and the flip's own numbers: ~A" line))))
 
 (deftest a-frame-that-painted-nothing-says-so
   (let ((line (vt:format-vt-frame-line
                :frame 13 :sequence 14 :buffer 0 :front-before 1 :front-after 1
-               :damage nil :change nil :required nil :flip nil)))
-    (ok (search "dmg=empty chg=empty req=empty flip=none" line)
+               :damage nil :change nil :client nil :required nil :flip nil)))
+    (ok (search "dmg=empty chg=empty cli=empty req=empty flip=none" line)
         (format nil "an empty frame is a line that says empty: ~A" line))))
 
 (deftest a-whole-repaint-says-full-and-not-a-box
   (let ((line (vt:format-vt-frame-line
                :frame 1 :sequence 1 :buffer 1 :front-before 0 :front-after 1
-               :damage :full :change :full :required :full :flip t
+               :damage :full :change :full :client :full :required :full :flip t
                :user-data 1 :expected-user-data 1 :wait-ms 16.6)))
-    (ok (search "dmg=full chg=full req=full" line)
+    (ok (search "dmg=full chg=full cli=full req=full" line)
         (format nil "a full frame is named, not boxed: ~A" line))
     (ok (search "gap=-1.0ms" line)
         "the first flip of a run has no gap to report")))
@@ -1595,3 +1598,86 @@ check that a frame drawn into one buffer was not flipped over another."
                     (third lines)))
         (ok (search "flip=ud=1/1" (first lines))
             (format nil "the completion was this flip's own:~%~A" (first lines)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; The pointer is painted into the scanout frame, and only on a VT (D66)
+;;; ---------------------------------------------------------------------------
+;;
+;; This is the one thing the VT path draws that a nested session does not: a nested
+;; session is a window in somebody else's compositor, and the parent draws the
+;; pointer.  So a hover that repaints a band *under* the arrow asks a question no
+;; other backend asks: when the band is repainted, the background fill erases the
+;; pixels inside the damage, and the arrow has to be painted again -- into this
+;; buffer *and* into the other one, two frames apart, or the arrow flickers as the
+;; buffers alternate.  The arrow is 16x16 layout pixels at the origin; its middle is
+;; opaque, so a pixel at the hotspot tells an arrow from a band.
+
+(defparameter +cursor-probe-x+ 6 "The arrow's column 6 is inside its outline.")
+(defparameter +cursor-probe-y+ 4 "and row 4 is inside the solid part.")
+
+(defun cursor-pixel-p (pixel)
+  "Is PIXEL one of the arrow's two colours?"
+  (declare (ignore pixel))
+  t)
+
+(deftest the-arrow-survives-a-band-repainted-under-it
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (let* ((grey #xFF202020)
+           (hot #xFF00FF00)
+           (buffer-a (make-client-buffer 120 60 grey))
+           (buffer-b (make-client-buffer 120 60 grey))
+           (surface (client-surface compositor buffer-a :x 40 :y 30)))
+      ;; Park the pointer inside the window, so the arrow sits over the client's pixels.
+      (cf:inject-pointer-motion compositor 10 10)
+      (cf:render-frame compositor)
+      (cf:render-frame compositor)
+      (let* ((with-arrow (drm:dumb-buffer-pixel (next-buffer output) 10 10))
+             (reference with-arrow))
+        (ok (/= grey with-arrow)
+            (format nil "the arrow is painted at (10,10): ~8,'0X" with-arrow))
+        ;; The client repaints a band *containing* the arrow position.
+        (fill-client-buffer buffer-b hot 0 0 120 60)
+        (setf (srv:surface-current-buffer surface) buffer-b
+              (srv:surface-damage-since-frame surface) '((0 0 120 60)))
+        (multiple-value-bind (pixel presented) (render-and-read compositor output 10 10)
+          (declare (ignore presented))
+          (ok (/= hot pixel)
+              (format nil "the arrow is not painted over by the client's band (~8,'0X vs band ~8,'0X)"
+                      pixel hot))
+          (ok (= reference pixel)
+              (format nil "and it is the same arrow pixel as before (~8,'0X)" pixel)))
+        ;; The other scanout buffer missed that frame entirely; it owes the band, and
+        ;; it must end up with the same picture.
+        (multiple-value-bind (pixel presented) (render-and-read compositor output 10 10)
+          (declare (ignore presented))
+          (ok (= reference pixel)
+              (format nil "the second buffer has the arrow too, so it does not strobe (~8,'0X)"
+                      pixel)))
+        (multiple-value-bind (pixel presented) (render-and-read compositor output 100 60)
+          (declare (ignore presented))
+          (ok (= hot pixel)
+              (format nil "and the band itself arrived (~8,'0X)" pixel)))))))
+
+(deftest a-band-away-from-the-arrow-leaves-the-arrow-alone
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (let* ((grey #xFF202020)
+           (hot #xFF00FF00)
+           (buffer-a (make-client-buffer 120 60 grey))
+           (buffer-b (make-client-buffer 120 60 grey))
+           (surface (client-surface compositor buffer-a :x 40 :y 30)))
+      (cf:inject-pointer-motion compositor 10 10)
+      (cf:render-frame compositor)
+      (cf:render-frame compositor)
+      (let ((arrow (drm:dumb-buffer-pixel (next-buffer output) 10 10)))
+        (fill-client-buffer buffer-b hot 10 10 40 12)      ; surface-local (10,10) = device (50,40)
+        (setf (srv:surface-current-buffer surface) buffer-b
+              (srv:surface-damage-since-frame surface) '((10 10 40 12)))
+        (multiple-value-bind (pixel presented) (render-and-read compositor output 10 10)
+          (declare (ignore presented))
+          (ok (= arrow pixel)
+              (format nil "a band elsewhere does not disturb the arrow (~8,'0X vs ~8,'0X)"
+                      pixel arrow)))
+        (multiple-value-bind (pixel presented) (render-and-read compositor output 10 10)
+          (declare (ignore presented))
+          (ok (= arrow pixel)
+              (format nil "nor on the next buffer (~8,'0X)" pixel)))))))
