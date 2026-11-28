@@ -61,7 +61,7 @@ The scripts go through `wayland.test.runner`, which names the nineteen suites in
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 482 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 492 tests ran.
 
 `wayland.test.data-device` is the newest suite and the reason it exists is worth a sentence:
 GDK binds `wl_seat` only after it has seen `wl_compositor` **and** `wl_data_device_manager`
@@ -549,7 +549,7 @@ Phase 4's second half adds the twenty-second:
     `SET MASTER` (it is a privileged ioctl, so the clause wants root), and `EBUSY` because
     another master owns the card. The last one is not hypothetical: on this machine, loading
     vkms made the live compositor claim the card, and the clause refused it -- which is the
-    behaviour the skip exists for. Thirty-eight unit tests (`tests/unit/drm-modeset.lisp`,
+    behaviour the skip exists for. Seventy-five unit tests (`tests/unit/drm-modeset.lisp`,
     suite 15) pin what a card cannot isolate: a mode written into the ABI struct and read back
     field for field, the event parser (several events per read, a partial record, an unknown
     kind, a corrupt length), the scanout's order of operations on a recording device
@@ -955,6 +955,14 @@ Preconditions the automated clauses cannot arrange for themselves:
       `cl-tinywl`, `Ctrl+Alt+F2` back to it, window still open. **Walked 2026-11-27** (it
       did not work at first -- libinput grabs the keyboard, so the compositor has to bind
       the sequence: D60)
+- [ ] the hover flicker D64's walk reported (D64, D66). `TINYWL_FRAME_LOG=/tmp/frames.log
+      ./scripts/tinywl.sh --drm --card /dev/dri/card1 --launch emacs`, then hover over an org
+      link and a tabline item for ten seconds, then read the log. The line per frame
+      (`vt-frame f=… buf=… front=A->B dmg=… chg=… req=… flip=ud=…/… wait=…ms gap=…ms`) is read
+      against the mode's period (`drm-mode-refresh-milli-hz`, 16.7 ms at 60 Hz): a `wait` at a
+      vblank and a band of lines lighter than their neighbours is our buffer bookkeeping, and
+      the `ud` field says whether the flip we waited for was ours; a `wait` near zero is the
+      kernel answering without a vblank, which no compositor bookkeeping can fix
 - [ ] VT switch away and back ×20
 - [x] unplug/replug output, with windows on it (D62). **Walked 2026-11-27**: the cable was
       pulled and replaced several times during one `cl-tinywl --drm` session and the desktop came

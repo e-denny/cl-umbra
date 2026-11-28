@@ -459,6 +459,9 @@ make the parity script meaningless."
    ;; default, because a normal run's log should be quiet (TINYWL_STATS_INTERVAL).
    (stats-interval :initarg :stats-interval :initform 0 :reader session-stats-interval)
    (next-stats :initform 0 :accessor session-next-stats)
+   ;; The stream a VT session writes one line per frame to, or NIL (TINYWL_FRAME_LOG).
+   ;; It belongs to the session so that stopping closes it.
+   (frame-log :initarg :frame-log :initform nil :reader session-frame-log)
    (started-at :initarg :started-at :initform 0 :reader session-started-at))
   (:documentation
    "A running tinywl: its compositor, and the backend behind it -- nested, or a VT."))
@@ -566,7 +569,8 @@ compositor that already owns the screen"
                           condition))))
          (output nil)
          (input nil)
-         (tinywl nil))
+         (tinywl nil)
+         (frame-log (frame-log-stream-from-environment)))
     (handler-case
         (progn
           (setf output (vt:open-vt-output seat :path card :connector connector
@@ -593,7 +597,8 @@ needs a seat that is usable now, which is what dispatch inside OPEN-SESSION is f
                                :display-name (or display-name "tinywl-1")
                                :runtime-dir (or runtime-dir
                                                 (uiop:getenv "XDG_RUNTIME_DIR"))))
-            (multiple-value-bind (preparer presenter) (vt:make-vt-frame-hooks output)
+            (multiple-value-bind (preparer presenter)
+                (vt:make-vt-frame-hooks output :frame-log frame-log)
               (setf (headless:compositor-frame-preparer tinywl) preparer
                     (headless:compositor-frame-presenter tinywl) presenter))
             ;; A VT switch back is a screen that must be redrawn, and the seat's
@@ -623,12 +628,15 @@ needs a seat that is usable now, which is what dispatch inside OPEN-SESSION is f
           (when launch (launch tinywl :command launch))
           (make-instance 'session :mode :drm :compositor tinywl
                                   :vt-output output :seat seat :input input
+                                  :frame-log frame-log
                                   :stats-interval stats-interval
                                   :started-at (get-internal-real-time)))
       (error (condition)
         ;; A half-started VT session holds the screen: give it back before the error
         ;; reaches the person who typed the command.
         (when output (ignore-errors (vt:close-vt-output output)))
+        (when (and frame-log (not (eq frame-log *error-output*)))
+          (ignore-errors (close frame-log)))
         (ignore-errors (seat:close-session seat))
         (error condition)))))
 
@@ -714,6 +722,37 @@ the next poll asks again"))
   "TINYWL_STATS_INTERVAL seconds, or 0 for a quiet log (the default)."
   (or (ignore-errors (parse-integer (uiop:getenv "TINYWL_STATS_INTERVAL")))
       0))
+
+;;; ---------------------------------------------------------------------------
+;;; One line per frame, for a flicker nobody can photograph
+;;; ---------------------------------------------------------------------------
+;;
+;; The VT presenter can write a line per frame (CF.BACKEND.VT's FORMAT-VT-FRAME-LINE),
+;; and this is how a person turns it on: TINYWL_FRAME_LOG=/tmp/frames.log, or 1 for
+;; stderr so the lines land between the compositor's own log lines in one pipe.
+;; Off is the default, because a log a normal run does not need is a log whose
+;; absence a normal run cannot notice.
+
+(defun frame-log-stream-from-environment ()
+  "The stream TINYWL_FRAME_LOG names, or NIL.
+
+A path opens a file (truncated, so a log is this run's); 1, -, or stderr mean the
+process's error stream, which is where a redirected run's log already goes."
+  (let ((named (uiop:getenv "TINYWL_FRAME_LOG")))
+    (cond
+      ((or (null named) (string= named "")) nil)
+      ((member named '("1" "-" "stderr") :test #'string-equal) *error-output*)
+      (t (handler-case
+             (open named :direction :output :if-exists :supersede
+                       :if-does-not-exist :create)
+           (error (condition)
+             (error "TINYWL_FRAME_LOG=~A cannot be written (~A)" named condition)))))))
+
+(defun close-frame-log (session)
+  "Close the frame log if this session opened one; returns nothing."
+  (let ((log (session-frame-log session)))
+    (when (and log (not (eq log *error-output*)))
+      (ignore-errors (close log)))))
 
 (defun self-rss-kb ()
   "This process's resident set size in kilobytes, from /proc/self/status; 0 if unreadable."
@@ -893,6 +932,7 @@ both a signal handler and the caller's UNWIND-PROTECT can reach this."
       (ignore-errors (cf:stop-input input)))
     (when vt-output
       (ignore-errors (vt:close-vt-output vt-output)))
+    (close-frame-log session)
     (when seat
       (ignore-errors (seat:close-session seat)))
     (cond

@@ -509,3 +509,68 @@ connection would make this a gate rather than a test."
       (ok (member "wl_data_device_manager" names :test #'string=)
           (format nil "the data device manager is published beside the seat (~S)"
                   names)))))
+
+;;; ---------------------------------------------------------------------------
+;;; The frame log (TINYWL_FRAME_LOG, D66)
+;;; ---------------------------------------------------------------------------
+;;
+;; The log is read from a console the agent cannot sit at, so the wiring between the
+;; variable and the stream has to be provable from here: a typo in that path would be
+;; discovered as an empty file after a trip to the VT, which is the most expensive
+;; possible way to find it.
+
+(defmacro with-frame-log-variable ((value) &body body)
+  "Run BODY with TINYWL_FRAME_LOG set to VALUE (NIL unsets it), then restore it."
+  (let ((previous (gensym "PREVIOUS")))
+    `(let ((,previous (uiop:getenv "TINYWL_FRAME_LOG")))
+       (unwind-protect
+            (progn
+              #+sbcl (if ,value
+                         (sb-posix:setenv "TINYWL_FRAME_LOG" ,value 1)
+                         (sb-posix:unsetenv "TINYWL_FRAME_LOG"))
+              #-sbcl (if ,value
+                         (setf (uiop:getenv "TINYWL_FRAME_LOG") ,value)
+                         (setf (uiop:getenv "TINYWL_FRAME_LOG") nil))
+              ,@body)
+         #+sbcl (if ,previous
+                    (sb-posix:setenv "TINYWL_FRAME_LOG" ,previous 1)
+                    (sb-posix:unsetenv "TINYWL_FRAME_LOG"))
+         #-sbcl (setf (uiop:getenv "TINYWL_FRAME_LOG") ,previous)))))
+
+(deftest no-frame-log-variable-means-no-log
+  (with-frame-log-variable (nil)
+    (ok (null (tinywl:frame-log-stream-from-environment))
+        "the default is a quiet run, not a file somewhere")))
+
+(deftest frame-log-1-is-the-error-stream
+  (with-frame-log-variable ("1")
+    (ok (eq *error-output* (tinywl:frame-log-stream-from-environment))
+        "1 means the stream a redirected run already writes to")))
+
+(deftest frame-log-a-path-is-a-file-that-says-what-was-written
+  (let ((path (format nil "/tmp/cl-wayland-frame-log-test-~D.log" (get-universal-time))))
+    (unwind-protect
+         (with-frame-log-variable (path)
+           (let ((stream (tinywl:frame-log-stream-from-environment)))
+             (unwind-protect
+                  (progn
+                    (ok stream "a path gives a stream")
+                    (write-line "vt-frame f=1 flip=none" stream)
+                    (finish-output stream))
+               (close stream)))
+           (ok (uiop:file-exists-p path) "and the file it names exists")
+           (let ((first-line (with-open-file (in path :direction :input)
+                               (read-line in nil nil))))
+             (ok (equal "vt-frame f=1 flip=none" first-line)
+                 (format nil "with the line in it: ~S" first-line))))
+      (ignore-errors (delete-file path)))))
+
+(deftest closing-a-session-frame-log-leaves-the-error-stream-open
+  (with-frame-log-variable ("1")
+    (let ((session (make-instance 'tinywl::session
+                                  :mode :drm
+                                  :compositor nil
+                                  :frame-log (tinywl:frame-log-stream-from-environment))))
+      (tinywl:close-frame-log session)
+      (ok (open-stream-p *error-output*)
+          "the error stream belongs to the process, not to the session"))))

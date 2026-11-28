@@ -3476,3 +3476,80 @@ are (still two) or when a flip is issued (still only when the merged damage is n
 The lesson: **a counter is a poor answer to a question about the screen. `frames mod 2`
 described our bookkeeping; `the buffer front is not` describes the display, and it is true
 at the moment the CRTC is first programmed, when no frame has been counted at all.**
+
+## D66 — A flip is awaited by the flip it queued, and every frame says what it did
+
+**Date:** 2026-11-28
+**Status:** accepted
+**Slice:** the instrument for D64's flicker report, plus the await it needed to be honest
+
+D65 fixed a tear nobody had seen and said plainly that it did not explain the hover
+flicker. The report got sharper: the flicker is *accompanied by some lines briefly
+showing lighter than others*, which is a band of the screen coming from a frame other
+than the one on display — a tear's signature, not a strobe of one box. Two things
+follow from that, and neither is a theory to be argued about from the console: the flip
+wait has to be provably about the flip that was queued, and a person has to be able to
+read, frame by frame, what was drawn, where, and when.
+
+**Decision.**
+
+1. **`drm-await-flip` matches the user-data, not just the CRTC.** Every flip is stamped
+   with a per-device counter (`drm-page-flip` gives it, the kernel echoes it). A
+   completion for our CRTC that does not carry the counter of the flip we just queued is
+   an *older* flip's, and satisfying the wait with it claims the display has retired a
+   frame it has not shown: the next frame is then drawn into the buffer the display is
+   reading — precisely the tear D65 was about, entered from the other side. Such a
+   completion is dropped, not handed on; keeping it would only make the next wait wrong.
+2. **The VT backend can write one line per frame.** `TINYWL_FRAME_LOG=path` (or `1` for
+   stderr) makes `make-vt-frame-hooks` write `format-vt-frame-line`'s line per frame,
+   and the line carries four separate facts, because four separate causes look alike
+   from a chair: the frame and its buffer with the front before and after (`buf`,
+   `front=A->B`), the three regions (`dmg` merged damage, `chg` what changed on the
+   screen, `req` what this buffer owed because it was not painted last frame), and the
+   flip's own numbers (`flip=ud=<event>/<expected>`, `kseq`, `wait`, `gap` in
+   milliseconds). Off is the default: a log a normal run does not need is a log whose
+   absence a normal run cannot notice.
+3. **The three regions are printed apart because they are three different bugs.** A
+   `req` of `full` on every frame is a backend painting the screen instead of a region; a
+   `req` that is empty while `chg` is not is a buffer trusted with pixels it does not
+   have; a `dmg` smaller than `chg` is impossible by construction and would be a
+   bookkeeping error worth finding. Merging them into one number would make the log
+   unable to tell these apart.
+4. **`wait` and `gap` are the vblank question, in numbers.** A `wait` near zero on a
+   60 Hz mode means the kernel answered without a vblank — no tear protection at all,
+   whatever the code believes — and a `gap` far above the mode's frame time is a frame
+   the loop could not keep up with. Both are read against the mode's period rather than
+   guessed at.
+5. **Nothing else changes.** Same two buffers, same rule for when a flip is issued (a
+   non-empty merged damage), same history. The instrument is a stream on the output and a
+   keyword on the hooks; a session that does not set `TINYWL_FRAME_LOG` writes nothing.
+
+**Evidence.** The suite goes from 482 to **492 tests in nineteen suites**
+(`./scripts/run-tests.sh`, `PASSED`), `./scripts/gate.sh` stays **23 passed, 0 failed, 2
+skipped**, `./scripts/tinywl-parity.sh` still passes 53 headless and 62 nested checks with
+descriptors `4 -> 4`, and `./scripts/check-loads.sh` is still pure. `wayland.test.drm-modeset`
+goes from 69 to 75 tests: two pin the user-data match (a stale completion for our CRTC does
+not satisfy this flip; one stamped with somebody else's counter is dropped rather than
+handed on), and four pin the line's shape (`buf`/`front`/three regions, an empty frame that
+says `flip=none`, a whole repaint named `full` rather than boxed, and the hooks themselves
+writing three lines for three frames with the first marked `flip=ud=1/1`). Four more in
+`wayland.test.tinywl` pin the wiring from the variable to the stream -- unset is no log, `1`
+is the error stream, a path is a file that holds what was written -- because a typo there
+would be discovered as an empty file after a trip to the console. Writing the tests
+caught a fixture that had been lying: the fake card echoed user-data `1` on every completion,
+which was harmless while the wait ignored it and would have made every second flip time out
+once the wait did not. It now echoes what it was given, the way the kernel does.
+
+What this does not do: it does not fix the flicker, and it does not claim to. No hardware
+was touched in this slice — the log has not been run on a screen, and the one measurement
+that decides the tear question (`wait` against the mode's period) is a person's ten seconds
+of hovering on the VT. If the log shows `wait` at a vblank, the tear is our buffer
+bookkeeping and the log's `front`/`ud` fields say which; if it shows `wait` near zero, the
+kernel is not vsyncing page flips of dumb buffers and no compositor bookkeeping can fix
+that. The log also does not record the mode's period itself; it is read against
+`drm-mode-refresh-milli-hz` by hand.
+
+The lesson: **an instrument that names the candidate causes is worth more than a theory
+that names one.** Every field in that line exists because a different bug would leave a
+different fingerprint, and the log was designed before the flicker was explained rather
+than after.

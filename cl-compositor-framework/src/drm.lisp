@@ -1263,12 +1263,19 @@ away."
             (setf (drm-device-events device) (rest events))
             (first events))))))
 
-(defun drm-await-flip (device crtc-id &key (timeout-ms 1000))
+(defun drm-await-flip (device crtc-id &key (timeout-ms 1000) user-data)
   "Wait for the completion of the flip queued for CRTC-ID.
 
 Signals DRM-ERROR (with no errno: nothing failed, time passed) after TIMEOUT-MS.
 Events for other CRTCs are skipped and stay on the device: they were never ours
-to consume."
+to consume.
+
+When USER-DATA is given, a completion for this CRTC that does not carry it is an
+*older* flip's, and satisfying this wait with it would be answering "the display
+has retired my frame" about a frame it has not shown yet.  DRM-PAGE-FLIP always
+gives it: the counter it stamps on each flip is the only thing that tells two
+completions for the same CRTC apart, and a caller that gets the wrong one flips
+the next frame into the buffer the display is still reading -- a tear."
   (let ((deadline (and timeout-ms (+ (ffi:monotonic-seconds) (/ timeout-ms 1000)))))
     (loop
       (let ((remaining (if deadline
@@ -1280,8 +1287,14 @@ to consume."
                    (error 'drm-error :operation :await-flip :errno nil
                                       :path (drm-device-path device))))
                 ((and (eq :flip-complete (getf event :type))
-                      (= crtc-id (getf event :crtc-id)))
-                 (return event))))))))
+                      (= crtc-id (getf event :crtc-id))
+                      (or (null user-data)
+                          (= user-data (getf event :user-data))))
+                 (return event))
+                ;; A completion for another CRTC, or for a flip this wait did not
+                ;; ask about: dropped, and the wait goes on.  Keeping it would only
+                ;; hand it to the next caller, which would be no less wrong.
+                (t nil)))))))
 
 (defun drm-page-flip (device crtc-id framebuffer-id &key (timeout-ms 1000))
   "Queue a flip of CRTC-ID to FRAMEBUFFER-ID, wait for it to be retired, and return
@@ -1292,7 +1305,7 @@ somebody else's and the sequence numbers a caller sees can be checked for being
 the kernel's and not ours."
   (let ((user-data (incf (drm-device-flips device))))
     (drm-queue-page-flip device crtc-id framebuffer-id user-data)
-    (drm-await-flip device crtc-id :timeout-ms timeout-ms)))
+    (drm-await-flip device crtc-id :timeout-ms timeout-ms :user-data user-data)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; A scanout: a CRTC taken, two frames, and the state to give back

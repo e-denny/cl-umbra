@@ -88,7 +88,17 @@
    (last-boottime :initform nil :accessor vt-output-last-boottime)
    (last-monotonic :initform nil :accessor vt-output-last-monotonic)
    (sleep-gap :initform 0 :accessor vt-output-sleep-gap)
-   (resumes :initform 0 :accessor vt-output-resume-count))
+   (resumes :initform 0 :accessor vt-output-resume-count)
+   ;; A per-frame line into a stream, for a person diagnosing the screen from the
+   ;; console (TINYWL_FRAME_LOG).  NIL is the default and writes nothing; the shape
+   ;; of the line is FORMAT-VT-FRAME-LINE's, and it is what a flicker report is
+   ;; read with.
+   (frame-log :initform nil :accessor vt-output-frame-log)
+   (frame-log-last-flip :initform nil :accessor vt-output-frame-log-last-flip)
+   ;; What the preparer was asked to answer for the frame being drawn, so the
+   ;; presenter can write it down: which buffer, and what that buffer had to owe.
+   (current-buffer :initform nil :accessor vt-output-current-buffer)
+   (current-required :initform nil :accessor vt-output-current-required))
   (:documentation
    "One screen, on a card the seat opens, that comes back by itself.
 
@@ -276,7 +286,12 @@ has painted, which is :FULL and not a stale claim about pixels."
   (clrhash (vt-output-buffer-repaints output))
   (setf (vt-output-damage-history output) nil
         (vt-output-frame-sequence output) 0
-        (vt-output-current-frame output) nil)
+        (vt-output-current-frame output) nil
+        (vt-output-current-buffer output) nil
+        (vt-output-current-required output) nil)
+  ;; A flip clock that counted across a VT switch would report the gap since the last
+  ;; frame before somebody else had the screen as this frame's period.
+  (setf (vt-output-frame-log-last-flip output) nil)
   (values))
 
 (defun disable-vt-output (output)
@@ -676,8 +691,76 @@ would tear."
       (error "this output is disabled: there is nothing to present on"))
     (drm:drm-scanout-present-next scanout :timeout-ms timeout-ms)))
 
-(defun make-vt-frame-hooks (output)
+;;; ---------------------------------------------------------------------------
+;;; One line per frame, for a flicker that has to be read from the console
+;;; ---------------------------------------------------------------------------
+;;
+;; A screen that flickers when the pointer moves cannot be diagnosed from a
+;; photograph of it: the question is which frame, drawn into which buffer, with
+;; what damage, arrived when.  So the VT backend can write one line per frame
+;; (TINYWL_FRAME_LOG on the command line), and the line carries the four numbers
+;; that separate the possible causes:
+;;
+;;   * SEQ and F are numbers, not pixels: they say whether frames are being
+;;     prepared faster than they reach the card -- a skipped frame is a frame
+;;     whose pixels are never shown, and a *stale* one is a frame whose pixels are.
+;;   * BUF and FRONT say where the frame went.  The rule is that a frame is drawn
+;;     where the display is not (D65), so FRONT going 0->1 means the flip landed
+;;     on the buffer that was drawn.  FRONT naming the buffer that was *just*
+;;     drawn while the event's user-data is not the one this flip was stamped
+;;     with is the other case: our bookkeeping is one flip ahead of the kernel,
+;;     and then the next frame draws into the buffer the display is reading -- a
+;;     tear, which is what a person sees as lines briefly lighter than their
+;;     neighbours.
+;;   * DMG, CHG and REQ separate three facts that look alike: what this frame has
+;;     to paint (the merged damage), what changed on the screen (the compositor's
+;;     change, recorded for the other buffer), and what this buffer owes because
+;;     it was not painted last frame.  A REQ that is :FULL on every frame is a
+;;     backend painting the screen instead of a region; a REQ that is empty while
+;;     CHG is not is a buffer being trusted with pixels it does not have (D61).
+;;   * WAIT and GAP are milliseconds: how long the flip's completion took, and how
+;;     long since the previous one.  A WAIT near zero on a 60 Hz mode is the kernel
+;;     answering without a vblank -- no tear protection at all -- and a GAP far
+;;     above the mode's frame time is a frame the loop could not keep up with.
+
+(defun format-vt-frame-box (box)
+  "BOX as a line's field: EMPTY, FULL, or X,Y,W,H."
+  (cond ((null box) "empty")
+        ((eq box :full) "full")
+        (t (format nil "~D,~D,~D,~D" (first box) (second box)
+                   (third box) (fourth box)))))
+
+(defun format-vt-frame-line (&key frame sequence buffer front-before front-after
+                                  damage change required flip kernel-sequence
+                                  user-data expected-user-data wait-ms gap-ms)
+  "One frame as one line; pure, so its shape is a test.
+
+FLIP is false for a frame that painted nothing and was not presented.  The two
+user-data numbers are the diagnostic: equal means the completion was this flip's,
+and a smaller one means the wait was satisfied by a flip that came before it."
+  (concatenate
+   'string
+   (format nil "vt-frame f=~D seq=~D buf=~D front=~D->~D dmg=~A chg=~A req=~A"
+           frame sequence buffer front-before front-after
+           (format-vt-frame-box damage) (format-vt-frame-box change)
+           (format-vt-frame-box required))
+   (if (null flip)
+       " flip=none"
+       (format nil " flip=ud=~@[~D~]/~@[~D~] kseq=~@[~D~] wait=~,1Fms gap=~,1Fms"
+               user-data expected-user-data kernel-sequence
+               (or wait-ms 0.0) (or gap-ms -1.0)))))
+
+(defun write-vt-frame-line (stream line)
+  "Write LINE and flush it: a log read while the compositor runs must be current."
+  (write-line line stream)
+  (finish-output stream)
+  line)
+
+(defun make-vt-frame-hooks (output &key frame-log)
   "The two functions a compositor needs to render into OUTPUT; values PREPARER PRESENTER.
+
+FRAME-LOG, when given, is a stream this backend writes one line per frame to (see
+FORMAT-VT-FRAME-LINE); it changes nothing else about the frame.
 
 CF's compositor seam (docs/framework.md §2): the preparer answers which target this
 frame draws into and the least that buffer can be trusted to keep, and the presenter
@@ -690,35 +773,80 @@ last frame.  The presenter records the *compositor's* change -- not the merged r
 -- because that is what the other buffer will owe when it comes round (D61); a frame
 with nothing to show does not flip at all, since a flip costs a vblank's wait and
 paints no pixels (D50)."
+  (when frame-log
+    (setf (vt-output-frame-log output) frame-log))
   (values (lambda (compositor)
             (declare (ignore compositor))
             (let ((scanout (vt-output-scanout output)))
               (when scanout
                 (let* ((buffer (drm:drm-scanout-next-buffer scanout))
-                       (next-frame (1+ (vt-output-frame-sequence output))))
-                  ;; MULTIPLE-VALUE-PROG1, not PROG1: the preparer answers two values
-                  ;; and PROG1 keeps only the first -- which silently turns every
-                  ;; "paint this buffer whole" into "there is nothing to trust with"
-                  ;; and then, one frame later, into "paint nothing".
-                  (multiple-value-prog1
-                      (values (vt-output-frame-target output buffer)
-                              (vt-buffer-repaint-region output buffer next-frame))
-                    ;; The frame number is consumed before the draw and recorded on the
-                    ;; buffer before the present, so the history and the next prepare
-                    ;; agree about this buffer's age even when nothing is flipped.
-                    (setf (vt-output-frame-sequence output) next-frame
-                          (vt-output-current-frame output) next-frame)
-                    (setf (gethash buffer (vt-output-buffer-frames output))
-                          next-frame))))))
+                       (next-frame (1+ (vt-output-frame-sequence output)))
+                       ;; Asked before this buffer's recorded frame moves: the answer
+                       ;; is "what has it missed", and after the SETF it would
+                       ;; always be "nothing".
+                       (required (vt-buffer-repaint-region output buffer next-frame)))
+                  ;; The frame number is consumed before the draw and recorded on the
+                  ;; buffer before the present, so the history and the next prepare
+                  ;; agree about this buffer's age even when nothing is flipped.
+                  (setf (vt-output-frame-sequence output) next-frame
+                        (vt-output-current-frame output) next-frame
+                        (vt-output-current-buffer output) buffer
+                        (vt-output-current-required output)
+                        (if (eq required :full) :full (render:region-bounds required)))
+                  (setf (gethash buffer (vt-output-buffer-frames output))
+                        next-frame)
+                  (values (vt-output-frame-target output buffer) required)))))
           (lambda (compositor target damage)
             (declare (ignore target))
             (when (vt-output-enabled-p output)
-              (let ((frame (vt-output-current-frame output)))
+              (let ((frame (vt-output-current-frame output))
+                    (log (vt-output-frame-log output)))
                 (when frame
-                  (record-vt-frame-damage
-                   output frame
-                   (let ((change (headless:compositor-frame-change compositor)))
-                     (if (eq change :full) nil change)))
-                  (unless (and (not (eq damage :full))
-                               (render:region-empty-p damage))
-                    (present-vt-output output))))))))
+                  (let* ((change (headless:compositor-frame-change compositor))
+                         (change-box (if (eq change :full)
+                                         :full
+                                         (render:region-bounds change)))
+                         (scanout (vt-output-scanout output))
+                         (present-p (not (and (not (eq damage :full))
+                                              (render:region-empty-p damage))))
+                         (front-before (drm:drm-scanout-front scanout))
+                         (event nil)
+                         (wait-ms nil)
+                         (gap-ms nil))
+                    (record-vt-frame-damage
+                     output frame
+                     (if (eq change :full) nil change))
+                    (when present-p
+                      (let ((started (ffi:monotonic-seconds)))
+                        (setf event (present-vt-output output)
+                              wait-ms (* 1000 (- (ffi:monotonic-seconds) started)))
+                        ;; The gap is measured from the previous flip's *queue*, so
+                        ;; it is the frame period and not the period plus a wait
+                        ;; that the last frame's own wait already accounted for.
+                        (when (vt-output-frame-log-last-flip output)
+                          (setf gap-ms (* 1000 (- started
+                                                  (vt-output-frame-log-last-flip output)))))
+                        (setf (vt-output-frame-log-last-flip output) started)))
+                    (when log
+                      (write-vt-frame-line
+                       log
+                       (format-vt-frame-line
+                        :frame frame
+                        :sequence (vt-output-frame-sequence output)
+                        :buffer (position (vt-output-current-buffer output)
+                                          (drm:drm-scanout-buffers scanout))
+                        :front-before front-before
+                        :front-after (drm:drm-scanout-front scanout)
+                        :damage (if (eq damage :full)
+                                    :full
+                                    (render:region-bounds damage))
+                        :change change-box
+                        :required (vt-output-current-required output)
+                        :flip present-p
+                        :kernel-sequence (and event (getf event :sequence))
+                        :user-data (and event (getf event :user-data))
+                        :expected-user-data
+                        (and event (drm:drm-device-flips
+                                    (drm:drm-scanout-device scanout)))
+                        :wait-ms wait-ms
+                        :gap-ms gap-ms))))))))))

@@ -355,6 +355,7 @@ project keeps rather than works around.")
    #:drm-device-version-patchlevel
    #:drm-device-master-p
    #:drm-device-capabilities
+   #:drm-device-flips
    #:drm-device-paths
    #:drm-driver-at
    ;; what the card says about itself
@@ -850,6 +851,9 @@ the compositor's (D58's DRM-SCANOUT-RENDER is what draws into the buffer).")
    #:vt-output-frame-sequence
    #:vt-output-current-frame
    #:vt-output-damage-history
+   ;; one line per frame, for a flicker read from the console (TINYWL_FRAME_LOG)
+   #:vt-output-frame-log
+   #:format-vt-frame-line
    ;; the seam a test replaces: a descriptor into a card
    #:open-vt-device))
 

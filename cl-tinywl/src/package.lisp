@@ -41,6 +41,9 @@ compositor, and how a session starts and stops.")
    #:stop-clients
    #:*terminal-command*
    #:*clients*
+   ;; the frame log (TINYWL_FRAME_LOG), the instrument for a flicker report
+   #:frame-log-stream-from-environment
+   #:close-frame-log
    ;; a session: headless, nested inside another compositor, or on a VT
    #:session
    #:session-mode

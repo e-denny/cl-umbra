@@ -573,9 +573,12 @@ header, which is how an unknown event looks."
 
 (deftest each-flip-carries-a-new-user-data
   ;; The event the kernel sends back carries what PAGE_FLIP was given, so a stale
-  ;; completion can be told from the one that belongs to the newest flip.
-  (let* ((device (new-screen-device :events (list (flip-event)
-                                                 (flip-event :sequence 11))))
+  ;; completion can be told from the one that belongs to the newest flip.  The
+  ;; fixture echoes the counter for that reason: an event that does not is a kernel
+  ;; that does not, and the wait would (correctly) never be satisfied.
+  (let* ((device (new-screen-device :events (list (flip-event :user-data 1)
+                                                  (flip-event :sequence 11
+                                                              :user-data 2))))
          (scanout (drm:drm-open-scanout device)))
     (unwind-protect
          (progn
@@ -585,6 +588,38 @@ header, which is how an unknown event looks."
              (ok (= 2 (length user-data)))
              (ok (< (first user-data) (second user-data)))
              (ok (= 1 (first user-data)))))
+      (drm:drm-close-scanout scanout))))
+
+(deftest an-older-flips-completion-does-not-satisfy-this-flip
+  ;; The hole this closes is a tear, not a bookkeeping nuisance: a wait satisfied by
+  ;; the *previous* flip's completion says the display has retired a frame it has not
+  ;; shown yet, so the next frame is drawn into the buffer the display is reading.
+  ;; The queue here is exactly that situation: the oldest completion is still on the
+  ;; device when a newer flip is queued.
+  (let* ((device (new-screen-device :events (list (flip-event :sequence 40 :user-data 1)
+                                                  (flip-event :sequence 41 :user-data 2))))
+         (scanout (drm:drm-open-scanout device)))
+    (unwind-protect
+         (let ((event (drm:drm-scanout-present scanout
+                                               (drm:drm-scanout-buffer scanout 1))))
+           ;; The scanout's counter stamps 1 on its first flip, so the completion that
+           ;; belongs to it is the one with user-data 1 -- and the stale one is
+           ;; dropped rather than handed back on the next call.
+           (ok (= 40 (getf event :sequence))
+               (format nil "the first flip's own completion is the one returned (~S)"
+                       event))
+           (ok (= 1 (drm:drm-scanout-front scanout))))
+      (drm:drm-close-scanout scanout))))
+
+(deftest a-completion-for-another-flip-is-dropped-not-handed-on
+  (let* ((device (new-screen-device :events (list (flip-event :sequence 40 :user-data 9)
+                                                  (flip-event :sequence 41 :user-data 1))))
+         (scanout (drm:drm-open-scanout device)))
+    (unwind-protect
+         (let ((event (drm:drm-scanout-present scanout
+                                               (drm:drm-scanout-buffer scanout 1))))
+           (ok (= 41 (getf event :sequence))
+               "a completion stamped with somebody else's user-data is skipped"))
       (drm:drm-close-scanout scanout))))
 
 (deftest presenting-a-closed-scanout-is-an-error
@@ -894,7 +929,11 @@ are real files, so closing them is observable."))
 (defclass pixel-screen-device (recording-screen-device)
   ((mappings :initform (make-hash-table :test #'eql) :accessor pixel-mappings)
    (padding :initarg :padding :initform 16 :reader pixel-padding)
-   (flips :initform 0 :accessor pixel-flips))
+   (flips :initform 0 :accessor pixel-flips)
+   ;; The user-data of the flip just queued.  The kernel echoes it on the completion
+   ;; and DRM-AWAIT-FLIP matches on it, so a card that answered with a constant
+   ;; would leave every wait after the first unsatisfied (D66).
+   (last-flip-user-data :initform nil :accessor pixel-last-flip-user-data))
   (:documentation
    "A recording card whose dumb buffers are real memory, with a padded pitch.
 
@@ -931,11 +970,18 @@ always pads, so a target built from width x 4 would shear (D58)."))
       (ffi:unmap-file (first entry) (second entry))))
   (values))
 
+(defmethod drm:drm-queue-page-flip ((device pixel-screen-device)
+                                    crtc-id framebuffer-id user-data)
+  (call-next-method)
+  (setf (pixel-last-flip-user-data device) user-data)
+  (values))
+
 (defmethod drm:drm-read-events ((device pixel-screen-device) &key timeout-ms)
   "Every flip retires at once, as a completion for the CRTC that was programmed."
   (declare (ignore timeout-ms))
   (incf (pixel-flips device))
-  (list (flip-event :sequence (pixel-flips device))))
+  (list (flip-event :sequence (pixel-flips device)
+                    :user-data (pixel-last-flip-user-data device))))
 
 ;;; The age arithmetic, without a card, a compositor or a frame.
 
@@ -1482,3 +1528,70 @@ check that a frame drawn into one buffer was not flipped over another."
       (multiple-value-bind (pixel presented) (render-and-read compositor output 140 80)
         (declare (ignore presented))
         (ok (= grey pixel) "and the rest of the window is still the window")))))
+
+;;; ---------------------------------------------------------------------------
+;;; One line per frame (TINYWL_FRAME_LOG)
+;;; ---------------------------------------------------------------------------
+;;
+;; The flicker D64's walk reported cannot be reproduced from a test: it needs a
+;; screen, a pointer and a person.  What *can* be pinned is the instrument -- four
+;; numbers per frame that separate the causes -- so that ten seconds of hovering
+;; answers a question instead of producing a paragraph.  If the line loses a field
+;; silently, the diagnosis loses a question silently.
+
+(deftest a-frame-line-names-the-buffer-the-damage-and-the-flip
+  (let ((line (vt:format-vt-frame-line
+               :frame 12 :sequence 13 :buffer 1 :front-before 0 :front-after 1
+               :damage '(50 40 40 12) :change '(50 40 40 12)
+               :required '(50 40 40 12) :flip t :kernel-sequence 987
+               :user-data 41 :expected-user-data 41 :wait-ms 16.8 :gap-ms 16.7)))
+    (ok (search "f=12 seq=13 buf=1 front=0->1" line)
+        (format nil "the frame and where it went: ~A" line))
+    (ok (search "dmg=50,40,40,12 chg=50,40,40,12 req=50,40,40,12" line)
+        (format nil "what it painted, what changed, what it owed: ~A" line))
+    (ok (search "flip=ud=41/41 kseq=987 wait=16.8ms gap=16.7ms" line)
+        (format nil "and the flip's own numbers: ~A" line))))
+
+(deftest a-frame-that-painted-nothing-says-so
+  (let ((line (vt:format-vt-frame-line
+               :frame 13 :sequence 14 :buffer 0 :front-before 1 :front-after 1
+               :damage nil :change nil :required nil :flip nil)))
+    (ok (search "dmg=empty chg=empty req=empty flip=none" line)
+        (format nil "an empty frame is a line that says empty: ~A" line))))
+
+(deftest a-whole-repaint-says-full-and-not-a-box
+  (let ((line (vt:format-vt-frame-line
+               :frame 1 :sequence 1 :buffer 1 :front-before 0 :front-after 1
+               :damage :full :change :full :required :full :flip t
+               :user-data 1 :expected-user-data 1 :wait-ms 16.6)))
+    (ok (search "dmg=full chg=full req=full" line)
+        (format nil "a full frame is named, not boxed: ~A" line))
+    (ok (search "gap=-1.0ms" line)
+        "the first flip of a run has no gap to report")))
+
+(deftest the-vt-hooks-write-one-line-per-frame
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (let ((log (make-string-output-stream)))
+      (multiple-value-bind (preparer presenter)
+          (vt:make-vt-frame-hooks output :frame-log log)
+        (setf (headless:compositor-frame-preparer compositor) preparer
+              (headless:compositor-frame-presenter compositor) presenter))
+      (cf:render-frame compositor)
+      (cf:render-frame compositor)
+      ;; A frame with nothing to show: no pixels, no flip, and still a line.
+      (cf:render-frame compositor)
+      (let ((lines (uiop:split-string (get-output-stream-string log)
+                                      :separator '(#\Newline))))
+        (setf lines (remove "" lines :test #'string=))
+        (ok (= 3 (length lines))
+            (format nil "three frames, three lines: ~S" lines))
+        (ok (search "buf=1 front=0->1" (first lines))
+            (format nil "the first frame drew into the buffer the display was not:~%~A"
+                    (first lines)))
+        (ok (search "buf=0 front=1->0" (second lines))
+            (format nil "and the second alternated:~%~A" (second lines)))
+        (ok (search "flip=none" (third lines))
+            (format nil "a frame that changed nothing flipped nothing:~%~A"
+                    (third lines)))
+        (ok (search "flip=ud=1/1" (first lines))
+            (format nil "the completion was this flip's own:~%~A" (first lines)))))))

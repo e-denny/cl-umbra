@@ -34,6 +34,11 @@
                         TINYWL_STATS_INTERVAL sets the same thing from the environment
   --help                this text
 
+On a VT, TINYWL_FRAME_LOG names a file (or 1 for stderr) that gets one line per
+frame -- the frame and its buffer, the three damage boxes, and the flip's own
+completion, wait and gap in milliseconds.  It is off by default; it exists to read
+a flicker from the console, because a flicker cannot be photographed.
+
 With none of --headless, --nested or --drm, tinywl nests when WAYLAND_DISPLAY
 names a live compositor and runs headless otherwise.  --drm needs a seat it may
 take, so run it from a text console and not from inside a compositor that already
