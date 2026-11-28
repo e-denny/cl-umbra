@@ -3425,3 +3425,54 @@ The lesson: **a compositor's global list is a dependency graph written by other 
 clients, and one missing node does not degrade one feature -- GDK turns a missing data device
 manager into a missing seat, so every GTK application loses keyboard and pointer at once. When
 a client "does not work", trace what it binds before doubting what it says.**
+
+## D65 — The buffer a frame is drawn into is the one the display is not reading
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** the scanout's buffer choice (found while narrowing D64's flicker report)
+
+D64's hardware walk reported flickering in Emacs on the VT and none when the same
+Emacs ran nested inside Umbriel, which narrowed the suspect to the VT path: two scanout
+buffers and a page flip. The first thing that path answers is *which* buffer a frame is
+drawn into, and it answered wrongly once per enable.
+
+`drm-open-scanout` programs the CRTC with buffer 0, so the display is reading buffer 0
+before any frame exists. `drm-scanout-next-buffer` said `FRAMES mod count`, and `frames`
+counts presents, so with zero presents it said **buffer 0** -- the buffer being scanned.
+The first frame after every enable was therefore drawn into the frame the display was
+reading, and then "flipped" to it: a tear on every VT switch back, every replug and every
+resume. A unit test had asserted exactly that behaviour (it checked that `next-buffer` is
+buffer 0 after opening), which is why no gate ever caught it: the test documented the
+tear as the design.
+
+**Decision.** The next buffer is asked of `front`, the buffer the scanout is scanning out
+now: `next = (1+ front) mod count`. `frames` keeps counting presents and nothing else
+(same subtraction the damage probe checks), a skipped present changes neither `front` nor
+the answer, and the invariant is the one a reader needs: *a frame is drawn where the
+screen is not*. Two consequences worth stating: the first frame after an enable now paints
+buffer 1 whole (it has never been painted, D61), and the buffer the display is reading is
+never a draw target, which is the whole point of having two.
+
+**Evidence.** `tests/unit/drm-modeset.lisp` grows two tests: `the-first-frame-after-an-
+enable-does-not-draw-into-the-visible-buffer` (front is 0 after open, the next buffer is
+not 0, and after the flip the front is the buffer that was drawn) and
+`a-double-buffered-client-never-shows-a-stale-highlight` (a client that alternates two shm
+buffers and damages one small box -- GTK's hover pattern -- has the box in the buffer that
+is flipped to, then in the other one too, so nothing strobes). The suite goes from 478 to
+**482 tests in nineteen suites** (`./scripts/run-tests.sh`, `PASSED`); `./scripts/gate.sh`
+stays **23 passed, 0 failed, 2 skipped**; `./scripts/tinywl-parity.sh` still passes 53
+headless and 62 nested checks with descriptors `4 -> 4`. The test that had encoded the tear
+was rewritten, with a comment saying what it used to assert and why that was wrong.
+On hardware the tear is visible only as a single flash at each VT switch, replug or resume,
+which is consistent with a bug that survived every manual walk so far.
+
+What this does not do: it does not explain the *hover* flicker that started the
+investigation -- a tear on the first frame after an enable is not a flicker a person sees
+while moving the pointer -- and the hover case is still open, with the next step being a
+per-frame log rather than a theory. It also changes nothing about how many buffers there
+are (still two) or when a flip is issued (still only when the merged damage is non-empty).
+
+The lesson: **a counter is a poor answer to a question about the screen. `frames mod 2`
+described our bookkeeping; `the buffer front is not` describes the display, and it is true
+at the moment the CRTC is first programmed, when no frame has been counted at all.**

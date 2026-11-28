@@ -1391,8 +1391,15 @@ flip into nowhere."))
   (length (drm-scanout-buffers scanout)))
 
 (defun drm-scanout-next-buffer (scanout)
-  "The buffer the next frame should be drawn into: FRAMES modulo the count."
-  (drm-scanout-buffer scanout (mod (drm-scanout-frames scanout)
+  "The buffer the next frame should be drawn into: the one not being scanned out.
+
+Asked of FRONT, not of a frame counter.  OPEN-SCANOUT programs the CRTC with buffer
+0, so the display is reading buffer 0 before any frame is drawn, and the first frame
+must go into buffer 1 -- a frame drawn into the buffer the display is reading is a
+tear, and it was one on every enable (VT switch back, replug, resume) until this
+asked the scanout where the picture is instead of counting presents.
+tests/unit/drm-modeset.lisp, THE-FIRST-FRAME-AFTER-AN-ENABLE..."
+  (drm-scanout-buffer scanout (mod (1+ (drm-scanout-front scanout))
                                    (drm-scanout-buffer-count scanout))))
 
 (defun drm-open-scanout (device &key connector crtc-id mode (buffer-count 2))

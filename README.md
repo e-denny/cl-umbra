@@ -14,7 +14,7 @@ and decode path, D56), the keymap of the fourth (libxkbcommon, D57), its frame: 
 cursor included -- rendered into the scanout at the driver's pitch (D58), and the VT: the card
 opened through a seat, a frame flipped on it, and the screen given back and retaken across a VT
 switch (4d-3, walked on the hardware on 2026-11-27: D60).**
-`./scripts/gate.sh` checks twenty-five clauses. Phase 0: the unit suite (480 tests, nineteen suites), every vendored protocol compiling,
+`./scripts/gate.sh` checks twenty-five clauses. Phase 0: the unit suite (482 tests, nineteen suites), every vendored protocol compiling,
 `demo-globals` against a live compositor, 10⁶ decoder fuzz cases. Phase 1: `wayland-info` —
 the system's own libwayland client — exits 0 against *our* server; 10k connect/disconnect
 cycles leave the descriptor count and resident set flat; 10⁶ adversarial client connections

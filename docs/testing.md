@@ -61,7 +61,7 @@ The scripts go through `wayland.test.runner`, which names the nineteen suites in
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 480 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 482 tests ran.
 
 `wayland.test.data-device` is the newest suite and the reason it exists is worth a sentence:
 GDK binds `wl_seat` only after it has seen `wl_compositor` **and** `wl_data_device_manager`

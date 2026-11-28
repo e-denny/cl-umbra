@@ -580,8 +580,9 @@ mapping is: DISABLE-VT-OUTPUT does that, in that order."
 ;; a buffer's first paint: recording that frame as "everything changed" makes every
 ;; buffer that missed it whole, which makes the next frame's paint whole, which is
 ;; recorded as "everything changed" again.  A two-buffer scanout alternates buffers
-;; by construction (DRM-SCANOUT-NEXT-BUFFER is FRAMES modulo the count), so that
-;; loop would never end and the whole output would be repainted every frame (D61).
+;; by construction (DRM-SCANOUT-NEXT-BUFFER is the buffer the display is not
+;; reading, D65), so that loop would never end and the whole output would be
+;; repainted every frame (D61).
 
 (defun vt-buffer-repaint-region (output buffer next-frame)
   "What BUFFER has to repaint before frame NEXT-FRAME can be shown from it.

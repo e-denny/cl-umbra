@@ -527,12 +527,18 @@ header, which is how an unknown event looks."
          (scanout (drm:drm-open-scanout device)))
     (unwind-protect
          (progn
+           ;; OPEN-SCANOUT programmed the CRTC with buffer 0, so buffer 0 is on the
+           ;; screen and the first frame belongs in buffer 1.  This test used to
+           ;; assert the opposite -- that the first frame went into the buffer the
+           ;; display was reading -- which is the tear D64's walk found on the VT.
            (ok (= 0 (drm:drm-scanout-front scanout)))
-           (ok (eq (drm:drm-scanout-buffer scanout 0)
+           (ok (eq (drm:drm-scanout-buffer scanout 1)
                    (drm:drm-scanout-next-buffer scanout)))
            (drm:drm-scanout-present-next scanout)
            (ok (= 1 (drm:drm-scanout-frames scanout)))
-           (ok (eq (drm:drm-scanout-buffer scanout 1)
+           (ok (= 1 (drm:drm-scanout-front scanout))
+               "the buffer that was drawn is the one presented")
+           (ok (eq (drm:drm-scanout-buffer scanout 0)
                    (drm:drm-scanout-next-buffer scanout))))
       (drm:drm-close-scanout scanout))))
 
@@ -1343,3 +1349,136 @@ descriptor back."
     (vt:disable-vt-output output)
     (ok (eq :no-card (vt:pump-vt-resume output :boottime 130 :monotonic 50.1))
         "a VT switch closed the descriptor: nothing to check until the seat comes back")))
+
+;;; ---------------------------------------------------------------------------
+;;; A client that double-buffers, which is what GTK does (D64's walk)
+;;; ---------------------------------------------------------------------------
+;;
+;; The frames above move the *pointer*, and the cursor is one item with a known
+;; picture.  A GTK client is the other case: two shm buffers, alternating, each
+;; commit damaging only the widget that changed, while the buffer that was not
+;; drawn into still holds the previous state.  Hovering a link in Emacs flickers if
+;; a frame presents the buffer that was not repainted -- so this reads the pixels of
+;; the buffer that was just flipped to, after every frame.
+
+(defun make-mapped-pool (width height)
+  "A shm pool over a memfd, mapped, big enough for one WIDTH x HEIGHT buffer."
+  (let* ((size (* width height 4))
+         (fd (ffi:memfd-create "cl-wayland-client-buffer")))
+    (ffi:set-file-size fd size)
+    (let ((pool (make-instance 'srv:shm-pool :fd fd :size size)))
+      (setf (srv:shm-pool-mapping pool)
+            (ffi:map-file fd size :protection (logior ffi:+prot-read+
+                                                     ffi:+prot-write+)))
+      pool)))
+
+(defun fill-client-buffer (buffer colour x y width height)
+  "Paint a rectangle of BUFFER's memory, the way a client's cairo surface does."
+  (let ((mapping (srv:shm-pool-mapping (srv::shm-buffer-pool buffer))))
+    (loop for py from y below (+ y height)
+          do (loop for px from x below (+ x width)
+                   do (setf (cffi:mem-aref mapping :unsigned-int
+                                           (+ (/ (srv:shm-buffer-offset buffer) 4)
+                                              px (* py (/ (srv:shm-buffer-stride buffer) 4))))
+                            colour)))))
+
+(defun make-client-buffer (width height colour)
+  "A shm buffer with its OWN pool, filled with COLOUR (0xAARRGGBB).
+
+Its own pool because two buffers in one pool at offset 0 are the same memory, and
+a test whose two buffers alias cannot tell a stale frame from a fresh one."
+  (let ((buffer (make-instance 'srv:shm-buffer
+                               :pool (make-mapped-pool width height) :offset 0
+                               :width width :height height
+                               :stride (* 4 width) :format 0)))
+    (fill-client-buffer buffer colour 0 0 width height)
+    buffer))
+
+(defun client-surface (compositor buffer &key (x 0) (y 0))
+  "A mapped compositor surface whose current buffer is BUFFER, at (X, Y)."
+  (let* ((display (headless:compositor-display compositor))
+         (client (make-instance 'srv:client :id 77 :display display :fd -1))
+         (surface (make-instance 'cf:cf-surface
+                                 :client client :id 21 :interface nil :version 1)))
+    ;; The buffer and the mapped flag first: a node made before them is a
+    ;; zero-sized window (the order CL-TINYWL's fake-window uses).
+    (setf (srv:surface-current-buffer surface) buffer
+          (srv:surface-current-x surface) 0
+          (srv:surface-current-y surface) 0
+          (srv:surface-mapped-p surface) t)
+    (let ((node (cf:on-new-toplevel compositor surface)))
+      (cf.scene:set-node-position node x y))
+    surface))
+
+(defun render-and-read (compositor output x y)
+  "Render one frame and return (values pixel presented-buffer front-index).
+
+NEXT-BUFFER is read *before* the frame, because that is the buffer the frame draws
+into and flips; asking afterwards names the one still to come.  FRONT-INDEX is the
+scanout's own answer to "what is the display reading now", and it is the only
+check that a frame drawn into one buffer was not flipped over another."
+  (let ((drawn (next-buffer output)))
+    (cf:render-frame compositor)
+    (values (drm:dumb-buffer-pixel drawn x y)
+            drawn
+            (drm:drm-scanout-front (vt:vt-output-scanout output)))))
+
+(deftest the-first-frame-after-an-enable-does-not-draw-into-the-visible-buffer
+  ;; Opening the scanout programs the CRTC with buffer 0, so buffer 0 is on the
+  ;; screen before any frame is drawn.  A compositor that then draws into buffer 0
+  ;; is drawing into the frame the display is reading -- a tear on the first frame
+  ;; after every enable: every VT switch back, every hotplug replug, every resume.
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (let ((scanout (vt:vt-output-scanout output)))
+      (ok (= 0 (drm:drm-scanout-front scanout))
+          "the CRTC was programmed with buffer 0")
+      (ok (/= (drm:drm-scanout-front scanout)
+              (position (next-buffer output) (drm::drm-scanout-buffers scanout)))
+          "so the first frame must draw into the other one")))
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (let ((drawn (next-buffer output))
+          (scanout (vt:vt-output-scanout output)))
+      (cf:render-frame compositor)
+      (ok (= (drm:drm-scanout-front scanout)
+             (position drawn (drm::drm-scanout-buffers scanout)))
+          "and the flip goes to the buffer that was drawn"))))
+
+(deftest a-double-buffered-client-never-shows-a-stale-highlight
+  ;; The window sits at (40,30), clear of the cursor's 16x16 arrow at the origin:
+  ;; the first version of this test read pixels under the pointer and could not tell
+  ;; a stale frame from an arrow.
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (let* ((grey #xFF202020)
+           (hot #xFF00FF00)
+           (buffer-a (make-client-buffer 120 60 grey))
+           (buffer-b (make-client-buffer 120 60 grey))
+           (surface (client-surface compositor buffer-a :x 40 :y 30)))
+      ;; Two frames, so both scanout buffers hold the plain window.
+      (cf:render-frame compositor)
+      (multiple-value-bind (pixel presented front) (render-and-read compositor output 60 40)
+        (ok (= grey pixel) "the window is on the screen before the hover")
+        (ok (= front (position presented
+                                (drm::drm-scanout-buffers
+                                 (vt:vt-output-scanout output))))
+            "and the display is reading the buffer that was drawn"))
+      ;; The hover: the client paints the link's box into the *other* buffer and
+      ;; commits, damaging only that box -- GTK's pattern exactly.  Surface-local
+      ;; (10,10)-(50,22) is device (50,40)-(90,52).
+      (fill-client-buffer buffer-b hot 10 10 40 12)
+      (setf (srv:surface-current-buffer surface) buffer-b
+            (srv:surface-damage-since-frame surface) '((10 10 40 12)))
+      (cf:request-frame compositor)
+      (multiple-value-bind (pixel presented) (render-and-read compositor output 52 42)
+        (declare (ignore presented))
+        (ok (= hot pixel) "the buffer that was flipped to shows the highlight"))
+      ;; The next frame draws into the other scanout buffer, which missed the
+      ;; hover: it owes exactly that change, and if it presents without painting it
+      ;; the highlight disappears for a frame -- the flicker.
+      (cf:request-frame compositor)
+      (multiple-value-bind (pixel presented) (render-and-read compositor output 52 42)
+        (declare (ignore presented))
+        (ok (= hot pixel)
+            "the second scanout buffer has the highlight too, so it does not strobe"))
+      (multiple-value-bind (pixel presented) (render-and-read compositor output 140 80)
+        (declare (ignore presented))
+        (ok (= grey pixel) "and the rest of the window is still the window")))))
