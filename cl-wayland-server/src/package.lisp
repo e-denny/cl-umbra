@@ -184,6 +184,35 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:wl-touch.up
                 #:wl-touch.motion
                 #:wl-touch.cancel
+                ;; the data device (D64)
+                #:wl-data-device-manager.create-data-source
+                #:wl-data-device-manager.get-data-device
+                #:wl-data-source.offer
+                #:wl-data-source.destroy
+                #:wl-data-source.set-actions
+                #:wl-data-source.target
+                #:wl-data-source.send
+                #:wl-data-source.cancelled
+                #:wl-data-source.dnd-drop-performed
+                #:wl-data-source.dnd-finished
+                #:wl-data-source.action
+                #:wl-data-device.start-drag
+                #:wl-data-device.set-selection
+                #:wl-data-device.release
+                #:wl-data-device.data-offer
+                #:wl-data-device.enter
+                #:wl-data-device.leave
+                #:wl-data-device.motion
+                #:wl-data-device.drop
+                #:wl-data-device.selection
+                #:wl-data-offer.accept
+                #:wl-data-offer.receive
+                #:wl-data-offer.destroy
+                #:wl-data-offer.finish
+                #:wl-data-offer.set-actions
+                #:wl-data-offer.offer
+                #:wl-data-offer.source-actions
+                #:wl-data-offer.action
                 ;; opcodes of the events the server sends in phase 1
                 #:+wl-display-error+
                 #:+wl-display-delete-id+
@@ -219,6 +248,35 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
                 #:+wl-touch-up+
                 #:+wl-touch-motion+
                 #:+wl-touch-cancel+
+                ;; data-device opcodes
+                #:+wl-data-source-target+
+                #:+wl-data-source-send+
+                #:+wl-data-source-cancelled+
+                #:+wl-data-source-dnd-drop-performed+
+                #:+wl-data-source-dnd-finished+
+                #:+wl-data-source-action+
+                #:+wl-data-device-data-offer+
+                #:+wl-data-device-enter+
+                #:+wl-data-device-leave+
+                #:+wl-data-device-motion+
+                #:+wl-data-device-drop+
+                #:+wl-data-device-selection+
+                #:+wl-data-offer-offer+
+                #:+wl-data-offer-source-actions+
+                #:+wl-data-offer-action+
+                ;; data-device enums
+                #:+wl-data-device-manager-dnd-action-none+
+                #:+wl-data-device-manager-dnd-action-copy+
+                #:+wl-data-device-manager-dnd-action-move+
+                #:+wl-data-device-manager-dnd-action-ask+
+                #:+wl-data-source-error-invalid-action-mask+
+                #:+wl-data-source-error-invalid-source+
+                #:+wl-data-device-error-role+
+                #:+wl-data-device-error-used-source+
+                #:+wl-data-offer-error-invalid-finish+
+                #:+wl-data-offer-error-invalid-action-mask+
+                #:+wl-data-offer-error-invalid-action+
+                #:+wl-data-offer-error-invalid-offer+
                 ;; capability / state enums
                 #:+wl-seat-capability-pointer+
                 #:+wl-seat-capability-keyboard+
@@ -632,6 +690,58 @@ protocol content (surfaces, shm, seats) arrives in phase 2.")
    #:+wl-keyboard-keymap-format-xkb-v1+
    #:+wl-keyboard-key-state-pressed+
    #:+wl-keyboard-key-state-released+
+   ;; the data device (D64)
+   #:+data-device-manager-version+
+   #:data-device-manager
+   #:data-device
+   #:data-source
+   #:data-offer
+   #:data-drag
+   #:add-data-device-manager-global
+   #:data-source-mime-types
+   #:data-source-actions
+   #:data-source-used-p
+   #:data-source-seat
+   #:data-source-purpose
+   #:data-offer-mime-types
+   #:data-offer-source
+   #:data-offer-device
+   #:data-offer-drag-p
+   #:data-offer-accepted-mime
+   #:data-offer-accepted-p
+   #:data-offer-source-actions
+   #:data-offer-actions
+   #:data-offer-preferred-action
+   #:data-offer-finished-p
+   #:data-device-seat
+   #:seat-selection
+   #:seat-data-devices
+   #:seat-drag
+   #:data-drag-seat
+   #:data-drag-source
+   #:data-drag-device
+   #:data-drag-target
+   #:data-drag-offer
+   #:data-device-drag-started
+   #:data-device-drag-ended
+   #:data-drag-active-p
+   #:update-data-drag
+   #:finish-data-drag
+   #:cancel-data-drag
+   #:set-seat-selection
+   #:send-selection-to
+   #:+wl-data-device-manager-dnd-action-none+
+   #:+wl-data-device-manager-dnd-action-copy+
+   #:+wl-data-device-manager-dnd-action-move+
+   #:+wl-data-device-manager-dnd-action-ask+
+   #:+wl-data-source-error-invalid-action-mask+
+   #:+wl-data-source-error-invalid-source+
+   #:+wl-data-device-error-role+
+   #:+wl-data-device-error-used-source+
+   #:+wl-data-offer-error-invalid-finish+
+   #:+wl-data-offer-error-invalid-action-mask+
+   #:+wl-data-offer-error-invalid-action+
+   #:+wl-data-offer-error-invalid-offer+
    ;; globals
    #:global
    #:global-name

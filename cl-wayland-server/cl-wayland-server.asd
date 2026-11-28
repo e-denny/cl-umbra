@@ -26,6 +26,7 @@ Not a libwayland-server binding: the wire format and the object model are ours."
                (:file "src/xdg-shell")
                (:file "src/seat")
                (:file "src/events")
+               (:file "src/data-device")
                (:file "src/registry")
                (:file "src/dispatch")
                (:file "src/demo")))

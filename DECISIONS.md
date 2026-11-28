@@ -3310,3 +3310,118 @@ there.
 The lesson: **a compositor with no event source for "the machine slept" can still ask the
 kernel -- monotonic time is the one clock a suspend cannot hide from, and the difference
 between the two clocks is the sleep itself, not an estimate of it.**
+
+## D64 — The data device, because a missing global can cost a client its keyboard
+
+**Date:** 2026-11-27
+**Status:** accepted
+**Slice:** `wl_data_device_manager` v3: the selection and drag-and-drop
+
+The trigger was a hardware report, not a plan item: kitty failed to start under
+`cl-tinywl --drm` and Emacs "was not working correctly". Kitty is a GL-only terminal and
+dies in EGL init against a compositor with no buffer sharing (phase 5), so that half is
+expected. The Emacs half was not. Against the committed compositor it started, mapped a
+toplevel, and drew -- 36 commits, 35 frame callbacks, `set_buffer_scale`, plain `damage`,
+`xdg_surface.get_toplevel`, no protocol error -- while binding exactly four globals:
+`wl_compositor`, `wl_shm`, `wl_output`, `xdg_wm_base`. It never bound `wl_seat`, and the
+compositor's chair was as empty as it looked: the log said "keyboard focus on surface 8"
+because the focus call is unconditional, over a seat the client had no handle on.
+
+The cause is in somebody else's source. GDK 3.24 does not bind `wl_seat` when it sees the
+global; it *postpones* it (`gdk/wayland/gdkdisplay-wayland.c`,
+`gdk_registry_handle_global`):
+
+```c
+else if (strcmp (interface, "wl_seat") == 0)
+  {
+    static const char *required_device_manager_globals[] = {
+      "wl_compositor", "wl_data_device_manager", NULL
+    };
+    ... postpone_on_globals_closure (...);
+  }
+```
+
+so a compositor that offers `wl_compositor` and no data device manager binds no seat, and
+every GTK application gets a window it cannot type into or click. Measured both ways before
+anything was implemented: with a six-line stub global added to a live compositor, Emacs bound
+`wl_data_device_manager` v3 *and then* `wl_seat` v4, called `get_data_device`, and died on
+the request being unimplemented -- which located the work exactly.
+
+**Decision.**
+
+1. **The compositor offers `wl_data_device_manager` version 3.** Version 3 is where
+   drag-and-drop actions live (`set_actions`, `source_actions`, `action`,
+   `dnd_drop_performed`, `dnd_finished`, `finish`); version 4 adds one request,
+   `release` on the manager, which frees nothing a v3 client cannot free by disconnecting.
+   The D27 rule applies unchanged: advertise the newest version whose every request is
+   honoured, and let the version gate refuse the rest. GDK binds `MIN (version, 3)`, so v3
+   is also what the clients that needed this will use.
+2. **The selection is the seat's, and a source is used once.** "What the user copied" is one
+   answer per seat, exactly like focus, so `seat-selection` lives beside `seat-keyboard-focus`
+   and every client's `wl_data_device` is told when it changes -- except the client that set
+   it, which the protocol deliberately leaves out. A source is spent by its first use
+   (`used_source` for a second `set_selection`, `invalid_source` for an `offer` after use),
+   because a source that was a selection and then a drag would tell its client two stories
+   about one object.
+3. **An offer is named before anything is said about it.** `wl_data_offer` is created from
+   the server's id range (the target never asked for it), so the order is `data_offer` on the
+   device, then `offer` per mime type, then `source_actions`: an event on an id the client
+   cannot resolve is an event it cannot parse. This is the kind of ordering bug that only a
+   wire-level test with two real connections catches, and one does.
+4. **`receive` is the one place a descriptor crosses between two clients.** The target's
+   descriptor is queued as `wl_data_source.send` on the *source's* output buffer and closed
+   once SCM_RIGHTS has carried it -- the same ownership rule `wl_keyboard.keymap` follows --
+   and a source that is already gone closes it here instead, so a dead client cannot leak a
+   descriptor per `receive`.
+5. **The compositor owns the pointer during a drag, and the drop is not the finish.** While a
+   drag is in flight no client hears `wl_pointer`: the surface under the pointer hears
+   `wl_data_device.enter`/`motion`/`drop` instead (`update-data-drag`, `finish-data-drag`,
+   `cancel-data-drag` on the seat, called from the framework's pointer path). At the drop the
+   target hears `drop` and the source hears `dnd_drop_performed`, and nothing more: the
+   source is finished (`action`, `dnd_finished`) only when the target calls
+   `wl_data_offer.finish` or destroys the offer, because `dnd_finished` is what licenses a
+   *move* to delete the original. Escape cancels; a drop over the bare output cancels.
+6. **Serial validation is where the protocol makes it meaningful.** `start_drag` with a serial
+   this display never issued cancels before it starts (the source is told `cancelled`);
+   `set_selection` with one is logged and ignored, because the protocol defines no error for
+   it and killing a client over a stale number is worse than a clipboard that did not change;
+   *clearing* the selection is allowed whatever the serial says.
+7. **The drag icon is recorded and not drawn.** A surface with no shell role is not
+   composited (D40), and the visible drag is the pointer. That is the one difference from
+   wlroots, and it changes nothing about whether a drop is delivered.
+
+**Evidence.** A new suite, `wayland.test.data-device`, with **13 tests**: the global and the
+device on the seat; `get_data_device` refusing an object that is not a `wl_seat`; a selection
+arriving on the other client's device as `data_offer` + two `offer`s + `source_actions` +
+`selection`, with the offer id from the server's range and the source's own client hearing
+nothing; `accept` naming the mime type to the source and `receive` carrying exactly one
+descriptor between the two connections; clearing as a null-id `selection`; `used_source`,
+`invalid_source` and `invalid_action_mask` as protocol errors with the client disconnected; a
+serial this display never issued changing nothing and not being fatal; an object that is not a
+`wl_data_source` refused rather than crashing the loop; clearing with an expired serial; a drag
+entering the surface under the pointer, moving, dropping, and finishing with `offer.action` and
+`source.action` both `copy`, then `dnd_finished`; and a drag over nothing cancelling its source.
+The whole suite goes from 466 to **480 tests in nineteen suites** (`./scripts/run-tests.sh`,
+`PASSED`); `./scripts/gate.sh` stays **23 passed, 0 failed, 2 skipped**;
+`./scripts/tinywl-parity.sh` still passes 53 headless and 62 nested checks with descriptors
+`4 -> 4`; `./scripts/check-loads.sh` still reports `purity: no libwayland or libwlroots in the
+image`. The compositor test that matters most is one assertion: a headless compositor publishes
+`wl_data_device_manager` beside `wl_seat`.
+Re-measured on the real clients afterwards: Emacs binds six globals -- `wl_compositor` v3,
+`wl_data_device_manager` v3, `wl_output` v2, `wl_seat` v4, `wl_shm` v1, `xdg_wm_base` v1 --
+then `wl_seat.name`/`capabilities`, `get_keyboard`, `get_pointer` and
+`wl_data_device_manager.get_data_device`, with no `Gdk-CRITICAL` line on stderr; the
+compositor's log shows its toplevel mapped and the keyboard focus granted over a keyboard the
+client actually has. `gnome-calculator` binds the same set. Neither was typed into: that needs
+the console walk, which is the user's.
+
+What this does not do: no primary selection (`zwp_primary_selection_device_manager_v1`) and no
+`data-control`, so middle-click paste belongs to a later row; the drag icon is not drawn; no
+touch or tablet drags; no `wl_drm`/`linux-dmabuf`, so a GL client still cannot start at all
+(phase 5); and a selection is not persisted across a client's death -- the source dying empties
+the clipboard, which is what the protocol allows and what GTK expects.
+
+The lesson: **a compositor's global list is a dependency graph written by other people's
+clients, and one missing node does not degrade one feature -- GDK turns a missing data device
+manager into a missing seat, so every GTK application loses keyboard and pointer at once. When
+a client "does not work", trace what it binds before doubting what it says.**

@@ -240,6 +240,10 @@ the framework without a hook table (D7: classes, not vtables)."
     ;; and repeat_info, pointer and keyboard events.  The keymap is generated, not
     ;; compiled, so nothing here links libxkbcommon (D28).
     (srv:add-seat-global display seat)
+    ;; The data device (D64).  Not a nicety: GDK binds wl_seat only once it has
+    ;; seen wl_compositor *and* wl_data_device_manager, so a compositor without
+    ;; this global hands every GTK client a window it cannot type into.
+    (srv:add-data-device-manager-global display)
     (srv:set-seat-keymap seat (input:make-keymap) :repeat-rate 25 :repeat-delay 600)
     ;; tinywl's two bindings, installed here because this compositor is the
     ;; tinywl-shaped default (D33).  A compositor removes them or adds its own.
@@ -585,6 +589,14 @@ focus and a click must not require one (D32)."
   (let ((seat (compositor-seat compositor)))
     (multiple-value-bind (surface x y) (surface-under-cursor compositor)
       (cond
+        ;; A drag owns the pointer while it is in flight (D64): no client hears
+        ;; wl_pointer, and the surface under the pointer hears wl_data_device
+        ;; instead -- enter, motion and drop, which is how a drop target learns
+        ;; what is being dragged over it.
+        ((srv:data-drag-active-p seat)
+         (when (srv:seat-pointer-focus seat)
+           (srv:set-pointer-focus seat nil 0 0))
+         (srv:update-data-drag seat surface x y))
         ((null surface)
          (when (srv:seat-pointer-focus seat)
            (srv:set-pointer-focus seat nil 0 0)))
@@ -902,6 +914,14 @@ focused client."
          (grab (compositor-grab compositor)))
     (input:update-modifiers modifiers name pressed-p)
     (cond
+      ;; Escape abandons a drag (D64), before a grab or a binding can claim it:
+      ;; a drag that cannot be cancelled by the key everybody expects is a drag
+      ;; that ends up dropped somewhere nobody meant.
+      ((and pressed-p (srv:data-drag-active-p seat)
+            (string-equal name "Escape"))
+       (srv:cancel-data-drag seat)
+       (push name (compositor-consumed-keys compositor))
+       t)
       ;; A held-switcher key is compositor state, not a client's input: it is asked
       ;; first, before any grab, because a menu that swallowed Alt+Tab would make
       ;; the switcher unreachable exactly when a menu is up (D51).
@@ -1009,6 +1029,12 @@ sees, and a client that never saw a press must not see its release.")
   (:method ((compositor headless-compositor) button state)
     (let ((seat (compositor-seat compositor))
           (code (or (cdr (assoc button +pointer-buttons+)) button)))
+      ;; A drag in flight swallows the button (D64): the release is the drop, and
+      ;; the press that is still down belongs to whoever started the drag.
+      (when (srv:data-drag-active-p seat)
+        (when (eq state :released)
+          (srv:finish-data-drag seat))
+        (return-from on-pointer-button t))
       (when (eq state :pressed)
         (multiple-value-bind (surface x y) (surface-under-cursor compositor)
           (when surface

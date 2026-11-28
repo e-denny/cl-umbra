@@ -47,6 +47,7 @@
     wayland.test.session
     wayland.test.libinput
     wayland.test.switcher
+    wayland.test.data-device
     wayland.test.tinywl)
   "Test packages, in dependency order.  Each holds one file's tests.")
 

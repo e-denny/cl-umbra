@@ -220,3 +220,57 @@ that catch *our* bugs: a wrong type is an error in this image, not in the wire."
 
 (defmethod wl-touch.cancel ((touch touch))
   (send-event touch +wl-touch-cancel+))
+
+;;; ---------------------------------------------------------------------------
+;;; The data device (D64)
+;;;
+;;; Two of these events carry an object the *server* created -- data_offer and
+;;; selection name a wl_data_offer the target never asked for by id -- which is
+;;; why they are the first events here whose argument is a resource from the
+;;; server's own id range (docs/protocol-layer.md §3).
+;;; ---------------------------------------------------------------------------
+
+(defmethod wl-data-source.target ((source data-source) mime-type)
+  (send-event source +wl-data-source-target+ mime-type))
+
+(defmethod wl-data-source.send ((source data-source) mime-type fd)
+  (send-event source +wl-data-source-send+ mime-type fd))
+
+(defmethod wl-data-source.cancelled ((source data-source))
+  (send-event source +wl-data-source-cancelled+))
+
+(defmethod wl-data-source.dnd-drop-performed ((source data-source))
+  (send-event source +wl-data-source-dnd-drop-performed+))
+
+(defmethod wl-data-source.dnd-finished ((source data-source))
+  (send-event source +wl-data-source-dnd-finished+))
+
+(defmethod wl-data-source.action ((source data-source) action)
+  (send-event source +wl-data-source-action+ action))
+
+(defmethod wl-data-device.data-offer ((device data-device) id)
+  (send-event device +wl-data-device-data-offer+ id))
+
+(defmethod wl-data-device.enter ((device data-device) serial surface x y id)
+  (send-event device +wl-data-device-enter+ serial surface x y id))
+
+(defmethod wl-data-device.leave ((device data-device))
+  (send-event device +wl-data-device-leave+))
+
+(defmethod wl-data-device.motion ((device data-device) time x y)
+  (send-event device +wl-data-device-motion+ time x y))
+
+(defmethod wl-data-device.drop ((device data-device))
+  (send-event device +wl-data-device-drop+))
+
+(defmethod wl-data-device.selection ((device data-device) id)
+  (send-event device +wl-data-device-selection+ id))
+
+(defmethod wl-data-offer.offer ((offer data-offer) mime-type)
+  (send-event offer +wl-data-offer-offer+ mime-type))
+
+(defmethod wl-data-offer.source-actions ((offer data-offer) actions)
+  (send-event offer +wl-data-offer-source-actions+ actions))
+
+(defmethod wl-data-offer.action ((offer data-offer) action)
+  (send-event offer +wl-data-offer-action+ action))

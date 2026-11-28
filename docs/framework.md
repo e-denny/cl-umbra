@@ -40,7 +40,7 @@ decomposition is the part worth copying.
 | `cf.types.xdg-shell` | `wlr_xdg_shell` | 3 | policy over the v1 state machine in `cl-wayland-server`; popups and positioners in 3f (D44) |
 | `cf.types.subcompositor` | `wlr_subcompositor` | 3 | subsurfaces, sync/desync, sublayers |
 | `cf.types.layer-shell` | `wlr_layer_shell_v1` | 6 | panels, notifications, exclusive zones |
-| `cf.types.data-device` | `wlr_data_device_manager` | 6 | clipboard, primary selection, DnD |
+| `cf.types.data-device` | `wlr_data_device_manager` | 6 | the v3 protocol (selection + DnD) lives in `cl-wayland-server/src/data-device.lisp` and is published by the compositor (D64); primary selection, data-control and a drawn drag icon are still phase 6 |
 | `cf.types.decoration` | `wlr_xdg_decoration` | 6 | server-side decoration negotiation |
 | `cf.types.screencopy` | `wlr_screencopy` | 6 | capture, portals |
 | `cf.types.session-lock` | `wlr_session_lock` | 6 | lock screens |

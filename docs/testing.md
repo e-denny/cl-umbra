@@ -57,11 +57,19 @@ ASDF. Assertions are Rove's own: `(ok FORM "description")` for a predicate, and
 `(ok (signals FORM 'condition-type))` for an expected error; a failure prints the test name,
 the assertion, its source location and the arguments' values.
 
-The scripts go through `wayland.test.runner`, which names the eighteen suites instead of letting
+The scripts go through `wayland.test.runner`, which names the nineteen suites instead of letting
 Rove find them from the system. Rove's lookup maps each fasl back to its source, which only
 holds when the fasl is in ASDF's user cache; a build with a different output translation (a
 cold-cache check, a packager) would otherwise run zero suites and report success. The runner
-also fails when a named suite is missing or empty, so "green" always means 463 tests ran.
+also fails when a named suite is missing or empty, so "green" always means 480 tests ran.
+
+`wayland.test.data-device` is the newest suite and the reason it exists is worth a sentence:
+GDK binds `wl_seat` only after it has seen `wl_compositor` **and** `wl_data_device_manager`
+(`gdk/wayland/gdkdisplay-wayland.c` postpones the seat bind on that pair), so a compositor
+without the data device manager gives every GTK client a window it cannot type into. The suite
+drives `wl_data_device_manager` v3 over two raw connections: the selection as an offer, `accept`
+and `receive` across a descriptor, the three protocol errors a source can earn, and a drag that
+enters, moves, drops and finishes (D64).
 
 Two suites test the two ends of our own stack. `wayland.test.client` drives the client against
 a socket pair it writes bytes into by hand. `wayland.test.server` starts a real display on a

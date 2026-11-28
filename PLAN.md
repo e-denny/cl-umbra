@@ -581,6 +581,9 @@ gone; the control surface is exported functions plus a small eval channel.
   `presentation-time`, `wlr-output-management` (basic). `wp-viewporter` is also what
   `xwayland-satellite` needs, so X support becomes almost free once it lands (D12).
 - **Data device:** clipboard, primary selection, drag and drop with serial validation.
+  *Landed early (D64):* `wl_data_device_manager` v3 -- the selection, offers and DnD -- because
+  GDK refuses to bind a seat without it, which cost every GTK client its keyboard. Primary
+  selection and `data-control` remain.
 - **Session:** lock screen path, idle handling, child process supervision, logind
   integration (sleep/lid), output hotplug with re-layout.
 

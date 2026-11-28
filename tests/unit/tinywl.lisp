@@ -495,3 +495,17 @@ connection would make this a gate rather than a test."
         (tinywl::pump-stats session)
         (ok (= deadline (tinywl::session-next-stats session))
             "a second call inside the interval writes nothing")))))
+
+(deftest a-compositor-publishes-the-globals-a-gtk-client-binds
+  ;; GDK postpones its wl_seat bind until it has seen wl_compositor *and*
+  ;; wl_data_device_manager (gdkdisplay-wayland.c), so a compositor without the
+  ;; data device manager gives every GTK client a window and no keyboard at all
+  ;; (D64).  Emacs bound four globals and never the seat before this existed.
+  (with-tinywl (tinywl)
+    (let ((names (mapcar #'srv:global-interface
+                         (srv:display-globals (cf:compositor-display tinywl)))))
+      (ok (member "wl_compositor" names :test #'string=))
+      (ok (member "wl_seat" names :test #'string=))
+      (ok (member "wl_data_device_manager" names :test #'string=)
+          (format nil "the data device manager is published beside the seat (~S)"
+                  names)))))

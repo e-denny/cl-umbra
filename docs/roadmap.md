@@ -396,7 +396,10 @@ Window management
 - [ ] fullscreen/maximize, close, kill, scratchpad (cheap; add if time allows)
 
 Protocols (PLAN §6 "phase 6" rows)
-- [ ] `wl_data_device_manager` (clipboard, primary, DnD with serial validation)
+- [x] `wl_data_device_manager` v3 in `cl-wayland-server` (D64): the selection, offers, `accept`/`receive`
+      with a descriptor crossing between clients, and a drag with `enter`/`motion`/`drop`/`finish` and
+      serial validation. Published by the headless compositor, because GDK binds no seat without it.
+- [ ] primary selection (`zwp_primary_selection_device_manager_v1`) and `data-control`; a drawn drag icon
 - [ ] `wlr-layer-shell`, `xdg-decoration`, `xdg-output`, `fractional-scale`, `viewporter`
 - [ ] `cursor-shape-v1`, `idle-inhibit`, `keyboard-shortcuts-inhibit`
 - [ ] `primary-selection`, `data-control`

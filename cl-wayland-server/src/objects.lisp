@@ -472,7 +472,16 @@ renderer can never be handed a pointer into an unmapped file."))
    (mods-depressed :initform 0 :accessor seat-mods-depressed)
    (mods-latched :initform 0 :accessor seat-mods-latched)
    (mods-locked :initform 0 :accessor seat-mods-locked)
-   (group :initform 0 :accessor seat-group))
+   (group :initform 0 :accessor seat-group)
+   ;; The data device (D64).  The selection belongs to the seat for the same
+   ;; reason focus does: "what the user copied" is one answer per seat, not one
+   ;; per client, and every client's wl_data_device hears when it changes.
+   ;; DRAG is the one drag in flight, or NIL; a second start_drag cancels the
+   ;; first rather than being refused, because a client that lost a button event
+   ;; must not be able to wedge the seat.
+   (selection :initform nil :accessor seat-selection)
+   (data-devices :initform nil :accessor seat-data-devices)
+   (drag :initform nil :accessor seat-drag))
   (:documentation
    "A seat: capabilities, one keymap, focus, and the modifier state.
 
@@ -518,3 +527,106 @@ does it gets two independently identified objects."))
 
 No compositor capability advertises touch yet and no backend injects it, so the
 object exists, receives nothing, and is released normally."))
+
+;;; ---------------------------------------------------------------------------
+;;; The data device, wl_data_device_manager version 3 (D64)
+;;;
+;;; Four objects and one piece of state that is not an object:
+;;;
+;;;   DATA-DEVICE-MANAGER  the global.  Stateless: everything a client can ask it
+;;;                        for is a per-client object.
+;;;   DATA-SOURCE          what one client *offers*: a list of mime types, and the
+;;;                        events that ask it to write them (send) or tell it the
+;;;                        offer was dropped (cancelled).
+;;;   DATA-OFFER           what another client *sees*: the same mime types, and the
+;;;                        requests that accept one and receive it.  An offer is
+;;;                        the bridge, and it exists because the two clients must
+;;;                        never name each other.
+;;;   DATA-DEVICE          one client's handle on a seat's selection: the events
+;;;                        enter/motion/drop/leave for drags, selection for copies.
+;;;
+;;; A source is used exactly once -- for one selection or one drag -- and that is
+;;; the protocol's rule, not a simplification: a second use is `used_source'.
+;;; ---------------------------------------------------------------------------
+
+(defclass data-device-manager (resource)
+  ()
+  (:documentation "wl_data_device_manager: the global, and nothing else.
+
+It carries no state because the protocol gives it none: a source belongs to a
+client, an offer to a target, and the selection to a seat."))
+
+(defclass data-source (resource)
+  ((mime-types :initform nil :accessor data-source-mime-types)
+   ;; The drag-and-drop actions the *source* would accept (copy, move, ask).  The
+   ;; default is the protocol's own: copy and move, no ask.
+   (actions :initform (logior +wl-data-device-manager-dnd-action-copy+
+                              +wl-data-device-manager-dnd-action-move+)
+            :accessor data-source-actions)
+   (used-p :initform nil :accessor data-source-used-p)
+   ;; Set when the source is handed to a seat, so that destroying it can undo
+   ;; exactly the one thing it was used for.
+   (seat :initform nil :accessor data-source-seat)
+   (purpose :initform nil :accessor data-source-purpose))
+  (:documentation
+   "wl_data_source: one client's offer of data.
+
+MIME-TYPES is newest-first, because `offer' may not be called after a selection
+has been set and the order is the source's preference.  PURPOSE is :SELECTION or
+:DRAG once the source has been used, and NIL before: a source offered twice is
+`used_source'."))
+
+(defclass data-offer (resource)
+  ((mime-types :initform nil :accessor data-offer-mime-types)
+   (source :initarg :source :initform nil :accessor data-offer-source)
+   (device :initarg :device :initform nil :accessor data-offer-device)
+   ;; A drag's offer is finished by `finish' after the drop; a selection's offer
+   ;; lives until the selection changes or either side destroys it.
+   (drag-p :initform nil :accessor data-offer-drag-p)
+   (accepted-mime :initform nil :accessor data-offer-accepted-mime)
+   (accepted-p :initform nil :accessor data-offer-accepted-p)
+   (source-actions :initform 0 :accessor data-offer-source-actions)
+   ;; What the target said it would accept (set_actions, v3), and whether it has
+   ;; finished reading a dropped drag.  NIL actions means "never asked", which is
+   ;; not the same as "asked for nothing".
+   (actions :initform nil :accessor data-offer-actions)
+   (preferred-action :initform nil :accessor data-offer-preferred-action)
+   (finished-p :initform nil :accessor data-offer-finished-p))
+  (:documentation
+   "wl_data_offer: the target's view of a data-source.
+
+It is the only object that names both sides: RECEIVE is forwarded to its source as
+wl_data_source.send, which is the one place a descriptor crosses between two
+clients' connections."))
+
+(defclass data-device (resource)
+  ((seat :initarg :seat :initform nil :accessor data-device-seat))
+  (:documentation
+   "wl_data_device: a client's handle on one seat's selection and drags.
+
+Its events are the drag protocol: data_offer + enter when a drag arrives over one
+of the client's surfaces, motion while it moves, drop when the button comes up, and
+leave when it goes elsewhere.  For a copy there is no enter: data_offer then
+selection is the whole of it."))
+
+(defclass data-drag ()
+  ((seat :initarg :seat :reader data-drag-seat)
+   (device :initarg :device :reader data-drag-device)
+   (source :initarg :source :initform nil :reader data-drag-source)
+   (origin :initarg :origin :initform nil :reader data-drag-origin)
+   (icon :initarg :icon :initform nil :reader data-drag-icon)
+   (serial :initarg :serial :initform nil :reader data-drag-serial)
+   ;; The offer and the surface it was given to: the drag's target, as the
+   ;; compositor's hit test last reported it.
+   (offer :initform nil :accessor data-drag-offer)
+   (target :initform nil :accessor data-drag-target)
+   (target-device :initform nil :accessor data-drag-target-device)
+   (x :initform 0 :accessor data-drag-x)
+   (y :initform 0 :accessor data-drag-y))
+  (:documentation
+   "The one drag in flight: created by wl_data_device.start_drag, ended by the
+drop or by a cancel.
+
+It is not a resource, and deliberately so: nobody binds a drag, nobody may destroy
+one, and its lifetime is a button being down.  SOURCE is NIL for a drag with no
+source (the protocol allows one -- a compositor dragging its own icon)."))
