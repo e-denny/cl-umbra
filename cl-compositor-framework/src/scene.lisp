@@ -908,6 +908,35 @@ Called once per drawn frame, not per built list: a frame that could not be drawn
 ;;; The draw
 ;;; ---------------------------------------------------------------------------
 
+(defun scene-background-region (scene items damage)
+  "Where the output's background is visible this frame: DAMAGE minus everything opaque.
+
+The background is the bottom layer of a frame, so it is needed exactly where no item
+paints over it opaquely -- and painted anywhere else it is a full-screen write that the
+next item overwrites.  On a 3840x2160 VT with a 1630x1631 client that is the largest
+single piece of work in a frame and the half of it that never reaches a pixel: the
+client's own opaque region covered its whole window (D68).  DAMAGE is a region, or NIL
+for the whole output.
+
+The answer belongs to SCENE and is valid until the next call, which is what lets one
+scratch region serve it: the caller paints it and nothing else."
+  (let ((region (scene-region scene 0))
+        (box (scene-region scene 1)))
+    (if damage
+        (render:region-copy region damage)
+        ;; Device pixels, not layout: a scale-2 output fills a target twice the size of
+        ;; its coordinate space, and a clip in layout coordinates would fill a quarter
+        ;; of it -- which the old unclipped fill could not have got wrong (D68).
+        (render:region-set-rect region 0 0
+                                (* (scene-width scene) (scene-scale scene))
+                                (* (scene-height scene) (scene-scale scene))))
+    (dolist (item items)
+      (dolist (rect (draw-item-opaque item))
+        (render:region-set-rect box (first rect) (second rect)
+                                (third rect) (fourth rect))
+        (render:region-subtract region region box)))
+    region))
+
 (defun scene-clip-regions (scene items damage)
   "One clip per item: its rectangle, minus everything opaque above it, minus damage.
 
@@ -918,9 +947,13 @@ is needed when nothing opaque is above it and the whole output is being repainte
 which is the common frame (D48)."
   (let* ((count (length items))
          (clips (make-list count))
-         (covered (scene-region scene 0))
-         (visible (scene-region scene 1))
-         (pool-index 2))
+         ;; Region 0 is SCENE-BACKGROUND-REGION's answer for this frame, so the clip
+         ;; arithmetic starts at 1 and never overwrites it while it is being painted.
+         ;; Region 1 doubles as that function's own scratch box, which is free by then:
+         ;; the background is computed and painted before any clip is worked out.
+         (covered (scene-region scene 1))
+         (visible (scene-region scene 2))
+         (pool-index 3))
     (render:region-clear covered)
     (loop for index from (1- count) downto 0
           for item = (nth index items)

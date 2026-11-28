@@ -178,6 +178,7 @@ nothing about seats, toplevels or focus.")
    #:scene-render
    #:scene-render-items
    #:scene-draw-list
+   #:scene-background-region
    #:scene-damage-between
    #:scene-consume-damage
    #:surface-layout-size
@@ -732,6 +733,7 @@ frame clock, and `read-pixels' for golden tests (docs/memory-and-rendering.md §
    #:compositor-frame-change
    #:compositor-client-damage
    #:compositor-draw-ms
+   #:compositor-background-bounds
    #:compositor-partial-frame-count
    #:frame-pixel-device
    #:frame-octets
@@ -977,6 +979,7 @@ that, so a compositor chooses it by binding START-SWITCHER.")
                 #:compositor-frame-change
                 #:compositor-client-damage
                 #:compositor-draw-ms
+                #:compositor-background-bounds
                 #:compositor-partial-frame-count
                 #:frame-pixel-device
                 #:frame-octets
@@ -1112,6 +1115,7 @@ docs/framework.md §1 follow.")
    #:compositor-frame-change
    #:compositor-client-damage
    #:compositor-draw-ms
+   #:compositor-background-bounds
    #:compositor-partial-frame-count
    #:frame-pixel-device
    #:frame-octets

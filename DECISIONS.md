@@ -3625,3 +3625,74 @@ The lesson: a log that was designed before the explanation was known turned "the
 somewhere in the VT path" into three excluded candidates and one named experiment -- and the
 field that would have been easiest to leave out (`cli`, the clients' own answer) is the one that
 showed the whole-window repaints were never ours to begin with.
+
+## D68 — The background is a bottom layer, not a first pass
+
+**Date:** 2026-11-28
+**Status:** accepted
+**Slice:** the VT frame's cost, after D67 explained the flicker as cadence
+
+D67 left the hover flicker explained as cadence: every intermediate state Emacs paints
+gets its own frame, and at 60 Hz each is on the glass for 16 ms, which reads as a
+highlight moving with the pointer — while at our VT cost of 100-200 ms per whole-window
+frame the same states are each held long enough to be read as a flash of lighter lines.
+The explanation is only useful if the cost comes down, and the largest single piece of
+work in a frame was not drawing anything: it was painting a background under pixels that
+the very next composite overwrites.
+
+**Decision.**
+
+1. **Only what is visible gets painted.** `scene-background-region` answers the region
+   where the background can actually be seen: the frame's damage minus the union of
+   every draw item's *opaque* rectangles.  The background is the bottom layer, so an
+   opaque item above it means those pixels are written twice for one result.  The
+   compositor paints the background clipped to that region and skips the fill entirely
+   when it is empty.
+2. **Opaque means what the client said, or what the format says.** An XRGB8888 buffer
+   is opaque everywhere by definition; an ARGB8888 buffer hides only what its committed
+   opaque region says.  That predicate already existed for occlusion culling
+   (`opaque-rects-from-surface`), so the two uses cannot drift apart: one function, both
+   the culling and the background.
+3. **The saving is recorded, not claimed.** `compositor-background-bounds` is the last
+   frame's background region, NIL when nothing was painted — the same kind of evidence
+   `compositor-last-damage` is, so a test reads "no background at all" instead of
+   believing a comment.
+4. **Scratch regions are numbered, and region 0 is the background's.** The clip pass
+   reused 0 and 1; it now starts at 1, because the background region is computed and
+   painted before any clip is worked out and must not be overwritten while it is being
+   used.
+
+**Evidence.** The predicate is measured on a real client before being trusted: a
+headless Emacs over this code advertises `((26 31 745 805) (34 23 729 8))` — its whole
+window — so a whole-window damage of 2.66 M device pixels at 3840x2160 now costs one
+composite instead of a fill and a composite. The suite goes from 495 to **502 tests in
+nineteen suites** (`./scripts/run-tests.sh`, PASSED): four in `wayland.test.scene`
+(the arithmetic: an opaque rectangle leaves a hole, a half-transparent one does not, a
+damage box entirely under an opaque item needs no background, and the whole-output region
+is the *device* size — checked on the region's rectangles, because the *bounds* of "the
+output minus a window in the middle" are still the output) and three in `wayland.test.drm-modeset` at the pixels: a frame whose damage
+is exactly an opaque window paints no background at all, an ARGB window with no opaque
+region keeps its background, and a fully transparent hole in an opaque-looking window
+still shows the background rather than the frame before it — the control that the
+optimisation did not go too far. The cursor is untouched by this and stays unoptimised
+on purpose: the arrow is not opaque everywhere (it has transparent pixels), so it hides
+nothing; anything else would paint stale corners.
+
+The first version of this slice had the bug the gate caught and no unit test would have:
+with no damage the region was built from the scene's *layout* size, so a scale-2 nested
+session (a 200x160 target for a 100x80 scene) had three quarters of its buffer filled
+with nothing.  The old code filled unclipped, so the scale never had to be thought about;
+clipping puts it back, and the fourth test above is that quarter.
+
+What this does not do: it does not make the VT fast, and it does not prove the hover
+flicker gone — that needs a run on the VT with `draw=` before and after, which is the
+console's business. It also does not touch the second half of the same waste: when
+Emacs repaints its whole window, *both* scanout buffers have to composite it (the change
+into one, then that buffer's debt into the other), and that is inherent to two buffers
+rather than to the background. Phase 5's GBM/EGL scanout is what removes the CPU
+compositing entirely.
+
+The lesson: the cheapest pixel is the one nothing will look at. A compositor that knows
+which surfaces are opaque can skip a whole-screen write per frame, and the only thing
+that made it findable was asking what a frame's work actually was — not what it painted,
+but what of it survived the next layer.

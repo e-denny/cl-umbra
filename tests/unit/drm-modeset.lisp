@@ -1050,7 +1050,9 @@ always pads, so a target built from width x 4 would shear (D58)."))
     (ffi:chmod-path (string-right-trim "/" path) #o700)
     path))
 
-(defmacro with-vt-frames ((output compositor &key (width 200) (height 150)) &body body)
+(defmacro with-vt-frames ((output compositor &key (width 200) (height 150)
+                                          (background #xFF000000))
+                          &body body)
   "A seat-enabled VT output on padded real memory, and a compositor wired to it.
 
 The out-of-body unwind order is the real one (D59): the compositor first, because it
@@ -1065,6 +1067,7 @@ descriptor back."
                    (,output (vt:open-vt-output ,session :path "/dev/dri/card0"))
                    (,compositor (cf:make-headless-compositor
                                  :width ,width :height ,height
+                                 :background ,background
                                  :display-name "vt-damage-0"
                                  :runtime-dir ,directory)))
               (unwind-protect
@@ -1681,3 +1684,85 @@ check that a frame drawn into one buffer was not flipped over another."
           (declare (ignore presented))
           (ok (= arrow pixel)
               (format nil "nor on the next buffer (~8,'0X)" pixel)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; The background is a bottom layer, not a first pass (D68)
+;;; ---------------------------------------------------------------------------
+;;
+;; Every frame used to fill the whole damage with the background and then composite
+;; the client's pixels over it.  A window that says it is opaque covers its own
+;; rectangle completely, so that fill was work whose only result was to be
+;; overwritten -- at 3840x2160 with a 1630x1631 client, half of every whole-window
+;; frame.  The bounds are recorded for the same reason the damage is: a test can read
+;; "nothing was painted" instead of believing a comment.
+
+(deftest a-frame-covered-entirely-by-an-opaque-window-paints-no-background
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (let* ((grey #xFF202020)
+           (buffer (make-client-buffer 120 60 grey))
+           (surface (client-surface compositor buffer :x 40 :y 30)))
+      ;; GTK's answer, measured on a real Emacs window: the whole surface opaque.
+      (setf (srv:surface-opaque-region surface) '((0 0 120 60)))
+      ;; The first frame has nothing to trust, so it repaints the output and the
+      ;; background is needed everywhere the window is not.
+      (cf:render-frame compositor)
+      (ok (cf:compositor-background-bounds compositor)
+          (format nil "a full frame still paints the background around the window (~S)"
+                  (cf:compositor-background-bounds compositor)))
+      ;; The second frame paints the other buffer whole (it has never been given
+      ;; anything), so the background is painted around the window again.
+      (cf:render-frame compositor)
+      (ok (cf:compositor-background-bounds compositor)
+          "the other buffer is painted whole too")
+      ;; Now the damage is exactly the window: every pixel of it is opaque, so there is
+      ;; no background to paint at all.
+      (setf (srv:surface-damage-since-frame surface) '((0 0 120 60)))
+      (cf:render-frame compositor)
+      (ok (null (cf:compositor-background-bounds compositor))
+          (format nil "a frame of opaque window alone paints nothing behind it (~S)"
+                  (cf:compositor-background-bounds compositor)))
+      (multiple-value-bind (pixel presented) (render-and-read compositor output 60 40)
+        (declare (ignore presented))
+        ;; The window moved to a new buffer; the band must still be the window's.
+        (ok (= grey pixel) "and the window's own pixels are what reach the screen")))))
+
+(deftest a-window-that-says-nothing-keeps-its-background
+  ;; The control for the test above: without an opaque region an ARGB window hides
+  ;; only what its alpha says, so the background has to be painted underneath it.
+  (with-vt-frames (output compositor :width 200 :height 150)
+    (let* ((grey #xFF202020)
+           (buffer (make-client-buffer 120 60 grey))
+           (surface (client-surface compositor buffer :x 40 :y 30)))
+      (cf:render-frame compositor)
+      (setf (srv:surface-damage-since-frame surface) '((0 0 120 60)))
+      (cf:render-frame compositor)
+      (let ((bounds (cf:compositor-background-bounds compositor)))
+        (ok bounds
+            (format nil "an ARGB window with no opaque region keeps its background (~S)"
+                    bounds))
+        (ok (and bounds
+                 (<= (first bounds) 40) (<= (second bounds) 30))
+            (format nil "and the background region covers the window's box (~S)" bounds))))))
+
+(deftest a-transparent-hole-shows-the-background-not-the-frame-before
+  ;; The witness that the optimisation did not go too far: the background is skipped
+  ;; only where something opaque covers it.  The window is painted grey, then the
+  ;; client commits a buffer with a fully transparent hole and damages just the hole;
+  ;; the hole's pixels must become the background, not stay grey.
+  (with-vt-frames (output compositor :width 200 :height 150 :background #xFFFF00FF)
+    (let* ((grey #xFF202020)
+           (buffer (make-client-buffer 120 60 grey))
+           (clear (make-client-buffer 120 60 #x00000000))
+           (surface (client-surface compositor buffer :x 40 :y 30)))
+      (cf:inject-pointer-motion compositor 180 130)
+      (cf:render-frame compositor)
+      (cf:render-frame compositor)
+      (multiple-value-bind (pixel presented) (render-and-read compositor output 60 40)
+        (declare (ignore presented))
+        (ok (= grey pixel) "the window is on the screen"))
+      (setf (srv:surface-current-buffer surface) clear
+            (srv:surface-damage-since-frame surface) '((10 10 4 4)))
+      (multiple-value-bind (pixel presented) (render-and-read compositor output 50 40)
+        (declare (ignore presented))
+        (ok (= #xFFFF00FF pixel)
+            (format nil "the hole shows the background, not the window (~8,'0X)" pixel))))))

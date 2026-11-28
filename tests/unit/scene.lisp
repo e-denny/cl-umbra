@@ -21,6 +21,7 @@
   (:use #:cl #:rove)
   (:local-nicknames (#:scene #:cf.scene)
                     (#:grab #:cf.grab)
+                    (#:render #:cf.render.pixman)
                     (#:srv #:wayland.server))
   (:documentation "Tests for cf.scene: hit testing, stacking, positions, cursor."))
 
@@ -1038,3 +1039,74 @@ which is a question about nodes and the numbers the configure left behind.  Retu
             "while the window stays inside the output")
         (cf:inject-pointer-leave compositor)
         (ok (null (cf:compositor-grab compositor)) "and a leave ends it")))))
+
+;;; ---------------------------------------------------------------------------
+;;; The background is a bottom layer, not a first pass (D68)
+;;; ---------------------------------------------------------------------------
+;;
+;; The frame used to fill its whole damage with the background and then composite the
+;; client over it.  An opaque item covers its rectangle completely, so the fill under
+;; it is a write whose only reader is the composite that overwrites it.  What is left
+;; to test here is the arithmetic -- the pixels are a backend's test.
+
+(defun rect-covers-p (rect x y)
+  (destructuring-bind (rx ry rw rh) rect
+    (and (<= rx x (+ rx rw -1)) (<= ry y (+ ry rh -1)))))
+
+(defun region-covers-p (region x y)
+  (some (lambda (rect) (rect-covers-p rect x y))
+        (render:region-rectangles region)))
+
+(deftest the-background-region-leaves-out-what-an-opaque-item-covers
+  (let* ((scene (scene:make-scene 100 100))
+         (opaque (scene:scene-add-node scene (scene:make-rect-node 40 30 #xFF102030)
+                                       :x 10 :y 20))
+         (items (scene:scene-draw-list scene)))
+    (declare (ignore opaque))
+    (let ((region (scene:scene-background-region scene items nil)))
+      (ok (region-covers-p region 5 5)
+          "the part of the output nothing covers is background")
+      (ok (not (region-covers-p region 30 30))
+          "the part an opaque rectangle covers is not"))))
+
+(deftest a-transparent-item-does-not-hide-the-background
+  (let* ((scene (scene:make-scene 100 100))
+         (see-through (scene:scene-add-node scene
+                                            (scene:make-rect-node 40 30 #x80102030)
+                                            :x 10 :y 20))
+         (items (scene:scene-draw-list scene)))
+    (declare (ignore see-through))
+    (let ((region (scene:scene-background-region scene items nil)))
+      (ok (region-covers-p region 30 30)
+          "a half-transparent rectangle still needs the background under it")
+      (ok (equal '((0 0 100 100)) (render:region-rectangles region))
+          "and the background region is the whole output"))))
+
+(deftest a-damage-box-under-an-opaque-item-needs-no-background
+  (let* ((scene (scene:make-scene 100 100))
+         (opaque (scene:scene-add-node scene (scene:make-rect-node 40 30 #xFF102030)
+                                       :x 10 :y 20))
+         (items (scene:scene-draw-list scene))
+         (damage (render:make-region)))
+    (declare (ignore opaque))
+    (render:region-add damage 20 25 6 5)
+    (unwind-protect
+         (ok (render:region-empty-p
+              (scene:scene-background-region scene items damage))
+             "a frame that repaints only opaque pixels paints no background")
+      (render:destroy-region damage))))
+
+(deftest a-whole-output-background-is-sized-in-device-pixels
+  ;; The mistake the gate caught: the region for "no damage" is the whole target, and a
+  ;; scale-2 scene's target is twice its layout size in each direction.  A clip in
+  ;; layout coordinates fills a quarter of the buffer and the rest keeps the previous
+  ;; frame -- which is invisible on a compositor whose window covers it, and wrong.
+  (let* ((scene (scene:make-scene 100 80 :scale 2))
+         (region (scene:scene-background-region scene '() nil)))
+    (ok (equal '((0 0 200 160)) (render:region-rectangles region))
+        (format nil "a scale-2 whole-output background is 200x160 (~S)"
+                (render:region-rectangles region))))
+  (let* ((scene (scene:make-scene 100 80))
+         (region (scene:scene-background-region scene '() nil)))
+    (ok (equal '((0 0 100 80)) (render:region-rectangles region))
+        "and a scale-1 one is the layout size")))

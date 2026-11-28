@@ -89,6 +89,10 @@ SLOT-VALUE shows a different one."))
    ;; tells a backend painting too much from a client repainting too often.  The flip
    ;; wait is the backend's own, so it is measured there and not here (D66).
    (draw-ms :initform 0.0 :accessor compositor-draw-ms)
+   ;; Where the last frame painted its background: (X Y WIDTH HEIGHT), or NIL when
+   ;; nothing opaque left room for it (D68).  Evidence, so "we stopped painting under
+   ;; opaque windows" is a number a test reads rather than a claim in a comment.
+   (background-bounds :initform :full :accessor compositor-background-bounds)
    ;; How many frames repainted less than the whole output, and the bounding box of
    ;; the last frame's damage (:full or (X Y WIDTH HEIGHT)): evidence a gate can
    ;; read instead of inferring it from timing.
@@ -1368,10 +1372,18 @@ because those are answers to clients, not to pixels (D48)."
              (drawn '()))
         (let ((draw-start (ffi:monotonic-seconds)))
           (unless empty
-            (when (not full)
-              (render:target-set-clip target damage))
-            (render:fill-target target (compositor-background compositor))
-            (render:target-clear-clip target))
+            ;; The background is the bottom layer, so it is painted only where no item
+            ;; paints over it opaquely: a client's opaque region covers its whole
+            ;; window, and filling under it is a write the next composite overwrites
+            ;; (D68).
+            (let ((background (scene:scene-background-region
+                               scene items (unless full damage))))
+              (setf (compositor-background-bounds compositor)
+                    (render:region-bounds background))
+              (unless (render:region-empty-p background)
+                (render:target-set-clip target background)
+                (render:fill-target target (compositor-background compositor))
+                (render:target-clear-clip target))))
           ;; Even an empty frame walks the items: no pixel is touched, but every
           ;; mapped surface comes back in DRAWN, so its buffer is released and its
           ;; frame callback fires.  A client that asks for a frame without damaging
