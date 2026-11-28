@@ -964,7 +964,19 @@ Preconditions the automated clauses cannot arrange for themselves:
       (`tinywl: resumed after N.Ns asleep; ...`) were not captured for this walk -- the soak
       should keep them
 - [ ] lid close/open (if laptop)
-- [ ] 8-hour soak with an animating client
+- [ ] 8-hour soak with an animating client. `./scripts/tinywl.sh --drm --card /dev/dri/card1
+      --stats 60 --launch weston-simple-shm 2>&1 | tee /tmp/soak.log` makes the compositor write
+      one line a minute -- `uptime rss fds frames partial flips sequence cables resumes consed
+      gctime` -- so the hours are a table and not an impression (D61, D62, D63 counters in one
+      place, plus allocation and collector time so a growing `rss` can be told from a leak). A
+      pass is a constant `fds`, `rss` returning to a plateau, `partial` close to `frames`,
+      `sequence - flips` not growing, and no error or stall in the log.
+      **Partial run 2026-11-27 (38 minutes, not the eight hours):** 136,830 frames at 59.0-60.0
+      fps in every sample, `fds` constant at 34, 136,826 of 136,830 frames partial (four full
+      frames at startup), no empty frames, and no error, warning or lag line in the log. `rss`
+      went 148,436 -> 162,896 kB in ~2 MB steps with one 40 MB drop at 29 min and a walk back up,
+      which is the collector moving its high-water mark rather than a leak -- and is exactly what
+      `consed`/`gctime` were added to settle. Eight hours remain
 - [ ] client kill -9 during drag, during resize, during a popup grab
 - [ ] fill the disk / exhaust fds / fork bomb a client, then disconnect it
 

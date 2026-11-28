@@ -208,6 +208,9 @@
                %pointer-get-button-state) :int
   (event :pointer))
 
+(cffi:defcfun ("libinput_event_pointer_has_axis" %pointer-has-axis) :int
+  (event :pointer) (axis :int))
+
 (cffi:defcfun ("libinput_event_pointer_get_scroll_value" %pointer-get-scroll-value) :double
   (event :pointer) (axis :int))
 
@@ -587,16 +590,24 @@ not one this module decodes."
                  (raw-event-button-state raw)
                  (button-state-keyword (%pointer-get-button-state event))))
           ((:scroll-wheel :scroll-finger :scroll-continuous)
-           ;; SCROLL_WHEEL and SCROLL_CONTINUOUS carry one axis per event, chosen by
-           ;; what has a value; libinput documents both axes as always populated, so
-           ;; the axis is the one whose value is not zero, vertical when both are.
-           (let ((vertical (%pointer-get-scroll-value event +axis-vertical+))
-                 (horizontal (%pointer-get-scroll-value event +axis-horizontal+)))
-             (if (and (zerop vertical) (not (zerop horizontal)))
-                 (setf (raw-event-axis raw) :horizontal
-                       (raw-event-value raw) horizontal)
-                 (setf (raw-event-axis raw) :vertical
-                       (raw-event-value raw) vertical))))
+           ;; A scroll event carries one axis per event, and the axis that has no value
+           ;; must not be read: libinput's header requires HAS_AXIS first, and reading an
+           ;; unset axis is a client bug it logs -- which is how the soak found this
+           ;; (`client bug: value requested for unset axis', thirteen times on one
+           ;; scroll).  Horizontal when it is the only axis set, vertical otherwise.
+           (let ((horizontal-p (plusp (%pointer-has-axis event +axis-horizontal+)))
+                 (vertical-p (plusp (%pointer-has-axis event +axis-vertical+))))
+             (cond
+               ((and horizontal-p (not vertical-p))
+                (setf (raw-event-axis raw) :horizontal
+                      (raw-event-value raw) (%pointer-get-scroll-value
+                                            event +axis-horizontal+)))
+               (t
+                (setf (raw-event-axis raw) :vertical
+                      (raw-event-value raw)
+                      (if vertical-p
+                          (%pointer-get-scroll-value event +axis-vertical+)
+                          0d0))))))
           ((:device-added :device-removed)
            (setf (raw-event-device raw) (device-info (%event-get-device event)))))
         raw))))

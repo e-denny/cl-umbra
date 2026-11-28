@@ -410,7 +410,13 @@ connection would make this a gate rather than a test."
     (ok (null (getf options :card)) "leaves the card to START's default")
     (ok (null (getf options :connector)) "and the connector to the card's first connected one"))
   (ok (signals (tinywl::parse-arguments '("--drm" "--card")) 'error)
-      "a card option with no value is an error a person can read"))
+      "a card option with no value is an error a person can read")
+  ;; --stats is the soak's clock: a command line, because an environment variable is
+  ;; what a 30-minute run forgot the first time.
+  (let ((options (tinywl::parse-arguments '("--drm" "--stats" "60"))))
+    (ok (= 60 (getf options :stats-interval)) "a soak can ask for a line a minute"))
+  (ok (signals (tinywl::parse-arguments '("--stats" "soon")) 'error)
+      "and a statistics interval that is not a number is an error"))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The keys the kernel cannot see (a VT session)
@@ -451,3 +457,41 @@ connection would make this a gate rather than a test."
         (ok (equal '(12 1)
                    (progn (fire 1) (fire 12) (seat-switches recording)))
             "each binding asks for its own VT, not the last one the loop saw")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Numbers for a soak (phase 4 exit gate, item 4)
+;;; ---------------------------------------------------------------------------
+
+(deftest a-stats-line-is-one-line-of-numbers
+  (let ((line (tinywl::format-stats :uptime 60 :rss 12345 :fds 40 :frames 700
+                                    :partial 690 :flips 700 :sequence 700
+                                    :hotplugs 1 :resumes 2 :consed 4096 :gc 3.25)))
+    (ok (search "uptime=60s" line) "uptime in seconds")
+    (ok (search "rss=12345kB" line) "RSS in kilobytes")
+    (ok (search "fds=40" line) "the descriptor count")
+    (ok (search "frames=700 partial=690" line) "frames, and how many were partial")
+    (ok (search "flips=700" line) "flips, when there is a VT output")
+    (ok (search "cables=1 resumes=2" line) "and the two counters a soak watches")
+    (ok (and (search "consed=4096MB" line) (search "gctime=" line))
+        "allocation and collector time, so RSS can be told apart from a leak"))
+  (let ((line (tinywl::format-stats :uptime 5 :rss 1 :fds 2 :frames 3 :partial 0)))
+    (ok (not (search "flips" line))
+        "no VT output means no flip count, rather than a zero that reads like a stop")))
+
+(deftest the-soak-numbers-are-readable-from-proc
+  (ok (plusp (tinywl::self-rss-kb)) "RSS is a positive number of kilobytes")
+  (ok (plusp (tinywl::self-fd-count)) "and there is at least one descriptor open"))
+
+(deftest a-stats-deadline-advances-once-per-interval
+  (with-tinywl (tinywl)
+    (let ((session (make-instance 'tinywl::session
+                                  :mode :headless :compositor tinywl
+                                  :stats-interval 60
+                                  :started-at (get-internal-real-time))))
+      (ok (zerop (tinywl::session-next-stats session)) "nothing written yet")
+      (tinywl::pump-stats session)
+      (ok (plusp (tinywl::session-next-stats session)) "the first call writes and arms the clock")
+      (let ((deadline (tinywl::session-next-stats session)))
+        (tinywl::pump-stats session)
+        (ok (= deadline (tinywl::session-next-stats session))
+            "a second call inside the interval writes nothing")))))

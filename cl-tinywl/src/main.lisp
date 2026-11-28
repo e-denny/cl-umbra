@@ -29,6 +29,9 @@
                         tinywl-1 nested and on a VT, where the session compositor
                         very likely owns wayland-0)
   --runtime-dir DIR     where the socket goes (default XDG_RUNTIME_DIR)
+  --stats SECONDS       write one line of numbers (rss, fds, frames, partial, flips)
+                        every SECONDS to the log, for a soak; 0 (default) is quiet, and
+                        TINYWL_STATS_INTERVAL sets the same thing from the environment
   --help                this text
 
 With none of --headless, --nested or --drm, tinywl nests when WAYLAND_DISPLAY
@@ -93,6 +96,12 @@ is the one interface that must not need a library to read."
                  ;; compositor's policy is the running image's (D14) -- set TINYWL:*TERMINAL-COMMAND*.
                  ((string= argument "--launch") (setf options (list* :launch (list (value)) options)) (skip))
                  ((string= argument "--runtime-dir") (setf options (list* :runtime-dir (value) options)) (skip))
+                 ((string= argument "--stats")
+                  (let ((seconds (parse-integer (value) :junk-allowed t)))
+                    (unless (and seconds (not (minusp seconds)))
+                      (error "~A is not a statistics interval; it is a number of seconds" (value)))
+                    (setf options (list* :stats-interval seconds options)))
+                  (skip))
                  ((string= argument "--help") (setf help t))
                  (t (error "unknown option ~S" argument)))))
     (when help

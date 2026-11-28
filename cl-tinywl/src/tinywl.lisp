@@ -453,7 +453,13 @@ make the parity script meaningless."
    (input :initarg :input :initform nil :reader session-input)
    ;; When this session next asks the card about its cables, in INTERNAL-TIME units.
    ;; Zero means "at the first opportunity" (D62).
-   (next-hotplug-poll :initform 0 :accessor session-next-hotplug-poll))
+   (next-hotplug-poll :initform 0 :accessor session-next-hotplug-poll)
+   ;; A soak needs numbers and not impressions: every STATS-INTERVAL seconds one line
+   ;; with RSS, descriptors, frames, flips and the cable/resume counters.  Zero is the
+   ;; default, because a normal run's log should be quiet (TINYWL_STATS_INTERVAL).
+   (stats-interval :initarg :stats-interval :initform 0 :reader session-stats-interval)
+   (next-stats :initform 0 :accessor session-next-stats)
+   (started-at :initarg :started-at :initform 0 :reader session-started-at))
   (:documentation
    "A running tinywl: its compositor, and the backend behind it -- nested, or a VT."))
 
@@ -473,7 +479,8 @@ make the parity script meaningless."
                    launch
                    pump
                    (card "/dev/dri/card0") connector crtc-id
-                   (seat-name "seat0"))
+                   (seat-name "seat0")
+                   (stats-interval (stats-interval-from-environment)))
   "Start tinywl and return its SESSION.
 
 :headless renders into memory and takes input only from CF:INJECT-*; :nested renders
@@ -497,7 +504,9 @@ layout size it asked for (D49)."
                     :display-name (or display-name "wayland-0")
                     :runtime-dir (or runtime-dir (uiop:getenv "XDG_RUNTIME_DIR")))))
        (when launch (launch tinywl :command launch))
-       (make-instance 'session :mode :headless :compositor tinywl)))
+       (make-instance 'session :mode :headless :compositor tinywl
+                               :stats-interval stats-interval
+                               :started-at (get-internal-real-time))))
     (:nested
      (let* ((parent (parent-socket-path (or parent-path (uiop:getenv "WAYLAND_DISPLAY"))))
             (backend (progn
@@ -527,11 +536,12 @@ WAYLAND_DISPLAY in the environment"))
      (start-vt :width width :height height :scale scale :background background
                :display-name display-name :runtime-dir runtime-dir
                :launch launch :card card :connector connector :crtc-id crtc-id
-               :seat-name seat-name))))
+               :seat-name seat-name :stats-interval stats-interval))))
 
 (defun start-vt (&key width height (scale 1) (background #xFF000000)
                      display-name runtime-dir launch
-                     (card "/dev/dri/card0") connector crtc-id (seat-name "seat0"))
+                     (card "/dev/dri/card0") connector crtc-id (seat-name "seat0")
+                     (stats-interval (stats-interval-from-environment)))
   "Start tinywl on a VT: a seat, the card it hands out, and a compositor on it.
 
 This is 4d-3's join, and the order is the constraint: the seat comes first (the
@@ -612,7 +622,9 @@ needs a seat that is usable now, which is what dispatch inside OPEN-SESSION is f
             (cf:request-frame tinywl))
           (when launch (launch tinywl :command launch))
           (make-instance 'session :mode :drm :compositor tinywl
-                                  :vt-output output :seat seat :input input))
+                                  :vt-output output :seat seat :input input
+                                  :stats-interval stats-interval
+                                  :started-at (get-internal-real-time)))
       (error (condition)
         ;; A half-started VT session holds the screen: give it back before the error
         ;; reaches the person who typed the command.
@@ -687,6 +699,90 @@ the next poll asks again"))
         (error (condition)
           (srv:log-message :warn "tinywl: asking the card about its cable failed: ~A"
                            condition))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Numbers for a soak (phase 4 exit gate, item 4)
+;;; ---------------------------------------------------------------------------
+;;
+;; The soak's claims are numbers -- flat RSS, flat descriptor count, no stalls -- so the
+;; compositor writes them itself, once a minute, into the same log the other transitions
+;; go to.  Reading RSS from /proc is the same one-file read a shell sampler would do, and
+;; the counters are the ones this compositor already keeps as evidence (D61, D62, D63):
+;; frame count, partial frames, flips, the frame sequence, cables and resumes.
+
+(defun stats-interval-from-environment ()
+  "TINYWL_STATS_INTERVAL seconds, or 0 for a quiet log (the default)."
+  (or (ignore-errors (parse-integer (uiop:getenv "TINYWL_STATS_INTERVAL")))
+      0))
+
+(defun self-rss-kb ()
+  "This process's resident set size in kilobytes, from /proc/self/status; 0 if unreadable."
+  (handler-case
+      (with-open-file (stream #p"/proc/self/status" :direction :input)
+        (loop for line = (read-line stream nil nil)
+              while line
+              when (and (>= (length line) 6) (string= "VmRSS:" line :end2 6))
+                do (return (or (parse-integer line :start 6 :junk-allowed t) 0))
+              finally (return 0)))
+    (error () 0)))
+
+(defun self-fd-count ()
+  (length (uiop:directory-files #p"/proc/self/fd/")))
+
+(defun self-consed-mb ()
+  "Bytes allocated since startup, in megabytes; NIL where the Lisp does not count.
+
+RSS alone cannot tell a leak from a heap high-water mark: the soak of 2026-11-27 climbed
+about 2 MB every six minutes, then dropped 40 MB in one sample, which is a collector and
+not a leak -- but only allocation and collection time can say so (D63's item 4)."
+  #+sbcl (round (sb-ext:get-bytes-consed) (* 1024 1024))
+  #-sbcl nil)
+
+(defun self-gc-seconds ()
+  "Time spent collecting so far, in seconds; NIL where the Lisp does not count."
+  #+sbcl (/ (float sb-ext:*gc-run-time*) internal-time-units-per-second)
+  #-sbcl nil)
+
+(defun format-stats (&key uptime rss fds frames partial flips sequence hotplugs resumes
+                           consed gc)
+  "One line of numbers; the VT-only fields are omitted when the session has no output.
+
+Pure, so its shape is a test: a soak's log is read by eye and by grep, and a field that
+silently disappears is a measurement that looks like a regression."
+  (concatenate 'string
+               (format nil "tinywl: stats uptime=~Ds rss=~DkB fds=~D frames=~D partial=~D"
+                       uptime rss fds frames partial)
+               (if flips (format nil " flips=~D sequence=~D" flips sequence) "")
+               (if hotplugs (format nil " cables=~D resumes=~D" hotplugs resumes) "")
+               (if consed (format nil " consed=~DMB gctime=~,1Fs" consed gc) "")))
+
+(defun stats-line (session)
+  (let* ((compositor (session-compositor session))
+         (output (session-vt-output session))
+         (scanout (and output (vt:vt-output-scanout output))))
+    (format-stats
+     :uptime (round (- (get-internal-real-time) (session-started-at session))
+                    internal-time-units-per-second)
+     :rss (self-rss-kb)
+     :fds (self-fd-count)
+     :frames (cf:compositor-frame-count compositor)
+     :partial (cf:compositor-partial-frame-count compositor)
+     :flips (and scanout (cf.backend.drm:drm-scanout-frames scanout))
+     :sequence (and output (vt:vt-output-frame-sequence output))
+     :hotplugs (and output (vt:vt-output-hotplug-count output))
+     :resumes (and output (vt:vt-output-resume-count output))
+     :consed (self-consed-mb)
+     :gc (self-gc-seconds))))
+
+(defun pump-stats (session)
+  "Write one statistics line when the clock says so; does nothing by default."
+  (let ((interval (session-stats-interval session)))
+    (when (plusp interval)
+      (let ((now (get-internal-real-time)))
+        (when (>= now (session-next-stats session))
+          (setf (session-next-stats session)
+                (+ now (round (* interval internal-time-units-per-second))))
+          (srv:log-message :info "~A" (stats-line session)))))))
 
 (defun resume-hardware (session)
   "Let input reopen its devices after a resume (D56, D63).
@@ -763,6 +859,7 @@ own loop; `run' is the loop for a session on its own."
        (pump-hotplug session)
        (srv:run-once (cf:compositor-display (session-compositor session))
                      :timeout timeout))))
+  (pump-stats session)
   session)
 
 (defun run (session &key (timeout 0.05))

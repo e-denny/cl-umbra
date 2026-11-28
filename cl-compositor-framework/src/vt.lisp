@@ -214,8 +214,8 @@ being wrong -- so an enabled output returns itself.
 A failure anywhere after the descriptor arrived puts the descriptor back and
 re-signals: the screen is not half taken, and the seat is not asked to close what
 the compositor still holds.  QUIET-P is for the two callers that are not a person's
-command -- the seat's enable hook, and a poll that found the cable back -- where "no
-connector this output may program" is a state to stay in, not an error to raise
+command -- the seat's enable hook, and a poll that found the cable back -- where `no
+connector this output may program' is a state to stay in, not an error to raise
 (D62)."
   (when (vt-output-enabled-p output)
     (return-from enable-vt-output output))

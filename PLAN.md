@@ -522,6 +522,12 @@ after a resume is full), the CRTC is verified with `GETCRTC` and programmed agai
 ours, and input is reopened through the seat -- four tests, and the walk is done
 (2026-11-27: several suspends, the desktop fully redrawn each return). Exit-gate item 5 is walked,
 and what is left of phase 4 is the 8-hour soak (item 4).
+`TINYWL_STATS_INTERVAL=60` now makes tinywl write one line a minute with RSS, descriptors,
+frames, partial frames, flips and the cable/resume counters, so that soak produces a table: the
+item is a measurement, and a measurement needs the numbers in the log rather than in an
+impression. A 38-minute partial run on 2026-11-27 (136,830 frames, constant descriptor count,
+136,826 partial frames, no stalls) is the first half of that evidence; the eight hours are
+still owed.
 
 ### Phase 5 — GPU acceleration, only where it earns its place (5-8 weeks)
 
